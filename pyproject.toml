@@ -1,0 +1,17 @@
+[project]
+name = "drill-writer"
+version = "0.1.0"
+description = "Professional-grade marching band drill writing prototype"
+requires-python = ">=3.10"
+dependencies = [
+    "PySide6>=6.7",
+]
+
+[project.optional-dependencies]
+audio = [
+    "pygame>=2.5",
+    "pydub>=0.25",
+]
+
+[tool.ruff]
+line-length = 100
