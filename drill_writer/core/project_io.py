@@ -2,10 +2,20 @@ from __future__ import annotations
 
 import json
 import shutil
+from math import ceil, sqrt
 from pathlib import Path
 from typing import Any
 
-from drill_writer.core.models import Dot, DrillProject, DrillSet, Marker, ProjectMetadata
+from drill_writer.core.models import (
+    AudioVersion,
+    Dot,
+    DotConstraint,
+    DrillProject,
+    DrillSet,
+    Marker,
+    ProjectMetadata,
+    TimingEvent,
+)
 
 
 PROJECTS_DIR = Path.home() / "Documents" / "Drill Pirate Projects"
@@ -18,6 +28,7 @@ def create_project_folder(
     tempo: float,
     counts_per_set: int,
     time_signature: str,
+    marcher_count: int = 30,
 ) -> Path:
     project_dir = root / safe_folder_name(title)
     (project_dir / "audio").mkdir(parents=True, exist_ok=True)
@@ -38,7 +49,7 @@ def create_project_folder(
     )
     project = DrillProject(
         metadata=metadata,
-        dots=default_dots(),
+        dots=default_dots(marcher_count),
         sets=[
             DrillSet(
                 name="Set 1",
@@ -48,6 +59,11 @@ def create_project_folder(
                 dot_positions={},
             )
         ],
+        audio_versions=[
+            AudioVersion(name="Main Audio", audio_file=audio_file, active=True)
+        ]
+        if audio_file
+        else [],
     )
     project.ensure_set_positions()
     save_project(project_dir, project)
@@ -80,7 +96,26 @@ def load_project(project_dir: Path) -> DrillProject:
     sets = [DrillSet.from_json(item) for item in read_json(project_dir / "sets.json").get("sets", [])]
     show = read_json(project_dir / "show.json")
     markers = [Marker.from_json(item) for item in show.get("markers", [])]
-    project = DrillProject(metadata=metadata, dots=dots, sets=sets, markers=markers)
+    constraints = [DotConstraint.from_json(item) for item in show.get("constraints", [])]
+    audio_versions = [
+        AudioVersion.from_json(item)
+        for item in show.get("audio_versions", [])
+    ]
+    if not audio_versions and metadata.audio_file:
+        audio_versions = [AudioVersion(name="Main Audio", audio_file=metadata.audio_file, active=True)]
+    timing_events = [
+        TimingEvent.from_json(item)
+        for item in show.get("timing_events", [])
+    ]
+    project = DrillProject(
+        metadata=metadata,
+        dots=dots,
+        sets=sets,
+        markers=markers,
+        constraints=constraints,
+        audio_versions=audio_versions,
+        timing_events=timing_events,
+    )
     project.ensure_set_positions()
     return project
 
@@ -97,6 +132,9 @@ def save_project(project_dir: Path, project: DrillProject) -> None:
             "title": project.metadata.show_title,
             "version": 1,
             "markers": [marker.to_json() for marker in project.markers],
+            "constraints": [constraint.to_json() for constraint in project.constraints],
+            "audio_versions": [audio.to_json() for audio in project.audio_versions],
+            "timing_events": [event.to_json() for event in project.timing_events],
         },
     )
 
@@ -116,20 +154,68 @@ def safe_folder_name(title: str) -> str:
     return safe.strip().replace(" ", "_") or "Untitled_Show"
 
 
-def default_dots() -> list[Dot]:
+def default_dots(count: int = 30) -> list[Dot]:
+    positions = optimized_starting_block(count)
     dots: list[Dot] = []
-    for index in range(30):
-        section = "winds" if index < 24 else "battery"
-        row = index // 10
-        col = index % 10
+    for index, (x, y) in enumerate(positions):
+        section = "winds"
         dots.append(
             Dot(
                 id=f"dot{index + 1:03d}",
                 name=f"Dot {index + 1}",
-                x=-45 + col * 10,
-                y=-12 + row * 8,
+                x=x,
+                y=y,
                 color="#e53935",
                 section=section,
+                layer="Main",
             )
         )
     return dots
+
+
+def optimized_starting_block(count: int) -> list[tuple[float, float]]:
+    count = max(1, int(count))
+    field_width = 112.0
+    field_height = 48.0
+    preferred_spacing = 2.0
+    min_spacing = 0.9
+    best_columns = 1
+    best_rows = count
+    best_spacing = min_spacing
+    best_score = float("inf")
+
+    for columns in range(1, count + 1):
+        rows = ceil(count / columns)
+        horizontal_spacing = field_width / max(1, columns - 1) if columns > 1 else preferred_spacing
+        vertical_spacing = field_height / max(1, rows - 1) if rows > 1 else preferred_spacing
+        spacing = min(preferred_spacing, horizontal_spacing, vertical_spacing)
+        if spacing < min_spacing:
+            continue
+        aspect_score = abs((columns / rows) - 2.0)
+        spacing_score = abs(preferred_spacing - spacing)
+        score = spacing_score * 5 + aspect_score
+        if score < best_score:
+            best_columns = columns
+            best_rows = rows
+            best_spacing = spacing
+            best_score = score
+
+    if best_score == float("inf"):
+        best_columns = min(count, max(1, int(sqrt(count * field_width / field_height))))
+        best_rows = ceil(count / best_columns)
+        best_spacing = min(field_width / max(1, best_columns - 1), field_height / max(1, best_rows - 1))
+
+    block_width = (best_columns - 1) * best_spacing
+    block_height = (best_rows - 1) * best_spacing
+    start_x = -block_width / 2
+    start_y = block_height / 2
+    positions: list[tuple[float, float]] = []
+    for row in range(best_rows):
+        row_count = min(best_columns, count - len(positions))
+        row_width = (row_count - 1) * best_spacing
+        row_start_x = -row_width / 2
+        for column in range(row_count):
+            positions.append((row_start_x + column * best_spacing, start_y - row * best_spacing))
+            if len(positions) >= count:
+                return positions
+    return positions

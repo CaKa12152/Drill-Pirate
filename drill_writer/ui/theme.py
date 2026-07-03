@@ -55,12 +55,61 @@ QSplitter::handle {
     background: #0f1116;
 }
 #ProjectCard {
-    background: #20242d;
-    border: 1px solid #343a46;
-    border-radius: 8px;
+    background: #1d222b;
+    border: 1px solid #2f3744;
+    border-radius: 13px;
 }
 #ProjectCard:hover {
-    background: #282e39;
+    background: #242b36;
     border-color: #f7d154;
+}
+#HomePage {
+    background: #13161c;
+}
+#HomeHero {
+    background: #1a1f28;
+    border: 1px solid #2d3542;
+    border-radius: 16px;
+}
+#HomeTitle {
+    color: #f2f4f8;
+}
+#HomeTabs::pane {
+    border: 0;
+    background: transparent;
+}
+#HomeTabs QTabBar::tab {
+    background: #202630;
+    border: 1px solid #303947;
+    border-radius: 9px;
+    color: #cdd5e3;
+    padding: 8px 18px;
+    margin-right: 8px;
+}
+#HomeTabs QTabBar::tab:selected {
+    background: #2f6fed;
+    color: white;
+    border-color: #5d91ff;
+}
+#PluginCard {
+    background: #1d222b;
+    border: 1px solid #2f3744;
+    border-radius: 13px;
+}
+#PluginCard:hover {
+    background: #242b36;
+    border-color: #6f7f99;
+}
+#PluginStatusActive {
+    background: #1d7f46;
+    color: white;
+    border-radius: 8px;
+    padding: 3px 8px;
+}
+#PluginStatusInactive {
+    background: #343b47;
+    color: #cbd3e1;
+    border-radius: 8px;
+    padding: 3px 8px;
 }
 """

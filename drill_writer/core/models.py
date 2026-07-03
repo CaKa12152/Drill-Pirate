@@ -19,6 +19,10 @@ class Dot:
     y: float
     color: str = "#e53935"
     section: str = ""
+    instrument: str = ""
+    rank: str = ""
+    equipment: str = ""
+    layer: str = "Main"
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -28,6 +32,10 @@ class Dot:
             "y": self.y,
             "color": self.color,
             "section": self.section,
+            "instrument": self.instrument,
+            "rank": self.rank,
+            "equipment": self.equipment,
+            "layer": self.layer,
         }
 
     @classmethod
@@ -39,6 +47,10 @@ class Dot:
             y=float(payload.get("y", 0)),
             color=str(payload.get("color", "#e53935")),
             section=str(payload.get("section", "")),
+            instrument=str(payload.get("instrument", "")),
+            rank=str(payload.get("rank", "")),
+            equipment=str(payload.get("equipment", "")),
+            layer=str(payload.get("layer", "Main")),
         )
 
 
@@ -50,6 +62,8 @@ class DrillSet:
     tempo: float | None = None
     dot_positions: dict[str, tuple[float, float]] = field(default_factory=dict)
     path_anchors: dict[str, list[tuple[float, float]]] = field(default_factory=dict)
+    path_controls: dict[str, list[dict[str, tuple[float, float]]]] = field(default_factory=dict)
+    count_positions: dict[str, dict[float, tuple[float, float]]] = field(default_factory=dict)
     transition: Transition = Transition.LINEAR
 
     @property
@@ -69,6 +83,25 @@ class DrillSet:
             "path_anchors": {
                 dot_id: [{"x": point[0], "y": point[1]} for point in anchors]
                 for dot_id, anchors in self.path_anchors.items()
+            },
+            "path_controls": {
+                dot_id: [
+                    {
+                        control_name: {"x": point[0], "y": point[1]}
+                        for control_name, point in controls.items()
+                    }
+                    for controls in control_sets
+                ]
+                for dot_id, control_sets in self.path_controls.items()
+                if control_sets
+            },
+            "count_positions": {
+                dot_id: {
+                    f"{count:g}": {"x": position[0], "y": position[1]}
+                    for count, position in sorted(keyframes.items())
+                }
+                for dot_id, keyframes in self.count_positions.items()
+                if keyframes
             },
             "transition": self.transition.value,
         }
@@ -90,6 +123,28 @@ class DrillSet:
                     for point in anchors
                 ]
                 for dot_id, anchors in payload.get("path_anchors", {}).items()
+            },
+            path_controls={
+                str(dot_id): [
+                    {
+                        control_name: (
+                            float(point.get("x", 0)),
+                            float(point.get("y", 0)),
+                        )
+                        for control_name, point in controls.items()
+                        if isinstance(point, dict)
+                    }
+                    for controls in control_sets
+                    if isinstance(controls, dict)
+                ]
+                for dot_id, control_sets in payload.get("path_controls", {}).items()
+            },
+            count_positions={
+                str(dot_id): {
+                    float(count): (float(pos.get("x", 0)), float(pos.get("y", 0)))
+                    for count, pos in keyframes.items()
+                }
+                for dot_id, keyframes in payload.get("count_positions", {}).items()
             },
             transition=Transition(payload.get("transition", Transition.LINEAR.value)),
         )
@@ -137,11 +192,95 @@ class Marker:
 
 
 @dataclass(slots=True)
+class DotConstraint:
+    name: str
+    constraint_type: str
+    dot_ids: list[str]
+    spacing: float = 0.0
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "name": self.name,
+            "constraint_type": self.constraint_type,
+            "dot_ids": list(self.dot_ids),
+            "spacing": self.spacing,
+        }
+
+    @classmethod
+    def from_json(cls, payload: dict[str, Any]) -> "DotConstraint":
+        return cls(
+            name=str(payload.get("name", "Constraint")),
+            constraint_type=str(payload.get("constraint_type", "line")),
+            dot_ids=[str(dot_id) for dot_id in payload.get("dot_ids", [])],
+            spacing=float(payload.get("spacing", 0)),
+        )
+
+
+@dataclass(slots=True)
+class AudioVersion:
+    name: str
+    audio_file: str
+    active: bool = False
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "name": self.name,
+            "audio_file": self.audio_file,
+            "active": self.active,
+        }
+
+    @classmethod
+    def from_json(cls, payload: dict[str, Any]) -> "AudioVersion":
+        return cls(
+            name=str(payload.get("name", "Audio")),
+            audio_file=str(payload.get("audio_file", "")),
+            active=bool(payload.get("active", False)),
+        )
+
+
+@dataclass(slots=True)
+class TimingEvent:
+    event_type: str
+    count: float
+    milliseconds: float = 0.0
+    tempo: float = 0.0
+    end_count: float = 0.0
+    end_tempo: float = 0.0
+    label: str = ""
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "event_type": self.event_type,
+            "count": self.count,
+            "milliseconds": self.milliseconds,
+            "tempo": self.tempo,
+            "end_count": self.end_count,
+            "end_tempo": self.end_tempo,
+            "label": self.label,
+        }
+
+    @classmethod
+    def from_json(cls, payload: dict[str, Any]) -> "TimingEvent":
+        return cls(
+            event_type=str(payload.get("event_type", "anchor")),
+            count=float(payload.get("count", 1)),
+            milliseconds=float(payload.get("milliseconds", 0)),
+            tempo=float(payload.get("tempo", 0)),
+            end_count=float(payload.get("end_count", 0)),
+            end_tempo=float(payload.get("end_tempo", 0)),
+            label=str(payload.get("label", "")),
+        )
+
+
+@dataclass(slots=True)
 class DrillProject:
     metadata: ProjectMetadata
     dots: list[Dot] = field(default_factory=list)
     sets: list[DrillSet] = field(default_factory=list)
     markers: list[Marker] = field(default_factory=list)
+    constraints: list[DotConstraint] = field(default_factory=list)
+    audio_versions: list[AudioVersion] = field(default_factory=list)
+    timing_events: list[TimingEvent] = field(default_factory=list)
 
     def dot_by_id(self, dot_id: str) -> Dot | None:
         return next((dot for dot in self.dots if dot.id == dot_id), None)
@@ -160,3 +299,18 @@ class DrillProject:
                 if dot_id not in valid_dot_ids:
                     drill_set.dot_positions.pop(dot_id, None)
                     drill_set.path_anchors.pop(dot_id, None)
+                    drill_set.path_controls.pop(dot_id, None)
+                    drill_set.count_positions.pop(dot_id, None)
+            for dot_id in list(drill_set.count_positions):
+                if dot_id not in valid_dot_ids:
+                    drill_set.count_positions.pop(dot_id, None)
+            for dot_id in list(drill_set.path_controls):
+                if dot_id not in valid_dot_ids:
+                    drill_set.path_controls.pop(dot_id, None)
+            for dot_id, anchors in list(drill_set.path_anchors.items()):
+                controls = drill_set.path_controls.get(dot_id, [])
+                if len(controls) > len(anchors):
+                    drill_set.path_controls[dot_id] = controls[: len(anchors)]
+        for constraint in self.constraints:
+            constraint.dot_ids = [dot_id for dot_id in constraint.dot_ids if dot_id in valid_dot_ids]
+        self.constraints = [constraint for constraint in self.constraints if constraint.dot_ids]

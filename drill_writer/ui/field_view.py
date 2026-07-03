@@ -28,6 +28,12 @@ class EditorTool(str, Enum):
     SCATTER = "scatter"
     MIRROR = "mirror"
     SHAPE_LINE = "shape_line"
+    CIRCLE = "circle"
+    RECTANGLE = "rectangle"
+    SPIRAL = "spiral"
+    BLOCK = "block"
+    LASSO = "lasso"
+    SVG_SHAPE = "svg_shape"
 
 
 class DotItem(QGraphicsEllipseItem):
@@ -88,6 +94,20 @@ class PathAnchorItem(QGraphicsEllipseItem):
         self.setZValue(26)
 
 
+class PathTangentItem(QGraphicsEllipseItem):
+    def __init__(self, dot_id: str, index: int, control_name: str, scale: float) -> None:
+        radius = 0.42 * scale
+        super().__init__(-radius, -radius, radius * 2, radius * 2)
+        self.dot_id = dot_id
+        self.index = index
+        self.control_name = control_name
+        self.setBrush(QColor("#66d9ef"))
+        self.setPen(QPen(QColor("#ffffff"), 0.1 * scale))
+        self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, True)
+        self.setCursor(Qt.CursorShape.CrossCursor)
+        self.setZValue(27)
+
+
 class FieldView(QGraphicsView):
     selection_changed = Signal(list)
     dot_moved = Signal(str, float, float)
@@ -96,6 +116,7 @@ class FieldView(QGraphicsView):
     preview_handle_moved = Signal(str, float, float)
     path_anchor_added = Signal(str, float, float)
     path_anchor_moved = Signal(str, int, float, float)
+    path_tangent_moved = Signal(str, int, str, float, float)
     shape_anchor_added = Signal(float, float)
     shape_anchor_toggled = Signal(str)
 
@@ -118,14 +139,23 @@ class FieldView(QGraphicsView):
         self.show_ghosts = True
         self.preview_items: list[QGraphicsItem] = []
         self.path_items: list[QGraphicsItem] = []
+        self.snap_items: list[QGraphicsItem] = []
+        self.snap_enabled = False
+        self.snap_threshold = 0.85
+        self.visible_section = "All"
+        self.visible_layer = "All"
         self._formation_callback: Callable[[EditorTool], None] | None = None
         self._pan_start: QPointF | None = None
         self._drag_start_positions: dict[str, tuple[float, float]] = {}
         self._active_preview_handle: PreviewHandleItem | None = None
         self._active_path_anchor: PathAnchorItem | None = None
+        self._active_path_tangent: PathTangentItem | None = None
         self._preserved_selection_ids: list[str] = []
         self._suppress_next_context_menu = False
-        self._manual_drag_item: PreviewHandleItem | PathAnchorItem | None = None
+        self._manual_drag_item: PreviewHandleItem | PathAnchorItem | PathTangentItem | None = None
+        self._lasso_points: list[QPointF] = []
+        self._lasso_item: QGraphicsPathItem | None = None
+        self._lasso_additive = False
         self.draw_field()
 
     def set_project(self, project: DrillProject) -> None:
@@ -134,6 +164,7 @@ class FieldView(QGraphicsView):
 
     def set_tool(self, tool: EditorTool) -> None:
         self.active_tool = tool
+        self.clear_snap_guides()
         self.setDragMode(
             QGraphicsView.DragMode.RubberBandDrag
             if tool == EditorTool.SELECT
@@ -141,6 +172,28 @@ class FieldView(QGraphicsView):
         )
         for item in self.dot_items.values():
             item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, tool == EditorTool.SELECT)
+
+    def set_snap_enabled(self, enabled: bool) -> None:
+        self.snap_enabled = enabled
+        if not enabled:
+            self.clear_snap_guides()
+
+    def set_visibility_filters(self, section: str, layer: str) -> None:
+        self.visible_section = section
+        self.visible_layer = layer
+        self.apply_visibility_filters()
+
+    def apply_visibility_filters(self) -> None:
+        if not self.project:
+            return
+        for dot_id, item in self.dot_items.items():
+            dot = self.project.dot_by_id(dot_id)
+            if not dot:
+                item.setVisible(False)
+                continue
+            section_visible = self.visible_section == "All" or dot.section == self.visible_section
+            layer_visible = self.visible_layer == "All" or dot.layer == self.visible_layer
+            item.setVisible(section_visible and layer_visible)
 
     def set_formation_callback(self, callback: Callable[[EditorTool], None]) -> None:
         self._formation_callback = callback
@@ -151,6 +204,11 @@ class FieldView(QGraphicsView):
             for item in self.scene.selectedItems()
             if isinstance(item, DotItem)
         ]
+
+    def normalized_item(self, item: QGraphicsItem | None) -> QGraphicsItem | None:
+        if isinstance(item, QGraphicsTextItem) and isinstance(item.parentItem(), DotItem):
+            return item.parentItem()
+        return item
 
     def preserve_selection(self) -> None:
         self._preserved_selection_ids = self.selected_dot_ids()
@@ -246,8 +304,10 @@ class FieldView(QGraphicsView):
         self,
         paths: dict[str, list[tuple[float, float]]],
         anchors: dict[str, list[tuple[float, float]]],
+        controls: dict[str, list[dict[str, tuple[float, float]]]] | None = None,
     ) -> None:
         self.clear_paths()
+        controls = controls or {}
         for dot_id, points in paths.items():
             if len(points) > 1:
                 item = PathCurveItem(dot_id, self.make_painter_path(points), self.scale_factor)
@@ -258,6 +318,26 @@ class FieldView(QGraphicsView):
                 anchor_item.setPos(self.field_to_scene(*anchor))
                 self.scene.addItem(anchor_item)
                 self.path_items.append(anchor_item)
+                control_set = controls.get(dot_id, [])
+                if index < len(control_set):
+                    for control_name in ("in", "out"):
+                        control_point = control_set[index].get(control_name)
+                        if not control_point:
+                            continue
+                        line = QGraphicsLineItem()
+                        anchor_scene = self.field_to_scene(*anchor)
+                        control_scene = self.field_to_scene(*control_point)
+                        line.setLine(anchor_scene.x(), anchor_scene.y(), control_scene.x(), control_scene.y())
+                        line.setPen(QPen(QColor("#66d9ef"), 0.1 * self.scale_factor, Qt.PenStyle.DotLine))
+                        line.setZValue(6)
+                        line.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+                        self.scene.addItem(line)
+                        self.path_items.append(line)
+
+                        tangent_item = PathTangentItem(dot_id, index, control_name, self.scale_factor)
+                        tangent_item.setPos(control_scene)
+                        self.scene.addItem(tangent_item)
+                        self.path_items.append(tangent_item)
 
     def clear_paths(self) -> None:
         for item in self.path_items:
@@ -291,6 +371,7 @@ class FieldView(QGraphicsView):
             )
             self.scene.addItem(item)
             self.dot_items[dot.id] = item
+        self.apply_visibility_filters()
 
     def draw_field(self) -> None:
         self.scene.clear()
@@ -333,9 +414,13 @@ class FieldView(QGraphicsView):
             self._pan_start = event.position()
             self.setCursor(Qt.CursorShape.ClosedHandCursor)
             return
-        clicked_item = self.itemAt(event.position().toPoint())
+        if self.active_tool == EditorTool.LASSO and event.button() == Qt.MouseButton.LeftButton:
+            self.start_lasso(event)
+            return
+        clicked_item = self.normalized_item(self.itemAt(event.position().toPoint()))
         self._active_preview_handle = clicked_item if isinstance(clicked_item, PreviewHandleItem) else None
         self._active_path_anchor = clicked_item if isinstance(clicked_item, PathAnchorItem) else None
+        self._active_path_tangent = clicked_item if isinstance(clicked_item, PathTangentItem) else None
         if event.button() == Qt.MouseButton.RightButton:
             if isinstance(clicked_item, PathCurveItem):
                 x, y = self.scene_to_field(self.mapToScene(event.position().toPoint()))
@@ -353,7 +438,7 @@ class FieldView(QGraphicsView):
                 event.accept()
                 return
         if self.active_tool != EditorTool.SELECT and event.button() == Qt.MouseButton.LeftButton:
-            if isinstance(clicked_item, (PreviewHandleItem, PathAnchorItem)):
+            if isinstance(clicked_item, (PreviewHandleItem, PathAnchorItem, PathTangentItem)):
                 self.preserve_selection()
                 self._manual_drag_item = clicked_item
                 self.restore_preserved_selection()
@@ -371,12 +456,13 @@ class FieldView(QGraphicsView):
             and event.button() == Qt.MouseButton.LeftButton
             and not isinstance(clicked_item, PreviewHandleItem)
             and not isinstance(clicked_item, PathAnchorItem)
+            and not isinstance(clicked_item, PathTangentItem)
             and not event.modifiers() & Qt.KeyboardModifier.ShiftModifier
         ):
             event.accept()
             return
         if event.button() == Qt.MouseButton.LeftButton and isinstance(
-            clicked_item, (PreviewHandleItem, PathAnchorItem)
+            clicked_item, (PreviewHandleItem, PathAnchorItem, PathTangentItem)
         ):
             self.preserve_selection()
             self._manual_drag_item = clicked_item
@@ -385,16 +471,33 @@ class FieldView(QGraphicsView):
             return
 
         self._drag_start_positions = {}
+        if (
+            event.button() == Qt.MouseButton.LeftButton
+            and self.active_tool == EditorTool.SELECT
+            and isinstance(clicked_item, DotItem)
+            and not clicked_item.isSelected()
+            and not event.modifiers() & Qt.KeyboardModifier.ShiftModifier
+        ):
+            for item in self.scene.selectedItems():
+                item.setSelected(False)
+            clicked_item.setSelected(True)
         if event.button() == Qt.MouseButton.LeftButton:
             for item in self.scene.selectedItems():
                 if isinstance(item, DotItem):
                     self._drag_start_positions[item.dot_id] = self.scene_to_field(item.pos())
         super().mousePressEvent(event)
+        if event.button() == Qt.MouseButton.LeftButton and self.active_tool == EditorTool.SELECT:
+            for item in self.scene.selectedItems():
+                if isinstance(item, DotItem):
+                    self._drag_start_positions.setdefault(item.dot_id, self.scene_to_field(item.pos()))
 
     def mouseMoveEvent(self, event) -> None:  # type: ignore[override]
         if self._manual_drag_item is not None:
             self._manual_drag_item.setPos(self.mapToScene(event.position().toPoint()))
             event.accept()
+            return
+        if self._lasso_item is not None and self.active_tool == EditorTool.LASSO:
+            self.update_lasso(event)
             return
         if self._pan_start is not None:
             delta = event.position() - self._pan_start
@@ -403,6 +506,12 @@ class FieldView(QGraphicsView):
             self.verticalScrollBar().setValue(self.verticalScrollBar().value() - int(delta.y()))
             return
         super().mouseMoveEvent(event)
+        if (
+            self.active_tool == EditorTool.SELECT
+            and self.snap_enabled
+            and self._drag_start_positions
+        ):
+            self.apply_snap_to_selected()
 
     def mouseReleaseEvent(self, event) -> None:  # type: ignore[override]
         if event.button() == Qt.MouseButton.MiddleButton:
@@ -430,11 +539,27 @@ class FieldView(QGraphicsView):
             self.restore_preserved_selection()
             event.accept()
             return
+        if self._active_path_tangent is not None:
+            handle = self._active_path_tangent
+            x, y = self.scene_to_field(handle.pos())
+            self.path_tangent_moved.emit(handle.dot_id, handle.index, handle.control_name, x, y)
+            self._active_path_tangent = None
+            self._manual_drag_item = None
+            self.restore_preserved_selection()
+            event.accept()
+            return
+        if self._lasso_item is not None and self.active_tool == EditorTool.LASSO:
+            self.finish_lasso()
+            event.accept()
+            return
         super().mouseReleaseEvent(event)
         if self.active_tool != EditorTool.SELECT:
             self._drag_start_positions = {}
             self.selection_changed.emit(self.selected_dot_ids())
+            self.clear_snap_guides()
             return
+        if self.snap_enabled and self._drag_start_positions:
+            self.apply_snap_to_selected()
         moved_positions: dict[str, tuple[float, float]] = {}
         for item in self.scene.selectedItems():
             if isinstance(item, DotItem):
@@ -448,14 +573,138 @@ class FieldView(QGraphicsView):
             dot_id, position = next(iter(moved_positions.items()))
             self.dot_moved.emit(dot_id, position[0], position[1])
         self._drag_start_positions = {}
+        self.clear_snap_guides()
         self.selection_changed.emit(self.selected_dot_ids())
+
+    def start_lasso(self, event) -> None:
+        self._lasso_points = [self.mapToScene(event.position().toPoint())]
+        self._lasso_additive = bool(event.modifiers() & Qt.KeyboardModifier.ShiftModifier)
+        self._lasso_item = QGraphicsPathItem()
+        self._lasso_item.setPen(QPen(QColor("#b057ff"), 0.16 * self.scale_factor, Qt.PenStyle.DashLine))
+        self._lasso_item.setBrush(QColor(176, 87, 255, 35))
+        self._lasso_item.setZValue(40)
+        self.scene.addItem(self._lasso_item)
+        event.accept()
+
+    def update_lasso(self, event) -> None:
+        if self._lasso_item is None:
+            return
+        self._lasso_points.append(self.mapToScene(event.position().toPoint()))
+        path = QPainterPath(self._lasso_points[0])
+        for point in self._lasso_points[1:]:
+            path.lineTo(point)
+        self._lasso_item.setPath(path)
+        event.accept()
+
+    def finish_lasso(self) -> None:
+        if self._lasso_item is None or len(self._lasso_points) < 3:
+            self.clear_lasso()
+            return
+        path = QPainterPath(self._lasso_points[0])
+        for point in self._lasso_points[1:]:
+            path.lineTo(point)
+        path.closeSubpath()
+        if not self._lasso_additive:
+            for item in self.scene.selectedItems():
+                item.setSelected(False)
+        for item in self.dot_items.values():
+            if item.isVisible() and path.contains(item.pos()):
+                item.setSelected(True)
+        self.clear_lasso()
+        self.selection_changed.emit(self.selected_dot_ids())
+
+    def clear_lasso(self) -> None:
+        if self._lasso_item is not None:
+            self.scene.removeItem(self._lasso_item)
+            self._lasso_item = None
+        self._lasso_points.clear()
+
+    def apply_snap_to_selected(self) -> None:
+        selected_items = [
+            item for item in self.scene.selectedItems()
+            if isinstance(item, DotItem) and item.isVisible()
+        ]
+        if not selected_items:
+            self.clear_snap_guides()
+            return
+
+        selected_ids = {item.dot_id for item in selected_items}
+        candidate_x = [yard for yard in range(-50, 55, 5)]
+        candidate_y = [-20.0, 0.0, 20.0]
+        for dot_id, item in self.dot_items.items():
+            if dot_id in selected_ids or not item.isVisible():
+                continue
+            x, y = self.scene_to_field(item.pos())
+            candidate_x.append(x)
+            candidate_y.append(y)
+
+        best_x: tuple[float, float] | None = None
+        best_y: tuple[float, float] | None = None
+        for item in selected_items:
+            x, y = self.scene_to_field(item.pos())
+            for candidate in candidate_x:
+                delta = candidate - x
+                if abs(delta) < 0.001:
+                    continue
+                if abs(delta) <= self.snap_threshold and (
+                    best_x is None or abs(delta) < abs(best_x[0])
+                ):
+                    best_x = (delta, candidate)
+            for candidate in candidate_y:
+                delta = candidate - y
+                if abs(delta) < 0.001:
+                    continue
+                if abs(delta) <= self.snap_threshold and (
+                    best_y is None or abs(delta) < abs(best_y[0])
+                ):
+                    best_y = (delta, candidate)
+
+        if best_x is None and best_y is None:
+            self.clear_snap_guides()
+            return
+
+        if best_y is not None and (best_x is None or abs(best_y[0]) < abs(best_x[0])):
+            delta = best_y[0]
+            for item in selected_items:
+                x, y = self.scene_to_field(item.pos())
+                item.setPos(self.field_to_scene(x, y + delta))
+            self.show_snap_guide("horizontal", best_y[1])
+            return
+
+        if best_x is not None:
+            delta = best_x[0]
+            for item in selected_items:
+                x, y = self.scene_to_field(item.pos())
+                item.setPos(self.field_to_scene(x + delta, y))
+            self.show_snap_guide("vertical", best_x[1])
+
+    def show_snap_guide(self, orientation: str, value: float) -> None:
+        self.clear_snap_guides()
+        width = 120 * self.scale_factor
+        height = 53.333 * self.scale_factor
+        pen = QPen(QColor("#b057ff"), 0.12 * self.scale_factor, Qt.PenStyle.DashLine)
+        if orientation == "vertical":
+            x = value * self.scale_factor
+            guide = QGraphicsLineItem(x, -height / 2, x, height / 2)
+        else:
+            y = -value * self.scale_factor
+            guide = QGraphicsLineItem(-width / 2, y, width / 2, y)
+        guide.setPen(pen)
+        guide.setZValue(30)
+        self.scene.addItem(guide)
+        self.snap_items.append(guide)
+
+    def clear_snap_guides(self) -> None:
+        for item in self.snap_items:
+            self.scene.removeItem(item)
+        self.snap_items.clear()
 
     def contextMenuEvent(self, event) -> None:  # type: ignore[override]
         if self._suppress_next_context_menu:
             self._suppress_next_context_menu = False
             event.accept()
             return
-        clicked_item = self.itemAt(event.pos())
+        clicked_item = self.normalized_item(self.itemAt(event.pos()))
         if isinstance(clicked_item, PathCurveItem):
             x, y = self.scene_to_field(self.mapToScene(event.pos()))
             self.path_anchor_added.emit(clicked_item.dot_id, x, y)
@@ -471,6 +720,11 @@ class FieldView(QGraphicsView):
             "Preview Line",
             "Preview Curve",
             "Preview Arc",
+            "Preview Circle",
+            "Preview Rectangle",
+            "Preview Spiral",
+            "Preview Block",
+            "Preview SVG Shape",
             "Preview Scatter",
             "Preview Mirror",
             "Preview Shape Line",

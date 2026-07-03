@@ -5,12 +5,14 @@ import subprocess
 import tempfile
 import time
 import zipfile
+import csv
 from pathlib import Path
 from typing import Callable
 
 from PySide6.QtCore import QMarginsF, QRectF, QSize, Qt
 from PySide6.QtGui import QColor, QFont, QImage, QPageLayout, QPageSize, QPainter, QPdfWriter
 
+from drill_writer.core.analysis import detect_path_warnings
 from drill_writer.core.animation import interpolate_project
 from drill_writer.core.models import DrillProject
 from drill_writer.core.project_io import save_project
@@ -119,6 +121,221 @@ def export_drill_sheet_pdf(
             )
     finally:
         painter.end()
+
+
+def export_dot_book_pdf(
+    output_path: Path,
+    project: DrillProject,
+    progress_callback: ProgressCallback | None = None,
+) -> None:
+    writer = QPdfWriter(str(output_path))
+    writer.setResolution(150)
+    writer.setPageLayout(
+        QPageLayout(
+            QPageSize(QPageSize.PageSizeId.Letter),
+            QPageLayout.Orientation.Portrait,
+            QMarginsF(0.45, 0.45, 0.45, 0.45),
+            QPageLayout.Unit.Inch,
+        )
+    )
+    painter = QPainter(writer)
+    try:
+        total = max(1, len(project.dots))
+        for dot_index, dot in enumerate(project.dots):
+            if dot_index:
+                writer.newPage()
+            if progress_callback:
+                progress_callback("Rendering dot book PDF", dot_index + 1, total)
+            page_rect = QRectF(writer.pageLayout().paintRectPixels(writer.resolution()))
+            painter.fillRect(page_rect, QColor("#ffffff"))
+            painter.setPen(QColor("#111318"))
+            painter.setFont(QFont("Arial", 18, QFont.Weight.Bold))
+            painter.drawText(
+                page_rect.adjusted(0, 0, 0, -page_rect.height() + 44),
+                Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                f"{dot.name} ({dot.id})",
+            )
+            painter.setFont(QFont("Arial", 10))
+            subtitle = (
+                f"Section: {dot.section or '-'}     Instrument: {dot.instrument or '-'}     "
+                f"Rank: {dot.rank or '-'}     Layer: {dot.layer or '-'}"
+            )
+            painter.drawText(
+                page_rect.adjusted(0, 46, 0, -page_rect.height() + 72),
+                Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                subtitle,
+            )
+            top = page_rect.top() + 96
+            row_height = 28
+            headers = ["Set", "Counts", "Tempo", "X", "Y", "Transition"]
+            widths = [130, 100, 90, 80, 80, 130]
+            draw_table_row(painter, page_rect.left(), top, row_height, widths, headers, bold=True)
+            top += row_height
+            for set_index, drill_set in enumerate(project.sets):
+                x, y = drill_set.dot_positions.get(dot.id, (dot.x, dot.y))
+                values = [
+                    drill_set.name,
+                    f"{drill_set.start_count}-{drill_set.end_count}",
+                    f"{project.active_tempo(set_index):g}",
+                    f"{x:.2f}",
+                    f"{y:.2f}",
+                    drill_set.transition.value,
+                ]
+                draw_table_row(painter, page_rect.left(), top, row_height, widths, values)
+                top += row_height
+                if top > page_rect.bottom() - row_height:
+                    writer.newPage()
+                    page_rect = QRectF(writer.pageLayout().paintRectPixels(writer.resolution()))
+                    painter.fillRect(page_rect, QColor("#ffffff"))
+                    top = page_rect.top() + 32
+    finally:
+        painter.end()
+
+
+def export_staff_packet_pdf(
+    output_path: Path,
+    project: DrillProject,
+    progress_callback: ProgressCallback | None = None,
+) -> None:
+    writer = QPdfWriter(str(output_path))
+    writer.setResolution(150)
+    writer.setPageLayout(
+        QPageLayout(
+            QPageSize(QPageSize.PageSizeId.Letter),
+            QPageLayout.Orientation.Landscape,
+            QMarginsF(0.35, 0.35, 0.35, 0.35),
+            QPageLayout.Unit.Inch,
+        )
+    )
+    painter = QPainter(writer)
+    try:
+        page_rect = QRectF(writer.pageLayout().paintRectPixels(writer.resolution()))
+        painter.fillRect(page_rect, QColor("#ffffff"))
+        painter.setPen(QColor("#111318"))
+        painter.setFont(QFont("Arial", 28, QFont.Weight.Bold))
+        painter.drawText(page_rect.adjusted(0, 80, 0, -page_rect.height() + 160), Qt.AlignmentFlag.AlignCenter, project.metadata.show_title)
+        painter.setFont(QFont("Arial", 14))
+        painter.drawText(
+            page_rect.adjusted(0, 160, 0, -page_rect.height() + 240),
+            Qt.AlignmentFlag.AlignCenter,
+            f"{len(project.sets)} sets     {len(project.dots)} performers     {project.metadata.initial_tempo:g} BPM base",
+        )
+
+        writer.newPage()
+        page_rect = QRectF(writer.pageLayout().paintRectPixels(writer.resolution()))
+        painter.fillRect(page_rect, QColor("#ffffff"))
+        painter.setFont(QFont("Arial", 20, QFont.Weight.Bold))
+        painter.drawText(page_rect.adjusted(0, 0, 0, -page_rect.height() + 44), Qt.AlignmentFlag.AlignLeft, "Path Safety Summary")
+        painter.setFont(QFont("Arial", 9))
+        y = page_rect.top() + 70
+        warnings = []
+        for set_index in range(len(project.sets)):
+            warnings.extend(detect_path_warnings(project, set_index))
+        if not warnings:
+            painter.drawText(QRectF(page_rect.left(), y, page_rect.width(), 28), Qt.AlignmentFlag.AlignLeft, "No warnings found.")
+        else:
+            for warning in warnings[:42]:
+                painter.drawText(
+                    QRectF(page_rect.left(), y, page_rect.width(), 24),
+                    Qt.AlignmentFlag.AlignLeft,
+                    f"{warning.severity.upper()} | {warning.set_name} | Count {warning.count:.2f} | {warning.message}",
+                )
+                y += 24
+
+        sheet_field = FieldView()
+        sheet_field.set_project(project)
+        sheet_field.update_labels(True)
+        scene_source = QRectF(
+            -60 * sheet_field.scale_factor,
+            -26.6665 * sheet_field.scale_factor,
+            120 * sheet_field.scale_factor,
+            53.333 * sheet_field.scale_factor,
+        )
+        total = max(1, len(project.sets))
+        for index, drill_set in enumerate(project.sets):
+            if progress_callback:
+                progress_callback("Rendering staff packet", index + 1, total)
+            writer.newPage()
+            sheet_field.set_positions(drill_set.dot_positions)
+            page_rect = QRectF(writer.pageLayout().paintRectPixels(writer.resolution()))
+            painter.fillRect(page_rect, QColor("#ffffff"))
+            painter.setPen(QColor("#111318"))
+            painter.setFont(QFont("Arial", 18, QFont.Weight.Bold))
+            painter.drawText(page_rect.adjusted(0, 0, 0, -page_rect.height() + 40), Qt.AlignmentFlag.AlignLeft, drill_set.name)
+            painter.setFont(QFont("Arial", 10))
+            painter.drawText(
+                page_rect.adjusted(0, 42, 0, -page_rect.height() + 70),
+                Qt.AlignmentFlag.AlignLeft,
+                f"Counts {drill_set.start_count}-{drill_set.end_count} | Tempo {project.active_tempo(index):g} BPM | Transition {drill_set.transition.value}",
+            )
+            field_rect = page_rect.adjusted(0, 86, 0, 0)
+            sheet_field.scene.render(painter, field_rect, scene_source, Qt.AspectRatioMode.KeepAspectRatio)
+    finally:
+        painter.end()
+
+
+def export_coordinate_csv(output_path: Path, project: DrillProject) -> None:
+    with output_path.open("w", newline="", encoding="utf-8") as file:
+        writer = csv.writer(file)
+        writer.writerow(
+            [
+                "dot_id",
+                "name",
+                "section",
+                "instrument",
+                "rank",
+                "equipment",
+                "layer",
+                "set",
+                "start_count",
+                "end_count",
+                "tempo",
+                "x",
+                "y",
+                "transition",
+            ]
+        )
+        for dot in project.dots:
+            for set_index, drill_set in enumerate(project.sets):
+                x, y = drill_set.dot_positions.get(dot.id, (dot.x, dot.y))
+                writer.writerow(
+                    [
+                        dot.id,
+                        dot.name,
+                        dot.section,
+                        dot.instrument,
+                        dot.rank,
+                        dot.equipment,
+                        dot.layer,
+                        drill_set.name,
+                        drill_set.start_count,
+                        drill_set.end_count,
+                        project.active_tempo(set_index),
+                        f"{x:.3f}",
+                        f"{y:.3f}",
+                        drill_set.transition.value,
+                    ]
+                )
+
+
+def draw_table_row(
+    painter: QPainter,
+    left: float,
+    top: float,
+    height: float,
+    widths: list[int],
+    values: list[str],
+    bold: bool = False,
+) -> None:
+    painter.setFont(QFont("Arial", 9, QFont.Weight.Bold if bold else QFont.Weight.Normal))
+    x = left
+    for width, value in zip(widths, values):
+        rect = QRectF(x, top, width, height)
+        painter.setPen(QColor("#c7ccd6"))
+        painter.drawRect(rect)
+        painter.setPen(QColor("#111318"))
+        painter.drawText(rect.adjusted(6, 0, -4, 0), Qt.AlignmentFlag.AlignVCenter, value)
+        x += width
 
 
 def export_mp4(
