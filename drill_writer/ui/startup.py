@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from PySide6.QtCore import QEasingCurve, Property, QPropertyAnimation, QRectF, Signal, Qt
-from PySide6.QtGui import QColor, QPainter, QPen
+from PySide6.QtGui import QColor, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QDialog,
     QFileDialog,
@@ -31,22 +31,56 @@ from drill_writer.core.project_io import (
     load_project,
     project_library_dir,
 )
+from drill_writer.resources import app_icon_path
 
 
 class SplashPage(QWidget):
     def __init__(self) -> None:
         super().__init__()
+        self.setObjectName("SplashPage")
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.setStyleSheet(
+            """
+            #SplashPage {
+                background: qradialgradient(
+                    cx: 0.5, cy: 0.42, radius: 0.9,
+                    fx: 0.5, fy: 0.34,
+                    stop: 0 #222222,
+                    stop: 0.58 #111214,
+                    stop: 1 #050506
+                );
+            }
+            """
+        )
         layout = QVBoxLayout(self)
         layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.setSpacing(10)
+        icon = QLabel()
+        icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        pixmap = QPixmap(str(app_icon_path()))
+        if not pixmap.isNull():
+            icon.setPixmap(
+                pixmap.scaled(
+                    190,
+                    190,
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation,
+                )
+            )
         title = QLabel("Drill Pirate")
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        title.setStyleSheet("font-size: 46px; font-weight: 750; letter-spacing: 1px;")
-        version = QLabel("Alpha Version 2.0.0")
+        title.setStyleSheet("font-size: 48px; font-weight: 850; letter-spacing: 1px; color: #f7c94a;")
+        version = QLabel("Alpha Version 2.2.1")
         version.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        version.setStyleSheet("font-size: 16px; color: #aeb7c8;")
+        version.setStyleSheet("font-size: 16px; color: #f4f4f1;")
+        tagline = QLabel("Professional drill design for the field")
+        tagline.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        tagline.setStyleSheet("font-size: 12px; color: #9da4ad;")
+        layout.addWidget(icon)
+        layout.addSpacing(6)
         layout.addWidget(title)
-        layout.addSpacing(8)
         layout.addWidget(version)
+        layout.addWidget(tagline)
 
 
 class CreateProjectDialog(QDialog):
@@ -132,9 +166,10 @@ class CreateProjectDialog(QDialog):
 
 
 class FieldPreview(QWidget):
-    def __init__(self, project: DrillProject | None = None) -> None:
+    def __init__(self, project: DrillProject | None = None, project_dir: Path | None = None) -> None:
         super().__init__()
         self.project = project
+        self.project_dir = project_dir
         self.setMinimumSize(260, 132)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
 
@@ -147,37 +182,92 @@ class FieldPreview(QWidget):
         painter.drawRoundedRect(outer, 10, 10)
 
         rect = self.field_rect(outer)
-        painter.setPen(QPen(QColor("#cfe7cc"), 0.9))
-        painter.setBrush(QColor("#5c9f55"))
+        painter.setPen(QPen(QColor("#88939a"), 0.9))
+        painter.setBrush(QColor("#f9fbf7"))
         painter.drawRoundedRect(rect, 5, 5)
 
-        yard_pen = QPen(QColor(232, 246, 230, 150), 0.8)
+        micro_pen = QPen(QColor("#e3e9e8"), 0.35)
+        painter.setPen(micro_pen)
+        for index in range(25):
+            x = rect.left() + rect.width() * index / 24
+            painter.drawLine(int(x), int(rect.top()), int(x), int(rect.bottom()))
+        for index in range(11):
+            y = rect.top() + rect.height() * index / 10
+            painter.drawLine(int(rect.left()), int(y), int(rect.right()), int(y))
+
+        yard_pen = QPen(QColor("#5d686f"), 0.8)
         painter.setPen(yard_pen)
         for index in range(11):
             x = rect.left() + rect.width() * index / 10
             painter.drawLine(int(x), int(rect.top()), int(x), int(rect.bottom()))
-        hash_pen = QPen(QColor(217, 237, 215, 110), 0.7)
+
+        hash_pen = QPen(QColor("#1f2529"), 0.8)
         painter.setPen(hash_pen)
-        for y_ratio in (0.32, 0.5, 0.68):
+        for y_ratio in (0.125, 0.875):
             y = rect.top() + rect.height() * y_ratio
-            painter.drawLine(int(rect.left()), int(y), int(rect.right()), int(y))
+            for index in range(25):
+                x = rect.left() + rect.width() * index / 24
+                painter.drawLine(int(x - 2), int(y), int(x + 2), int(y))
 
         if not self.project:
             self.draw_empty_field(painter, rect)
             return
 
-        positions = self.project.sets[0].dot_positions if self.project.sets else {}
+        first_set = self.project.sets[0] if self.project.sets else None
+        self.draw_props(painter, rect, first_set.prop_positions if first_set else {})
+        positions = first_set.dot_positions if first_set else {}
         dot_count = max(1, len(self.project.dots))
-        radius = max(1.0, min(2.0, 10 / (dot_count**0.5)))
+        radius = max(0.75, min(1.55, 7 / (dot_count**0.5)))
         for dot in self.project.dots:
             x, y = positions.get(dot.id, (dot.x, dot.y))
             screen_x = rect.left() + (x + 60) / 120 * rect.width()
             screen_y = rect.top() + (26.666 - y) / 53.333 * rect.height()
             if not rect.adjusted(-4, -4, 4, 4).contains(screen_x, screen_y):
                 continue
-            painter.setPen(QPen(QColor(48, 0, 0, 160), 0.7))
+            painter.setPen(QPen(QColor("#1d2128"), 0.55))
             painter.setBrush(QColor(dot.color or "#e53935"))
             painter.drawEllipse(QRectF(screen_x - radius, screen_y - radius, radius * 2, radius * 2))
+
+    def draw_props(self, painter: QPainter, rect: QRectF, states: dict[str, dict[str, float]]) -> None:
+        if not self.project:
+            return
+        for prop in self.project.props:
+            state = states.get(prop.id, {})
+            prop_x = float(state.get("x", prop.x))
+            prop_y = float(state.get("y", prop.y))
+            prop_width = max(0.1, float(state.get("width", prop.width)))
+            prop_height = max(0.1, float(state.get("height", prop.height)))
+            prop_rotation = float(state.get("rotation", prop.rotation))
+            screen_x = rect.left() + (prop_x + 60) / 120 * rect.width()
+            screen_y = rect.top() + (26.666 - prop_y) / 53.333 * rect.height()
+            screen_width = prop_width / 120 * rect.width()
+            screen_height = prop_height / 53.333 * rect.height()
+            prop_rect = QRectF(-screen_width / 2, -screen_height / 2, screen_width, screen_height)
+
+            painter.save()
+            painter.translate(screen_x, screen_y)
+            painter.rotate(prop_rotation)
+            pixmap = self.load_prop_pixmap(prop.image_file)
+            if pixmap and not pixmap.isNull():
+                painter.setOpacity(0.9)
+                painter.drawPixmap(prop_rect, pixmap, pixmap.rect())
+                painter.setOpacity(1.0)
+                painter.setPen(QPen(QColor("#7b2530"), 0.7))
+                painter.setBrush(Qt.BrushStyle.NoBrush)
+                painter.drawRoundedRect(prop_rect, 2, 2)
+            else:
+                painter.setPen(QPen(QColor("#7b2530"), 0.7))
+                painter.setBrush(QColor(255, 58, 58, 190))
+                painter.drawRoundedRect(prop_rect, 2, 2)
+            painter.restore()
+
+    def load_prop_pixmap(self, image_file: str) -> QPixmap:
+        if not image_file:
+            return QPixmap()
+        path = Path(image_file)
+        if not path.is_absolute() and self.project_dir is not None:
+            path = self.project_dir / image_file
+        return QPixmap(str(path)) if path.exists() else QPixmap()
 
     def field_rect(self, outer: QRectF) -> QRectF:
         target_ratio = 120 / 53.333
@@ -214,7 +304,7 @@ class ProjectCard(QFrame):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(12, 12, 12, 12)
         layout.setSpacing(9)
-        self.preview = FieldPreview(project)
+        self.preview = FieldPreview(project, project_dir)
         title = QLabel(project.metadata.show_title)
         title.setStyleSheet("font-size: 14px; font-weight: 700;")
         title.setWordWrap(True)
@@ -278,9 +368,17 @@ class CreateProjectCard(QFrame):
         painter.drawRoundedRect(rect, 12, 12)
 
         field_rect = rect.adjusted(16, 18, -16, -58)
-        painter.setPen(QPen(QColor("#cfe7cc"), 1))
-        painter.setBrush(QColor("#5aa052"))
+        painter.setPen(QPen(QColor("#88939a"), 1))
+        painter.setBrush(QColor("#f9fbf7"))
         painter.drawRoundedRect(field_rect, 8, 8)
+
+        painter.setPen(QPen(QColor("#d3dcda"), 0.7))
+        for index in range(11):
+            x = field_rect.left() + field_rect.width() * index / 10
+            painter.drawLine(int(x), int(field_rect.top()), int(x), int(field_rect.bottom()))
+        for index in range(5):
+            y = field_rect.top() + field_rect.height() * index / 4
+            painter.drawLine(int(field_rect.left()), int(y), int(field_rect.right()), int(y))
 
         center = field_rect.center()
         plus_size = 20 + int(self._hover_progress * 7)
@@ -302,6 +400,7 @@ class CreateProjectCard(QFrame):
 
 class StartupPage(QWidget):
     project_ready = Signal(Path)
+    settings_requested = Signal()
 
     def __init__(self, plugin_manager: PluginManager | None = None) -> None:
         super().__init__()
@@ -315,13 +414,27 @@ class StartupPage(QWidget):
         hero = QFrame()
         hero.setObjectName("HomeHero")
         hero_layout = QHBoxLayout(hero)
-        hero_layout.setContentsMargins(22, 18, 22, 18)
+        hero_layout.setContentsMargins(18, 16, 22, 16)
+        hero_icon = QLabel()
+        hero_icon.setFixedSize(76, 76)
+        hero_icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        pixmap = QPixmap(str(app_icon_path()))
+        if not pixmap.isNull():
+            hero_icon.setPixmap(
+                pixmap.scaled(
+                    74,
+                    74,
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation,
+                )
+            )
+        hero_layout.addWidget(hero_icon)
         title_stack = QVBoxLayout()
         title = QLabel("Drill Pirate")
         title.setObjectName("HomeTitle")
-        title.setStyleSheet("font-size: 34px; font-weight: 800;")
-        version = QLabel("Alpha Version 2.0.0")
-        version.setStyleSheet("font-size: 12px; color: #aeb7c8;")
+        title.setStyleSheet("font-size: 34px; font-weight: 850; color: #f7c94a;")
+        version = QLabel("Alpha Version 2.2.1")
+        version.setStyleSheet("font-size: 12px; color: #f1f1ee;")
         path_label = QLabel(f"Project library · {self.library_dir}")
         path_label.setStyleSheet("color: #8d98aa;")
         self.plugin_banner = QLabel("")
@@ -331,8 +444,11 @@ class StartupPage(QWidget):
         title_stack.addWidget(path_label)
         title_stack.addWidget(self.plugin_banner)
         hero_layout.addLayout(title_stack, 1)
+        settings_button = QPushButton("Settings")
+        settings_button.clicked.connect(self.settings_requested.emit)
         new_project_button = QPushButton("New Project")
         new_project_button.clicked.connect(self.open_create_dialog)
+        hero_layout.addWidget(settings_button)
         hero_layout.addWidget(new_project_button)
         layout.addWidget(hero)
 
@@ -388,8 +504,8 @@ class StartupPage(QWidget):
         self.plugin_scroll.setFrameShape(QFrame.Shape.NoFrame)
         self.plugin_grid_container = QWidget()
         self.plugin_grid = QGridLayout(self.plugin_grid_container)
-        self.plugin_grid.setHorizontalSpacing(18)
-        self.plugin_grid.setVerticalSpacing(18)
+        self.plugin_grid.setHorizontalSpacing(10)
+        self.plugin_grid.setVerticalSpacing(10)
         self.plugin_grid.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
         self.plugin_scroll.setWidget(self.plugin_grid_container)
         tab_layout.addWidget(self.plugin_scroll, 1)
@@ -435,7 +551,7 @@ class StartupPage(QWidget):
         for index, manifest in enumerate(self.plugin_manager.discover()):
             card = PluginCard(manifest, self.plugin_manager.is_active(manifest.id))
             card.toggled.connect(self.toggle_plugin)
-            self.plugin_grid.addWidget(card, index // 2, index % 2)
+            self.plugin_grid.addWidget(card, index // 3, index % 3)
 
     def toggle_plugin(self, plugin_id: str, active: bool) -> None:
         if not self.plugin_manager:
@@ -458,13 +574,13 @@ class PluginCard(QFrame):
         self.manifest = manifest
         self.active = active
         self.setObjectName("PluginCard")
-        self.setMinimumSize(410, 168)
-        self.setMaximumWidth(520)
+        self.setMinimumSize(300, 118)
+        self.setMaximumWidth(360)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(16, 14, 16, 14)
-        layout.setSpacing(8)
+        layout.setContentsMargins(10, 9, 10, 9)
+        layout.setSpacing(5)
         top = QHBoxLayout()
         title = QLabel(manifest.name)
         title.setStyleSheet("font-size: 15px; font-weight: 750;")
@@ -479,14 +595,17 @@ class PluginCard(QFrame):
         layout.addWidget(meta)
         description = QLabel(manifest.description or "No description provided.")
         description.setWordWrap(True)
+        description.setMaximumHeight(34)
         description.setStyleSheet("color: #c8cfdd;")
-        layout.addWidget(description, 1)
+        layout.addWidget(description)
         path = QLabel(str(manifest.path))
         path.setStyleSheet("color: #788396; font-size: 10px;")
         path.setWordWrap(True)
+        path.setMaximumHeight(28)
         layout.addWidget(path)
 
         self.toggle_button = QPushButton("Deactivate" if active else "Activate")
+        self.toggle_button.setMaximumHeight(26)
         self.toggle_button.clicked.connect(self.emit_toggle)
         layout.addWidget(self.toggle_button, alignment=Qt.AlignmentFlag.AlignRight)
 

@@ -3,41 +3,138 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import QTimer
-from PySide6.QtWidgets import QApplication, QStackedWidget
+from PySide6.QtCore import QSettings, QThread, QTimer, Qt, Signal
+from PySide6.QtGui import QIcon
+from PySide6.QtWidgets import (
+    QApplication,
+    QDialog,
+    QHBoxLayout,
+    QLabel,
+    QMessageBox,
+    QProgressDialog,
+    QPushButton,
+    QStackedWidget,
+    QTextBrowser,
+    QVBoxLayout,
+)
 
+from drill_writer.core.updater import (
+    CURRENT_VERSION,
+    UpdateInfo,
+    fetch_latest_release,
+    fetch_latest_update,
+    install_update,
+    version_tuple,
+)
 from drill_writer.core.plugin_manager import PluginManager
+from drill_writer.resources import app_icon_path
+from drill_writer.ui.audio_devices import (
+    AUDIO_OUTPUT_DEVICE_SETTING,
+    DEFAULT_AUDIO_OUTPUT_DEVICE_ID,
+    audio_output_label_for_id,
+    normalize_audio_output_device_id,
+)
 from drill_writer.ui.main_window import MainWindow
+from drill_writer.ui.preferences import PreferencesDialog
 from drill_writer.ui.startup import SplashPage, StartupPage
-from drill_writer.ui.theme import APP_STYLESHEET
+from drill_writer.ui.theme import theme_stylesheet
+
+
+class UpdateCheckThread(QThread):
+    finished_check = Signal(object)
+
+    def run(self) -> None:
+        self.finished_check.emit(fetch_latest_update())
+
+
+class ReleaseNotesThread(QThread):
+    finished_notes = Signal(object)
+
+    def run(self) -> None:
+        self.finished_notes.emit(fetch_latest_release())
 
 
 class DrillWriterApp(QStackedWidget):
     def __init__(self) -> None:
         super().__init__()
-        self.plugin_manager = PluginManager(APP_STYLESHEET)
+        self.settings = QSettings("OpenAI", "DrillWriter")
+        self.update_thread: UpdateCheckThread | None = None
+        self.release_notes_thread: ReleaseNotesThread | None = None
+        self.plugin_manager = PluginManager(theme_stylesheet(self.theme_mode()))
         self.splash = SplashPage()
         self.startup = StartupPage(self.plugin_manager)
         self.startup.project_ready.connect(self.open_project)
+        self.startup.settings_requested.connect(self.show_preferences)
         self.addWidget(self.splash)
         self.addWidget(self.startup)
         self.setWindowTitle("Drill Pirate")
+        self.setWindowIcon(QIcon(str(app_icon_path())))
         self.resize(1120, 760)
         app = QApplication.instance()
         if isinstance(app, QApplication):
             self.plugin_manager.register_app(app, self.startup)
         QTimer.singleShot(1300, self.show_home)
+        QTimer.singleShot(1650, self.check_pending_release_notes)
+        QTimer.singleShot(2200, self.check_for_updates)
 
     def show_home(self) -> None:
         self.setCurrentWidget(self.startup)
 
     def open_project(self, project_dir: Path) -> None:
         window = MainWindow(project_dir)
+        window.field.set_canvas_theme(self.theme_mode())
         window.return_home_requested.connect(lambda selected_window=window: self.return_home(selected_window))
         self.addWidget(window)
         self.plugin_manager.register_main_window(window)
         self.setCurrentWidget(window)
-        self.resize(1500, 900)
+        if not self.isMaximized() and not self.isFullScreen():
+            self.resize(1500, 900)
+        QTimer.singleShot(0, self.refresh_current_layout)
+
+    def theme_mode(self) -> str:
+        value = self.settings.value("appearance/theme", "dark")
+        return "light" if value == "light" else "dark"
+
+    def audio_output_device_id(self) -> str:
+        return normalize_audio_output_device_id(
+            self.settings.value(AUDIO_OUTPUT_DEVICE_SETTING, DEFAULT_AUDIO_OUTPUT_DEVICE_ID)
+        )
+
+    def show_preferences(self) -> None:
+        dialog = PreferencesDialog(self.theme_mode(), self.audio_output_device_id(), self)
+        dialog.exec()
+
+    def apply_theme(self, mode: str) -> None:
+        normalized = "light" if mode == "light" else "dark"
+        self.settings.setValue("appearance/theme", normalized)
+        self.settings.sync()
+        stylesheet = theme_stylesheet(normalized)
+        self.plugin_manager.base_stylesheet = stylesheet
+        app = QApplication.instance()
+        if isinstance(app, QApplication):
+            app.setStyleSheet(stylesheet)
+        self.plugin_manager.reload_active_plugins()
+        self.apply_canvas_theme(normalized)
+
+    def apply_canvas_theme(self, mode: str) -> None:
+        for index in range(self.count()):
+            widget = self.widget(index)
+            field = getattr(widget, "field", None)
+            if field is not None and hasattr(field, "set_canvas_theme"):
+                field.set_canvas_theme(mode)
+
+    def apply_audio_output_device(self, device_id: str) -> None:
+        normalized = normalize_audio_output_device_id(device_id)
+        self.settings.setValue(AUDIO_OUTPUT_DEVICE_SETTING, normalized)
+        self.settings.sync()
+        for index in range(self.count()):
+            widget = self.widget(index)
+            handler = getattr(widget, "apply_audio_output_device", None)
+            if callable(handler):
+                handler(normalized)
+        current = self.currentWidget()
+        if isinstance(current, MainWindow):
+            current.statusBar().showMessage(f"Audio output: {audio_output_label_for_id(normalized)}", 3000)
 
     def return_home(self, window: MainWindow) -> None:
         self.startup.refresh_projects()
@@ -45,12 +142,231 @@ class DrillWriterApp(QStackedWidget):
         self.setCurrentWidget(self.startup)
         self.removeWidget(window)
         window.deleteLater()
-        self.resize(1120, 760)
+        if not self.isMaximized() and not self.isFullScreen():
+            self.resize(1120, 760)
+        QTimer.singleShot(0, self.refresh_current_layout)
+
+    def refresh_current_layout(self) -> None:
+        current = self.currentWidget()
+        if current and current.layout():
+            current.layout().activate()
+        self.updateGeometry()
+        self.repaint()
+
+    def check_for_updates(self) -> None:
+        if self.update_thread and self.update_thread.isRunning():
+            return
+        self.update_thread = UpdateCheckThread(self)
+        self.update_thread.finished_check.connect(self.handle_update_check)
+        self.update_thread.start()
+
+    def check_pending_release_notes(self) -> None:
+        if self.release_notes_disabled():
+            self.clear_pending_release_notes(sync=False)
+            self.record_running_version()
+            return
+
+        target_tag = self.pending_release_notes_tag()
+        seen_tag = str(self.settings.value("updates/release_notes_seen_tag", ""))
+        if not target_tag or version_tuple(target_tag) != version_tuple(CURRENT_VERSION):
+            self.record_running_version()
+            return
+        if version_tuple(seen_tag) == version_tuple(CURRENT_VERSION):
+            self.clear_pending_release_notes()
+            self.record_running_version()
+            return
+        if self.release_notes_thread and self.release_notes_thread.isRunning():
+            return
+        self.release_notes_thread = ReleaseNotesThread(self)
+        self.release_notes_thread.finished_notes.connect(self.handle_release_notes)
+        self.release_notes_thread.start()
+
+    def pending_release_notes_tag(self) -> str:
+        pending_tag = str(self.settings.value("updates/pending_release_notes_tag", ""))
+        last_running_version = str(self.settings.value("updates/last_running_version", ""))
+        if pending_tag:
+            return pending_tag
+        if last_running_version and version_tuple(CURRENT_VERSION) > version_tuple(last_running_version):
+            return CURRENT_VERSION
+        return ""
+
+    def release_notes_disabled(self) -> bool:
+        value = self.settings.value("updates/release_notes_disabled", False)
+        return str(value).lower() in {"1", "true", "yes"}
+
+    def record_running_version(self) -> None:
+        self.settings.setValue("updates/last_running_version", CURRENT_VERSION)
+        self.settings.sync()
+
+    def handle_release_notes(self, release: UpdateInfo | None) -> None:
+        target_tag = self.pending_release_notes_tag()
+        if not target_tag:
+            self.record_running_version()
+            return
+        info = self.release_notes_for_display(release, target_tag)
+        if info is None:
+            self.record_release_notes_seen(target_tag)
+            self.record_running_version()
+            return
+        self.show_release_notes_dialog(info)
+        self.record_running_version()
+
+    def release_notes_for_display(self, release: UpdateInfo | None, target_tag: str) -> UpdateInfo | None:
+        if release and version_tuple(release.tag) == version_tuple(target_tag):
+            return release
+        fallback_body = str(self.settings.value("updates/pending_release_notes_body", ""))
+        fallback_name = str(self.settings.value("updates/pending_release_notes_name", target_tag))
+        fallback_url = str(self.settings.value("updates/pending_release_notes_url", ""))
+        if fallback_body or fallback_name:
+            return UpdateInfo(
+                tag=target_tag,
+                name=fallback_name or target_tag,
+                html_url=fallback_url,
+                body=fallback_body,
+                asset=None,
+            )
+        return None
+
+    def show_release_notes_dialog(self, release: UpdateInfo) -> None:
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"Drill Pirate {release.tag} Update Log")
+        dialog.setModal(True)
+        dialog.resize(720, 520)
+
+        layout = QVBoxLayout(dialog)
+        title = QLabel(f"Updated to Drill Pirate {release.tag}")
+        title.setStyleSheet("font-size: 20px; font-weight: 750;")
+        subtitle = QLabel(release.name or release.tag)
+        subtitle.setStyleSheet("color: #aeb7c8;")
+        notes = QTextBrowser()
+        notes.setOpenExternalLinks(True)
+        body = release.body.strip() or "No release description was provided on GitHub."
+        if hasattr(notes, "setMarkdown"):
+            notes.setMarkdown(body)
+        else:
+            notes.setPlainText(body)
+
+        button_row = QHBoxLayout()
+        ok_button = QPushButton("Ok")
+        dont_show_button = QPushButton("Dont Show Again")
+        button_row.addStretch()
+        button_row.addWidget(dont_show_button)
+        button_row.addWidget(ok_button)
+
+        result = {"dont_show": False}
+        ok_button.clicked.connect(dialog.accept)
+
+        def dont_show_again() -> None:
+            result["dont_show"] = True
+            dialog.accept()
+
+        dont_show_button.clicked.connect(dont_show_again)
+        layout.addWidget(title)
+        layout.addWidget(subtitle)
+        layout.addWidget(notes, 1)
+        layout.addLayout(button_row)
+        dialog.exec()
+
+        if result["dont_show"]:
+            self.settings.setValue("updates/release_notes_disabled", True)
+        self.record_release_notes_seen(release.tag)
+
+    def record_release_notes_seen(self, tag: str) -> None:
+        self.settings.setValue("updates/release_notes_seen_tag", tag)
+        self.clear_pending_release_notes(sync=False)
+        self.settings.sync()
+
+    def clear_pending_release_notes(self, sync: bool = True) -> None:
+        for key in (
+            "updates/pending_release_notes_tag",
+            "updates/pending_release_notes_name",
+            "updates/pending_release_notes_body",
+            "updates/pending_release_notes_url",
+        ):
+            self.settings.remove(key)
+        if sync:
+            self.settings.sync()
+
+    def handle_update_check(self, update: UpdateInfo | None) -> None:
+        if not update:
+            return
+        skipped_tag = self.settings.value("updates/skipped_tag", "")
+        if skipped_tag == update.tag:
+            return
+        message = QMessageBox(self)
+        message.setWindowTitle("Drill Pirate Update Available")
+        message.setIcon(QMessageBox.Icon.Information)
+        message.setText(f"Drill Pirate {update.tag} is available.")
+        message.setInformativeText(
+            "Install downloads the latest release from GitHub without requiring Git.\n"
+            "Skip hides this version until a newer release is published.\n"
+            "Ignore closes this prompt for now."
+        )
+        install_button = message.addButton("Install", QMessageBox.ButtonRole.AcceptRole)
+        skip_button = message.addButton("Skip This Version", QMessageBox.ButtonRole.DestructiveRole)
+        ignore_button = message.addButton("Ignore", QMessageBox.ButtonRole.RejectRole)
+        message.setDefaultButton(install_button)
+        message.exec()
+        clicked = message.clickedButton()
+        if clicked == skip_button:
+            self.settings.setValue("updates/skipped_tag", update.tag)
+            self.settings.sync()
+            return
+        if clicked == ignore_button:
+            return
+        if clicked == install_button:
+            self.install_update(update)
+
+    def install_update(self, update: UpdateInfo) -> None:
+        progress = QProgressDialog("Preparing update...", None, 0, 100, self)
+        progress.setWindowTitle("Installing Update")
+        progress.setWindowModality(Qt.WindowModality.ApplicationModal)
+        progress.setMinimumDuration(0)
+        progress.setAutoClose(False)
+        progress.setAutoReset(False)
+        progress.show()
+
+        def update_progress(stage: str, current: int, total: int) -> None:
+            progress.setLabelText(stage)
+            progress.setMaximum(max(1, total))
+            progress.setValue(min(current, total))
+            QApplication.processEvents()
+
+        try:
+            result = install_update(update, progress_callback=update_progress)
+        except Exception as exc:
+            QMessageBox.warning(self, "Update Failed", str(exc))
+            return
+        finally:
+            progress.close()
+
+        if result in {"restart_required", "launched_installer"}:
+            self.mark_pending_release_notes(update)
+            current = self.currentWidget()
+            if current is not None and hasattr(current, "save"):
+                current.save()
+            QApplication.quit()
+        elif result == "downloaded_dev_mode":
+            QMessageBox.information(
+                self,
+                "Update Downloaded",
+                "The update was downloaded, but this development run cannot replace itself. The release page was opened.",
+            )
+
+    def mark_pending_release_notes(self, update: UpdateInfo) -> None:
+        self.settings.setValue("updates/pending_release_notes_tag", update.tag)
+        self.settings.setValue("updates/pending_release_notes_name", update.name or update.tag)
+        self.settings.setValue("updates/pending_release_notes_body", update.body)
+        self.settings.setValue("updates/pending_release_notes_url", update.html_url)
+        self.settings.sync()
 
 
 def main() -> int:
     app = QApplication(sys.argv)
-    app.setStyleSheet(APP_STYLESHEET)
+    app.setWindowIcon(QIcon(str(app_icon_path())))
+    settings = QSettings("OpenAI", "DrillWriter")
+    mode = "light" if settings.value("appearance/theme", "dark") == "light" else "dark"
+    app.setStyleSheet(theme_stylesheet(mode))
     window = DrillWriterApp()
     window.show()
     return app.exec()

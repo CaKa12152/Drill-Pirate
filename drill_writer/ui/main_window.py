@@ -6,18 +6,24 @@ from pathlib import Path
 from typing import Any, Callable
 
 from PySide6.QtCore import QSettings, QTimer, Qt, QUrl, Signal
-from PySide6.QtGui import QAction, QKeySequence, QUndoCommand, QUndoStack
-from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
+from PySide6.QtGui import QAction, QColor, QIcon, QKeySequence, QPixmap, QUndoCommand, QUndoStack
+from PySide6.QtMultimedia import QAudioOutput, QMediaDevices, QMediaPlayer
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QCheckBox,
+    QColorDialog,
     QComboBox,
     QDialog,
+    QDockWidget,
     QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
+    QGridLayout,
     QGroupBox,
+    QHeaderView,
     QHBoxLayout,
     QInputDialog,
+    QKeySequenceEdit,
     QLabel,
     QLineEdit,
     QListWidget,
@@ -35,20 +41,24 @@ from PySide6.QtWidgets import (
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
+    QToolBar,
     QWidget,
 )
 
 from drill_writer.core.analysis import auto_plan_paths, detect_path_warnings, segments_intersect
-from drill_writer.core.animation import interpolate_project, sample_transition_path
-from drill_writer.core.models import AudioVersion, Dot, DotConstraint, DrillProject, DrillSet, Marker, TimingEvent, Transition
+from drill_writer.core.animation import interpolate_project, interpolate_props, sample_transition_path
+from drill_writer.core.coordinates import format_drill_coordinate
+from drill_writer.core.models import AudioVersion, Dot, DotConstraint, DrillProject, DrillSet, Marker, MovementStyle, Prop, TimingEvent, Transition, prop_default_state
 from drill_writer.core.project_io import load_project, project_library_dir, safe_folder_name, save_project
 from drill_writer.core.svg_import import load_svg_contours
 from drill_writer.core.timing import (
     active_audio_version,
     audio_ms_for_set_count,
     describe_timing_event,
+    playback_bounds_for_set,
     set_active_audio_version,
     set_count_for_audio_ms,
+    set_index_for_count,
 )
 from drill_writer.core.tools import (
     arc_positions,
@@ -65,9 +75,11 @@ from drill_writer.core.tools import (
     rotate_positions,
     sampled_shape_path,
     scatter_positions,
+    scaled_positions_to_size,
     spiral_positions,
     distance,
 )
+from drill_writer.resources import app_icon_path
 from drill_writer.export.exporters import (
     ExportCancelled,
     export_coordinate_csv,
@@ -76,6 +88,14 @@ from drill_writer.export.exporters import (
     export_mp4,
     export_project_zip,
     export_staff_packet_pdf,
+)
+from drill_writer.ui.audio_devices import (
+    AUDIO_OUTPUT_DEVICE_SETTING,
+    DEFAULT_AUDIO_OUTPUT_DEVICE_ID,
+    audio_device_id,
+    audio_output_for_id,
+    audio_output_label_for_id,
+    normalize_audio_output_device_id,
 )
 from drill_writer.ui.field_view import EditorTool, FieldView
 from drill_writer.ui.waveform import WaveformWidget
@@ -91,6 +111,7 @@ class FormToolContext:
     center: tuple[float, float]
     bounds_width: float
     bounds_height: float
+    settings: dict[str, Any]
 
 
 @dataclass(slots=True)
@@ -100,6 +121,7 @@ class PluginFormTool:
     name: str
     callback: Callable[[FormToolContext], Any]
     min_selected: int
+    settings: list[dict[str, Any]]
 
 
 class MoveDotsCommand(QUndoCommand):
@@ -150,6 +172,28 @@ class MoveDotsCommand(QUndoCommand):
         self.window.apply_positions(self.before, push_undo=False, set_index=self.set_index)
 
 
+class MovePropsCommand(QUndoCommand):
+    def __init__(
+        self,
+        window: "MainWindow",
+        set_index: int,
+        before: dict[str, dict[str, float]],
+        after: dict[str, dict[str, float]],
+        label: str,
+    ) -> None:
+        super().__init__(label)
+        self.window = window
+        self.set_index = set_index
+        self.before = before
+        self.after = after
+
+    def redo(self) -> None:
+        self.window.apply_prop_states(self.after, push_undo=False, set_index=self.set_index)
+
+    def undo(self) -> None:
+        self.window.apply_prop_states(self.before, push_undo=False, set_index=self.set_index)
+
+
 class KeyframeDotsCommand(QUndoCommand):
     def __init__(
         self,
@@ -184,6 +228,26 @@ class KeyframeDotsCommand(QUndoCommand):
         )
 
 
+class DotAppearanceCommand(QUndoCommand):
+    def __init__(
+        self,
+        window: "MainWindow",
+        before: dict[str, dict[str, str]],
+        after: dict[str, dict[str, str]],
+        label: str,
+    ) -> None:
+        super().__init__(label)
+        self.window = window
+        self.before = before
+        self.after = after
+
+    def redo(self) -> None:
+        self.window.apply_dot_appearance(self.after)
+
+    def undo(self) -> None:
+        self.window.apply_dot_appearance(self.before)
+
+
 class MainWindow(QMainWindow):
     return_home_requested = Signal()
 
@@ -203,13 +267,28 @@ class MainWindow(QMainWindow):
         self.imported_shape_name = ""
         self.mirror_axis = 0.0
         self.plugin_form_tools: dict[str, PluginFormTool] = {}
+        self.plugin_form_tool_buttons: dict[str, QPushButton] = {}
+        self.plugin_form_tool_setting_widgets: dict[str, dict[str, QWidget]] = {}
         self.plugin_contribution_actions: dict[str, list[tuple[QMenu, QAction]]] = {}
         self.plugin_contribution_widgets: dict[str, list[QWidget]] = {}
         self.plugin_named_menus: dict[str, QMenu] = {}
+        self.active_plugin_form_tool_id = ""
+        self.command_actions: dict[str, QAction] = {}
+        self.command_defaults: dict[str, str] = {}
+        self.dock_widgets: dict[str, QDockWidget] = {}
         self.undo_stack = QUndoStack(self)
         self.player = QMediaPlayer(self)
         self.audio_output = QAudioOutput(self)
+        self.requested_audio_output_device_id = ""
+        self.applied_audio_output_physical_id = ""
+        self.audio_device_refresh_timer = QTimer(self)
+        self.audio_device_refresh_timer.setSingleShot(True)
+        self.audio_device_refresh_timer.setInterval(700)
+        self.audio_device_refresh_timer.timeout.connect(self.apply_saved_audio_output_device)
+        self.media_devices = QMediaDevices(self)
+        self.media_devices.audioOutputsChanged.connect(self.schedule_audio_output_refresh)
         self.player.setAudioOutput(self.audio_output)
+        self.apply_saved_audio_output_device()
         self.player.durationChanged.connect(self.audio_duration_changed)
         self.player.positionChanged.connect(self.audio_position_changed)
         self.play_timer = QTimer(self)
@@ -221,12 +300,15 @@ class MainWindow(QMainWindow):
         self.autosave_timer.start()
 
         self.setWindowTitle(f"Drill Pirate - {self.project.metadata.show_title}")
+        self.setWindowIcon(QIcon(str(app_icon_path())))
         self.resize(1500, 900)
         self.field = FieldView()
-        self.field.set_project(self.project)
+        self.field.set_project(self.project, self.project_dir)
         self.field.selection_changed.connect(self.selection_changed)
         self.field.dot_moved.connect(self.dot_moved)
         self.field.dots_moved.connect(self.dots_moved)
+        self.field.prop_moved.connect(self.prop_moved)
+        self.field.props_moved.connect(self.props_moved)
         self.field.context_action.connect(self.context_action)
         self.field.preview_handle_moved.connect(self.preview_handle_moved)
         self.field.path_anchor_added.connect(self.add_path_anchor)
@@ -236,10 +318,14 @@ class MainWindow(QMainWindow):
         self.field.set_formation_callback(self.apply_formation)
         self.setCentralWidget(self.build_layout())
         self.build_menus()
+        self.restore_ui_layout()
         self.refresh_audio_versions()
         self.refresh_timing_events()
         self.populate_sets()
+        self.refresh_marcher_table()
+        self.refresh_prop_table()
         self.refresh_visibility_filters()
+        self.refresh_appearance_groups()
         self.refresh_constraints()
         self.sync_timeline()
         self.sync_inspector()
@@ -260,6 +346,9 @@ class MainWindow(QMainWindow):
         self.plugin_named_menus["Edit"] = edit_menu
         edit_menu.addAction(self.menu_action("Undo", self.undo_stack.undo, QKeySequence.StandardKey.Undo))
         edit_menu.addAction(self.menu_action("Redo", self.undo_stack.redo, QKeySequence.StandardKey.Redo))
+        edit_menu.addSeparator()
+        edit_menu.addAction(self.menu_action("Command Palette", self.show_command_palette, QKeySequence("Ctrl+Shift+P")))
+        edit_menu.addAction(self.menu_action("Keyboard Shortcuts", self.show_shortcut_editor, QKeySequence("Ctrl+Alt+,")))
 
         playback_menu = self.menuBar().addMenu("Playback")
         self.plugin_named_menus["Playback"] = playback_menu
@@ -268,22 +357,44 @@ class MainWindow(QMainWindow):
         playback_menu.addAction(self.menu_action("Toggle Loop Current Set", self.toggle_loop_current_set, QKeySequence("Ctrl+L")))
         playback_menu.addAction(self.menu_action("Go To Count", self.focus_count_finder, QKeySequence("Ctrl+G")))
 
+        settings_menu = self.menuBar().addMenu("Settings")
+        self.plugin_named_menus["Settings"] = settings_menu
+        settings_menu.addAction(self.menu_action("Preferences", self.open_preferences, QKeySequence("Ctrl+,")))
+
+        view_menu = self.menuBar().addMenu("View")
+        self.plugin_named_menus["View"] = view_menu
+        panels_menu = view_menu.addMenu("Panels")
+        for title, dock in self.dock_widgets.items():
+            action = dock.toggleViewAction()
+            action.setText(dock.windowTitle())
+            panels_menu.addAction(action)
+        workspace_menu = view_menu.addMenu("Workspaces")
+        for workspace_name, label, shortcut in (
+            ("design", "Design Workspace", "Ctrl+Alt+1"),
+            ("forms", "Forms Workspace", "Ctrl+Alt+2"),
+            ("rehearse", "Rehearse Workspace", "Ctrl+Alt+3"),
+            ("print", "Print Workspace", "Ctrl+Alt+4"),
+            ("focus", "Focus Field", "Ctrl+Alt+5"),
+        ):
+            workspace_menu.addAction(
+                self.menu_action(
+                    label,
+                    lambda _checked=False, name=workspace_name: self.apply_workspace(name),
+                    QKeySequence(shortcut),
+                )
+            )
+        workspace_menu.addSeparator()
+        workspace_menu.addAction(self.menu_action("Reset Panels", self.reset_panel_layout))
+
         tools_menu = self.menuBar().addMenu("Tools")
         self.plugin_named_menus["Tools"] = tools_menu
-        add_marcher_action = QAction("Add Marcher", self)
-        add_marcher_action.setShortcut(QKeySequence("Ctrl+M"))
-        add_marcher_action.triggered.connect(self.add_marcher)
-        delete_marcher_action = QAction("Delete Selected", self)
-        delete_marcher_action.setShortcut(QKeySequence("Del"))
-        delete_marcher_action.triggered.connect(self.delete_selected_marchers)
-        add_set_action = QAction("Add Set", self)
-        add_set_action.setShortcut(QKeySequence("Ctrl+Alt+S"))
-        add_set_action.triggered.connect(self.add_set)
-        remove_set_action = QAction("Remove Set", self)
-        remove_set_action.setShortcut(QKeySequence("Ctrl+Alt+Backspace"))
-        remove_set_action.triggered.connect(self.remove_set)
+        add_marcher_action = self.menu_action("Add Marcher", self.add_marcher, QKeySequence("Ctrl+M"))
+        delete_marcher_action = self.menu_action("Delete Selected", self.delete_selected_marchers, QKeySequence("Del"))
+        import_prop_action = self.menu_action("Import Prop Image", self.import_prop_image, QKeySequence("Ctrl+Alt+I"))
+        add_set_action = self.menu_action("Add Set", self.add_set, QKeySequence("Ctrl+Alt+S"))
+        remove_set_action = self.menu_action("Remove Set", self.remove_set, QKeySequence("Ctrl+Alt+Backspace"))
         tools_menu.addActions(
-            [add_marcher_action, delete_marcher_action, add_set_action, remove_set_action]
+            [add_marcher_action, delete_marcher_action, import_prop_action, add_set_action, remove_set_action]
         )
         tools_menu.addSeparator()
         tool_shortcuts = (
@@ -297,6 +408,7 @@ class MainWindow(QMainWindow):
             ("Circle Tool", EditorTool.CIRCLE, "Alt+8"),
             ("Rectangle Tool", EditorTool.RECTANGLE, "Alt+9"),
             ("Lasso Tool", EditorTool.LASSO, "Alt+0"),
+            ("Scale Form Tool", EditorTool.SCALE, "Ctrl+Alt+X"),
             ("Spiral Tool", EditorTool.SPIRAL, "Ctrl+Alt+P"),
             ("Block/Grid Tool", EditorTool.BLOCK, "Ctrl+Alt+B"),
             ("SVG Shape Tool", EditorTool.SVG_SHAPE, "Ctrl+Alt+V"),
@@ -313,11 +425,13 @@ class MainWindow(QMainWindow):
         clear_paths_action = self.menu_action("Clear Selected Paths", self.clear_selected_paths, QKeySequence("Ctrl+Alt+Shift+R"))
         keyframe_action = self.menu_action("Set Count Keyframe", self.add_micro_keyframe, QKeySequence("Ctrl+Alt+K"))
         follow_action = self.menu_action("Follow-Leader Conveyor", self.follow_leader_rotate, QKeySequence("Ctrl+Alt+F"))
-        tools_menu.addActions([snap_action, analyze_action, plan_action, clear_paths_action, keyframe_action, follow_action])
+        fit_prop_action = self.menu_action("Fit Form to Selected Prop", self.fit_selected_form_to_prop, QKeySequence("Ctrl+Alt+Shift+X"))
+        tools_menu.addActions([snap_action, analyze_action, plan_action, clear_paths_action, keyframe_action, follow_action, fit_prop_action])
         self.addActions(
             [
                 add_marcher_action,
                 delete_marcher_action,
+                import_prop_action,
                 add_set_action,
                 remove_set_action,
                 *tool_actions,
@@ -327,17 +441,287 @@ class MainWindow(QMainWindow):
                 clear_paths_action,
                 keyframe_action,
                 follow_action,
+                fit_prop_action,
             ]
         )
         self.plugin_tools_menu = self.menuBar().addMenu("Plugin Tools")
         self.plugin_named_menus["Plugin Tools"] = self.plugin_tools_menu
+        self.build_workspace_toolbar()
 
     def menu_action(self, text: str, callback, shortcut=None) -> QAction:
         action = QAction(text, self)
         action.triggered.connect(callback)
-        if shortcut:
+        command_id = self.unique_command_id(text)
+        default_shortcut = self.shortcut_text(shortcut)
+        action.setProperty("command_id", command_id)
+        action.setProperty("default_shortcut", default_shortcut)
+        self.command_actions[command_id] = action
+        self.command_defaults[command_id] = default_shortcut
+        saved_shortcut = self.settings.value(f"shortcuts/{command_id}", None)
+        if saved_shortcut is not None:
+            action.setShortcut(QKeySequence(str(saved_shortcut)))
+        elif shortcut:
             action.setShortcut(shortcut)
         return action
+
+    def unique_command_id(self, text: str) -> str:
+        base = "".join(char.lower() if char.isalnum() else "_" for char in text).strip("_")
+        base = base or "command"
+        command_id = base
+        suffix = 2
+        while command_id in self.command_actions:
+            command_id = f"{base}_{suffix}"
+            suffix += 1
+        return command_id
+
+    def shortcut_text(self, shortcut) -> str:
+        if not shortcut:
+            return ""
+        return QKeySequence(shortcut).toString(QKeySequence.SequenceFormat.NativeText)
+
+    def sorted_command_actions(self) -> list[tuple[str, QAction]]:
+        return sorted(
+            (
+                (command_id, action)
+                for command_id, action in self.command_actions.items()
+                if action.text().strip()
+            ),
+            key=lambda item: item[1].text().lower(),
+        )
+
+    def configure_command_table(self, table: QTableWidget) -> None:
+        table.setHorizontalHeaderLabels(["Command", "Shortcut"])
+        table.verticalHeader().setVisible(False)
+        table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        table.horizontalHeader().setStretchLastSection(False)
+        table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Fixed)
+        table.setColumnWidth(1, 190)
+        table.setMinimumWidth(620)
+
+    def show_command_palette(self) -> None:
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Command Palette")
+        dialog.resize(760, 500)
+        layout = QVBoxLayout(dialog)
+        search = QLineEdit()
+        search.setPlaceholderText("Search commands...")
+        table = QTableWidget(0, 2)
+        self.configure_command_table(table)
+        layout.addWidget(search)
+        layout.addWidget(table, 1)
+        hint = QLabel("Enter runs the selected command. Shortcuts are shown in a separate column.")
+        layout.addWidget(hint)
+
+        def refresh() -> None:
+            query = search.text().strip().lower()
+            rows = [
+                (command_id, action)
+                for command_id, action in self.sorted_command_actions()
+                if not query
+                or query in action.text().lower()
+                or query in action.shortcut().toString(QKeySequence.SequenceFormat.NativeText).lower()
+            ]
+            table.setRowCount(len(rows))
+            for row, (command_id, action) in enumerate(rows):
+                command_item = QTableWidgetItem(action.text())
+                command_item.setData(Qt.ItemDataRole.UserRole, command_id)
+                shortcut_text = action.shortcut().toString(QKeySequence.SequenceFormat.NativeText)
+                shortcut_item = QTableWidgetItem(shortcut_text)
+                shortcut_item.setToolTip(shortcut_text)
+                shortcut_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                table.setItem(row, 0, command_item)
+                table.setItem(row, 1, shortcut_item)
+            if rows:
+                table.selectRow(0)
+
+        def run_selected() -> None:
+            row = table.currentRow()
+            if row < 0 and table.rowCount():
+                row = 0
+            item = table.item(row, 0) if row >= 0 else None
+            if not item:
+                return
+            command_id = str(item.data(Qt.ItemDataRole.UserRole))
+            action = self.command_actions.get(command_id)
+            if not action:
+                return
+            dialog.accept()
+            action.trigger()
+
+        search.textChanged.connect(refresh)
+        search.returnPressed.connect(run_selected)
+        table.itemDoubleClicked.connect(lambda _item: run_selected())
+        refresh()
+        search.setFocus()
+        dialog.exec()
+
+    def show_shortcut_editor(self) -> None:
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Keyboard Shortcuts")
+        dialog.resize(800, 560)
+        layout = QVBoxLayout(dialog)
+        search = QLineEdit()
+        search.setPlaceholderText("Search commands...")
+        table = QTableWidget(0, 2)
+        self.configure_command_table(table)
+        sequence_editor = QKeySequenceEdit()
+        if hasattr(sequence_editor, "setClearButtonEnabled"):
+            sequence_editor.setClearButtonEnabled(True)
+        button_row = QHBoxLayout()
+        apply_button = QPushButton("Apply Shortcut")
+        clear_button = QPushButton("Clear")
+        reset_button = QPushButton("Reset Selected")
+        reset_all_button = QPushButton("Reset All")
+        close_button = QPushButton("Close")
+        close_button.clicked.connect(dialog.accept)
+        for button in (apply_button, clear_button, reset_button, reset_all_button):
+            button_row.addWidget(button)
+        button_row.addStretch()
+        button_row.addWidget(close_button)
+        layout.addWidget(search)
+        layout.addWidget(table, 1)
+        layout.addWidget(QLabel("New Shortcut"))
+        layout.addWidget(sequence_editor)
+        layout.addLayout(button_row)
+
+        def refresh() -> None:
+            query = search.text().strip().lower()
+            rows = [
+                (command_id, action)
+                for command_id, action in self.sorted_command_actions()
+                if not query
+                or query in action.text().lower()
+                or query in action.shortcut().toString(QKeySequence.SequenceFormat.NativeText).lower()
+            ]
+            table.setRowCount(len(rows))
+            for row, (command_id, action) in enumerate(rows):
+                command_item = QTableWidgetItem(action.text())
+                command_item.setData(Qt.ItemDataRole.UserRole, command_id)
+                shortcut_text = action.shortcut().toString(QKeySequence.SequenceFormat.NativeText)
+                shortcut_item = QTableWidgetItem(shortcut_text)
+                shortcut_item.setToolTip(shortcut_text)
+                shortcut_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                table.setItem(row, 0, command_item)
+                table.setItem(row, 1, shortcut_item)
+            if rows:
+                table.selectRow(0)
+                update_editor()
+
+        def selected_command_id() -> str:
+            row = table.currentRow()
+            item = table.item(row, 0) if row >= 0 else None
+            return str(item.data(Qt.ItemDataRole.UserRole)) if item else ""
+
+        def update_editor() -> None:
+            action = self.command_actions.get(selected_command_id())
+            sequence_editor.setKeySequence(action.shortcut() if action else QKeySequence())
+
+        def set_shortcut(command_id: str, shortcut: QKeySequence, persist: bool = True) -> None:
+            action = self.command_actions.get(command_id)
+            if not action:
+                return
+            action.setShortcut(shortcut)
+            if persist:
+                self.settings.setValue(
+                    f"shortcuts/{command_id}",
+                    shortcut.toString(QKeySequence.SequenceFormat.PortableText),
+                )
+            self.settings.sync()
+            refresh()
+
+        def apply_selected() -> None:
+            command_id = selected_command_id()
+            if command_id:
+                set_shortcut(command_id, sequence_editor.keySequence())
+
+        def clear_selected() -> None:
+            command_id = selected_command_id()
+            if command_id:
+                set_shortcut(command_id, QKeySequence())
+
+        def reset_selected() -> None:
+            command_id = selected_command_id()
+            if not command_id:
+                return
+            self.settings.remove(f"shortcuts/{command_id}")
+            default = self.command_defaults.get(command_id, "")
+            set_shortcut(command_id, QKeySequence(default), persist=False)
+
+        def reset_all() -> None:
+            for command_id, action in self.command_actions.items():
+                self.settings.remove(f"shortcuts/{command_id}")
+                action.setShortcut(QKeySequence(self.command_defaults.get(command_id, "")))
+            self.settings.sync()
+            refresh()
+
+        search.textChanged.connect(refresh)
+        table.itemSelectionChanged.connect(update_editor)
+        apply_button.clicked.connect(apply_selected)
+        clear_button.clicked.connect(clear_selected)
+        reset_button.clicked.connect(reset_selected)
+        reset_all_button.clicked.connect(reset_all)
+        refresh()
+        dialog.exec()
+
+    def open_preferences(self) -> None:
+        handler = getattr(self.window(), "show_preferences", None)
+        if callable(handler):
+            handler()
+
+    def saved_audio_output_device_id(self) -> str:
+        return normalize_audio_output_device_id(
+            self.settings.value(AUDIO_OUTPUT_DEVICE_SETTING, DEFAULT_AUDIO_OUTPUT_DEVICE_ID)
+        )
+
+    def schedule_audio_output_refresh(self) -> None:
+        self.audio_device_refresh_timer.start()
+
+    def apply_saved_audio_output_device(self) -> None:
+        self.apply_audio_output_device(self.saved_audio_output_device_id(), show_status=False)
+
+    def apply_audio_output_device(self, device_id: str, show_status: bool = True) -> None:
+        normalized = normalize_audio_output_device_id(device_id)
+        device = audio_output_for_id(normalized)
+        if device.isNull():
+            if show_status:
+                self.statusBar().showMessage("No audio output devices available", 3000)
+            return
+
+        target_physical_id = audio_device_id(device)
+        current_device = self.audio_output.device()
+        current_physical_id = "" if current_device.isNull() else audio_device_id(current_device)
+        already_requested = self.requested_audio_output_device_id == normalized
+        already_on_target = (
+            current_physical_id == target_physical_id
+            and self.applied_audio_output_physical_id == target_physical_id
+        )
+        if already_requested and already_on_target:
+            if show_status:
+                self.statusBar().showMessage(f"Audio output: {audio_output_label_for_id(normalized)}", 3000)
+            return
+        if current_physical_id == target_physical_id:
+            self.requested_audio_output_device_id = normalized
+            self.applied_audio_output_physical_id = target_physical_id
+            if show_status:
+                self.statusBar().showMessage(f"Audio output: {audio_output_label_for_id(normalized)}", 3000)
+            return
+
+        was_playing = self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState
+        position = self.player.position()
+        if was_playing:
+            self.player.pause()
+        self.audio_output.setDevice(device)
+        self.requested_audio_output_device_id = normalized
+        self.applied_audio_output_physical_id = target_physical_id
+        if self.player.source().isValid():
+            self.player.setPosition(position)
+        if was_playing:
+            QTimer.singleShot(80, self.player.play)
+        if show_status:
+            self.statusBar().showMessage(f"Audio output: {audio_output_label_for_id(normalized)}", 3000)
 
     def register_plugin_form_tool(
         self,
@@ -347,6 +731,7 @@ class MainWindow(QMainWindow):
         shortcut: str | None = None,
         min_selected: int = 2,
         tooltip: str = "",
+        settings: list[dict[str, Any]] | None = None,
     ) -> str:
         safe_name = "".join(char if char.isalnum() else "_" for char in name.lower()).strip("_")
         tool_id = f"{plugin_id}:{safe_name or 'tool'}"
@@ -359,17 +744,21 @@ class MainWindow(QMainWindow):
             name=name,
             callback=callback,
             min_selected=max(1, int(min_selected)),
+            settings=self.normalize_plugin_settings(settings or []),
         )
         button = QPushButton(name)
+        button.setCheckable(True)
         button.setToolTip(tooltip or f"Plugin form tool from {plugin_id}")
-        button.clicked.connect(lambda _checked=False, selected=tool_id: self.apply_plugin_form_tool(selected))
+        button.setMaximumHeight(28)
+        button.clicked.connect(lambda _checked=False, selected=tool_id: self.activate_plugin_form_tool(selected))
+        self.plugin_form_tool_buttons[tool_id] = button
         self.plugin_form_tool_layout.addWidget(button)
         self.plugin_form_tool_group.setVisible(True)
         self.plugin_contribution_widgets.setdefault(plugin_id, []).append(button)
 
         action = self.menu_action(
             name,
-            lambda _checked=False, selected=tool_id: self.apply_plugin_form_tool(selected),
+            lambda _checked=False, selected=tool_id: self.activate_plugin_form_tool(selected),
             QKeySequence(shortcut) if shortcut else None,
         )
         action.setToolTip(tooltip)
@@ -382,21 +771,48 @@ class MainWindow(QMainWindow):
         tool = self.plugin_form_tools.pop(tool_id, None)
         if tool is None:
             return
+        if self.active_plugin_form_tool_id == tool_id:
+            self.active_plugin_form_tool_id = ""
+            self.set_tool(EditorTool.SELECT)
         for widget in list(self.plugin_contribution_widgets.get(tool.plugin_id, [])):
             if isinstance(widget, QPushButton) and widget.text() == tool.name:
                 widget.setParent(None)
                 widget.deleteLater()
                 self.plugin_contribution_widgets[tool.plugin_id].remove(widget)
+        self.plugin_form_tool_buttons.pop(tool_id, None)
+        for widget in self.plugin_form_tool_setting_widgets.pop(tool_id, {}).values():
+            widget.deleteLater()
         for menu, action in list(self.plugin_contribution_actions.get(tool.plugin_id, [])):
             if action.text() == tool.name:
                 menu.removeAction(action)
                 self.removeAction(action)
+                command_id = action.property("command_id")
+                if command_id:
+                    self.command_actions.pop(str(command_id), None)
+                    self.command_defaults.pop(str(command_id), None)
                 action.deleteLater()
                 self.plugin_contribution_actions[tool.plugin_id].remove((menu, action))
         self.plugin_form_tool_group.setVisible(bool(self.plugin_form_tools))
 
-    def apply_plugin_form_tool(self, tool_id: str) -> None:
+    def activate_plugin_form_tool(self, tool_id: str) -> None:
         tool = self.plugin_form_tools.get(tool_id)
+        if tool is None:
+            return
+        self.active_plugin_form_tool_id = tool_id
+        self.field.set_tool(EditorTool.PLUGIN_FORM)
+        for button_tool_id, button in self.plugin_form_tool_buttons.items():
+            button.setChecked(button_tool_id == tool_id)
+        for button in self.tool_buttons.values():
+            button.setChecked(False)
+        self.rebuild_plugin_tool_options(tool)
+        self.update_tool_edit_visibility()
+        self.update_formation_preview()
+
+    def apply_plugin_form_tool(self, tool_id: str) -> None:
+        self.activate_plugin_form_tool(tool_id)
+
+    def apply_active_plugin_form_tool_preview(self) -> None:
+        tool = self.plugin_form_tools.get(self.active_plugin_form_tool_id)
         if tool is None:
             return
         ids, positions = self.selected_positions()
@@ -422,6 +838,7 @@ class MainWindow(QMainWindow):
             center=center,
             bounds_width=bounds_width,
             bounds_height=bounds_height,
+            settings=self.plugin_setting_values(tool.tool_id),
         )
         try:
             result = tool.callback(context)
@@ -432,6 +849,9 @@ class MainWindow(QMainWindow):
         if not targets:
             return
         self.apply_plugin_targets(tool.name, targets)
+        self.active_plugin_form_tool_id = ""
+        self.field.clear_preview()
+        self.set_tool(EditorTool.SELECT)
 
     def normalize_plugin_targets(
         self,
@@ -462,6 +882,212 @@ class MainWindow(QMainWindow):
             return targets
         QMessageBox.warning(self, "Plugin Tool Failed", "Plugin must return a dict or list of positions.")
         return {}
+
+    def normalize_plugin_settings(self, settings: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        normalized: list[dict[str, Any]] = []
+        used_names: set[str] = set()
+        for index, setting in enumerate(settings):
+            if not isinstance(setting, dict):
+                continue
+            raw_name = str(setting.get("name") or setting.get("id") or f"setting_{index + 1}")
+            name = "".join(char if char.isalnum() or char == "_" else "_" for char in raw_name).strip("_")
+            if not name:
+                name = f"setting_{index + 1}"
+            base_name = name
+            suffix = 2
+            while name in used_names:
+                name = f"{base_name}_{suffix}"
+                suffix += 1
+            used_names.add(name)
+            setting_type = str(setting.get("type") or "float").lower()
+            if setting_type in {"number", "double"}:
+                setting_type = "float"
+            if setting_type in {"integer"}:
+                setting_type = "int"
+            if setting_type in {"select", "combo"}:
+                setting_type = "choice"
+            normalized.append(
+                {
+                    **setting,
+                    "name": name,
+                    "label": str(setting.get("label") or name.replace("_", " ").title()),
+                    "type": setting_type,
+                }
+            )
+        return normalized
+
+    def rebuild_plugin_tool_options(self, tool: PluginFormTool) -> None:
+        if not hasattr(self, "plugin_tool_form"):
+            return
+        while self.plugin_tool_form.rowCount():
+            self.plugin_tool_form.removeRow(0)
+        self.plugin_form_tool_setting_widgets.setdefault(tool.tool_id, {})
+        self.plugin_tool_group.setTitle(tool.name)
+        if not tool.settings:
+            note = QLabel("This plugin has no adjustable settings.")
+            note.setWordWrap(True)
+            self.plugin_tool_form.addRow(note)
+            return
+        self.plugin_form_tool_setting_widgets[tool.tool_id] = {}
+        for setting in tool.settings:
+            widget = self.create_plugin_setting_widget(tool.tool_id, setting)
+            self.plugin_form_tool_setting_widgets[tool.tool_id][setting["name"]] = widget
+            self.plugin_tool_form.addRow(setting["label"], widget)
+
+    def create_plugin_setting_widget(self, tool_id: str, setting: dict[str, Any]) -> QWidget:
+        setting_type = str(setting.get("type", "float"))
+        default = setting.get("default")
+        if setting_type == "int":
+            widget = QSpinBox()
+            widget.setRange(int(setting.get("min", -9999)), int(setting.get("max", 9999)))
+            widget.setSingleStep(int(setting.get("step", 1)))
+            widget.setValue(int(default if default is not None else setting.get("min", 0)))
+            if setting.get("suffix"):
+                widget.setSuffix(str(setting["suffix"]))
+            widget.valueChanged.connect(self.update_formation_preview)
+            return widget
+        if setting_type in {"bool", "checkbox"}:
+            widget = QCheckBox(str(setting.get("text") or "Enabled"))
+            widget.setChecked(bool(default))
+            widget.toggled.connect(self.update_formation_preview)
+            return widget
+        if setting_type == "choice":
+            widget = QComboBox()
+            options = setting.get("options") or []
+            for option in options:
+                if isinstance(option, dict):
+                    widget.addItem(str(option.get("label", option.get("value", ""))), option.get("value"))
+                else:
+                    widget.addItem(str(option), option)
+            if default is not None:
+                index = widget.findData(default)
+                if index < 0:
+                    index = widget.findText(str(default))
+                if index >= 0:
+                    widget.setCurrentIndex(index)
+            widget.currentIndexChanged.connect(self.update_formation_preview)
+            return widget
+        if setting_type == "text":
+            widget = QLineEdit(str(default or ""))
+            widget.textChanged.connect(self.update_formation_preview)
+            return widget
+
+        widget = QDoubleSpinBox()
+        widget.setRange(float(setting.get("min", -9999.0)), float(setting.get("max", 9999.0)))
+        widget.setDecimals(int(setting.get("decimals", 2)))
+        widget.setSingleStep(float(setting.get("step", 0.5)))
+        widget.setValue(float(default if default is not None else setting.get("min", 0.0)))
+        if setting.get("suffix"):
+            widget.setSuffix(str(setting["suffix"]))
+        widget.valueChanged.connect(self.update_formation_preview)
+        return widget
+
+    def plugin_setting_values(self, tool_id: str) -> dict[str, Any]:
+        values: dict[str, Any] = {}
+        tool = self.plugin_form_tools.get(tool_id)
+        if not tool:
+            return values
+        widgets = self.plugin_form_tool_setting_widgets.get(tool_id, {})
+        for setting in tool.settings:
+            name = setting["name"]
+            widget = widgets.get(name)
+            if isinstance(widget, QDoubleSpinBox):
+                values[name] = widget.value()
+            elif isinstance(widget, QSpinBox):
+                values[name] = widget.value()
+            elif isinstance(widget, QCheckBox):
+                values[name] = widget.isChecked()
+            elif isinstance(widget, QComboBox):
+                data = widget.currentData()
+                values[name] = data if data is not None else widget.currentText()
+            elif isinstance(widget, QLineEdit):
+                values[name] = widget.text()
+            else:
+                values[name] = setting.get("default")
+        return values
+
+    def plugin_formation_targets(self) -> dict[str, tuple[float, float]]:
+        tool = self.plugin_form_tools.get(self.active_plugin_form_tool_id)
+        if tool is None:
+            return {}
+        ids, positions = self.selected_positions()
+        if len(ids) < tool.min_selected:
+            return {}
+        center = (
+            sum(x for x, _y in positions) / len(positions),
+            sum(y for _x, y in positions) / len(positions),
+        )
+        bounds_width = max(x for x, _y in positions) - min(x for x, _y in positions)
+        bounds_height = max(y for _x, y in positions) - min(y for _x, y in positions)
+        context = FormToolContext(
+            window=self,
+            project=self.project,
+            set_index=self.set_index,
+            dot_ids=ids,
+            positions=positions,
+            center=center,
+            bounds_width=bounds_width,
+            bounds_height=bounds_height,
+            settings=self.plugin_setting_values(tool.tool_id),
+        )
+        try:
+            return self.normalize_plugin_targets(ids, tool.callback(context))
+        except Exception as exc:
+            self.statusBar().showMessage(f"{tool.name} preview failed: {exc}", 4000)
+            return {}
+
+    def plugin_formation_handles(self) -> dict[str, tuple[float, float]]:
+        tool = self.plugin_form_tools.get(self.active_plugin_form_tool_id)
+        if tool is None:
+            return {}
+        _ids, positions = self.selected_positions()
+        if len(positions) < 2:
+            return {}
+        center_x = sum(x for x, _y in positions) / len(positions)
+        center_y = sum(y for _x, y in positions) / len(positions)
+        values = self.plugin_setting_values(tool.tool_id)
+        handles: dict[str, tuple[float, float]] = {}
+        for setting in tool.settings:
+            handle = str(setting.get("handle") or "").lower()
+            if not handle:
+                continue
+            name = setting["name"]
+            try:
+                value = float(values.get(name, setting.get("default", 0)))
+            except (TypeError, ValueError):
+                continue
+            if handle == "width":
+                handles[f"plugin_setting:{name}"] = (center_x + value / 2, center_y)
+            elif handle == "height":
+                handles[f"plugin_setting:{name}"] = (center_x, center_y + value / 2)
+            elif handle == "radius":
+                handles[f"plugin_setting:{name}"] = (center_x + value, center_y)
+        return handles
+
+    def update_plugin_setting_from_handle(self, name: str, x: float, y: float) -> bool:
+        tool = self.plugin_form_tools.get(self.active_plugin_form_tool_id)
+        if tool is None:
+            return False
+        widget = self.plugin_form_tool_setting_widgets.get(tool.tool_id, {}).get(name)
+        setting = next((item for item in tool.settings if item["name"] == name), None)
+        if setting is None or not isinstance(widget, (QDoubleSpinBox, QSpinBox)):
+            return False
+        _ids, positions = self.selected_positions()
+        if len(positions) < 2:
+            return False
+        center_x = sum(pos_x for pos_x, _pos_y in positions) / len(positions)
+        center_y = sum(pos_y for _pos_x, pos_y in positions) / len(positions)
+        handle = str(setting.get("handle") or "").lower()
+        if handle == "width":
+            value = abs(x - center_x) * 2
+        elif handle == "height":
+            value = abs(y - center_y) * 2
+        elif handle == "radius":
+            value = ((x - center_x) ** 2 + (y - center_y) ** 2) ** 0.5
+        else:
+            return False
+        widget.setValue(value)
+        return True
 
     def apply_plugin_targets(self, name: str, targets: dict[str, tuple[float, float]]) -> None:
         before = self.current_positions()
@@ -520,6 +1146,7 @@ class MainWindow(QMainWindow):
     ) -> None:
         button = QPushButton(text)
         button.setToolTip(tooltip)
+        button.setMaximumHeight(28)
         button.clicked.connect(callback)
         self.plugin_panel_layout.addWidget(button)
         self.plugin_panel_group.setVisible(True)
@@ -533,27 +1160,150 @@ class MainWindow(QMainWindow):
             for menu, action in self.plugin_contribution_actions.pop(current_plugin_id, []):
                 menu.removeAction(action)
                 self.removeAction(action)
+                command_id = action.property("command_id")
+                if command_id:
+                    self.command_actions.pop(str(command_id), None)
+                    self.command_defaults.pop(str(command_id), None)
                 action.deleteLater()
             for widget in self.plugin_contribution_widgets.pop(current_plugin_id, []):
                 widget.setParent(None)
                 widget.deleteLater()
             for tool_id, tool in list(self.plugin_form_tools.items()):
                 if tool.plugin_id == current_plugin_id:
-                    self.plugin_form_tools.pop(tool_id, None)
+                    self.remove_plugin_form_tool(tool_id)
         self.plugin_form_tool_group.setVisible(bool(self.plugin_form_tools))
         self.plugin_panel_group.setVisible(bool(self.plugin_contribution_widgets))
 
     def build_layout(self) -> QWidget:
-        root = QWidget()
-        root_layout = QVBoxLayout(root)
-        splitter = QSplitter()
-        splitter.addWidget(self.scroll_panel(self.build_tools_panel(), 300))
-        splitter.addWidget(self.field)
-        splitter.addWidget(self.scroll_panel(self.build_inspector_panel(), 360))
-        splitter.setSizes([320, 1000, 380])
-        root_layout.addWidget(splitter, 1)
-        root_layout.addWidget(self.build_timeline_panel())
-        return root
+        self.setDockOptions(
+            QMainWindow.DockOption.AllowNestedDocks
+            | QMainWindow.DockOption.AllowTabbedDocks
+            | QMainWindow.DockOption.AnimatedDocks
+        )
+        self.create_dock(
+            "tools",
+            "Library / Tools",
+            self.scroll_panel(self.build_tools_panel(), 245),
+            Qt.DockWidgetArea.LeftDockWidgetArea,
+            minimum_width=245,
+        )
+        self.create_dock(
+            "inspector",
+            "Inspector",
+            self.scroll_panel(self.build_inspector_panel(), 285),
+            Qt.DockWidgetArea.RightDockWidgetArea,
+            minimum_width=285,
+        )
+        self.create_dock(
+            "timeline",
+            "Timeline",
+            self.build_timeline_panel(),
+            Qt.DockWidgetArea.BottomDockWidgetArea,
+            minimum_height=170,
+        )
+        self.resizeDocks(
+            [self.dock_widgets["tools"], self.dock_widgets["inspector"]],
+            [270, 320],
+            Qt.Orientation.Horizontal,
+        )
+        self.resizeDocks([self.dock_widgets["timeline"]], [210], Qt.Orientation.Vertical)
+        return self.field
+
+    def create_dock(
+        self,
+        key: str,
+        title: str,
+        widget: QWidget,
+        area: Qt.DockWidgetArea,
+        minimum_width: int = 0,
+        minimum_height: int = 0,
+    ) -> QDockWidget:
+        dock = QDockWidget(title, self)
+        dock.setObjectName(f"{key}Dock")
+        dock.setWidget(widget)
+        dock.setAllowedAreas(Qt.DockWidgetArea.AllDockWidgetAreas)
+        dock.setFeatures(
+            QDockWidget.DockWidgetFeature.DockWidgetMovable
+            | QDockWidget.DockWidgetFeature.DockWidgetFloatable
+            | QDockWidget.DockWidgetFeature.DockWidgetClosable
+        )
+        if minimum_width:
+            dock.setMinimumWidth(minimum_width)
+        if minimum_height:
+            dock.setMinimumHeight(minimum_height)
+        self.addDockWidget(area, dock)
+        self.dock_widgets[key] = dock
+        return dock
+
+    def build_workspace_toolbar(self) -> None:
+        toolbar = QToolBar("Workspaces", self)
+        toolbar.setObjectName("WorkspaceToolbar")
+        toolbar.setMovable(False)
+        toolbar.setFloatable(False)
+        self.addToolBar(Qt.ToolBarArea.TopToolBarArea, toolbar)
+        for workspace_name, label in (
+            ("design", "Design"),
+            ("forms", "Forms"),
+            ("rehearse", "Rehearse"),
+            ("print", "Print"),
+            ("focus", "Focus"),
+        ):
+            toolbar.addAction(
+                self.menu_action(
+                    label,
+                    lambda _checked=False, name=workspace_name: self.apply_workspace(name),
+                )
+            )
+        toolbar.addSeparator()
+        toolbar.addAction(self.command_actions["command_palette"])
+
+    def restore_ui_layout(self) -> None:
+        state = self.settings.value("main_window/dock_state")
+        if state:
+            self.restoreState(state)
+
+    def reset_panel_layout(self) -> None:
+        self.settings.remove("main_window/dock_state")
+        for dock in self.dock_widgets.values():
+            dock.setFloating(False)
+            dock.show()
+        self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self.dock_widgets["tools"])
+        self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.dock_widgets["inspector"])
+        self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, self.dock_widgets["timeline"])
+        self.apply_workspace("design")
+        self.statusBar().showMessage("Panel layout reset", 2200)
+
+    def apply_workspace(self, name: str) -> None:
+        for dock in self.dock_widgets.values():
+            dock.show()
+        if name == "focus":
+            for dock in self.dock_widgets.values():
+                dock.hide()
+            self.statusBar().showMessage("Focus workspace: field only", 2200)
+            return
+
+        tools_index = 0
+        inspector_index = 0
+        if name == "forms":
+            tools_index = self.tools_tabs.indexOf(self.formation_tab)
+            inspector_index = self.inspector_tabs.indexOf(self.selection_tab)
+            self.dock_widgets["timeline"].hide()
+        elif name == "rehearse":
+            tools_index = self.tools_tabs.indexOf(self.rehearsal_tab)
+            inspector_index = self.inspector_tabs.indexOf(self.sets_tab)
+        elif name == "print":
+            tools_index = self.tools_tabs.indexOf(self.analysis_tab)
+            inspector_index = self.inspector_tabs.indexOf(self.sets_tab)
+            self.dock_widgets["timeline"].hide()
+        else:
+            tools_index = self.tools_tabs.indexOf(self.marchers_tab)
+            inspector_index = self.inspector_tabs.indexOf(self.selection_tab)
+
+        if tools_index >= 0:
+            self.tools_tabs.setCurrentIndex(tools_index)
+        if inspector_index >= 0:
+            self.inspector_tabs.setCurrentIndex(inspector_index)
+        self.statusBar().showMessage(f"{name.title()} workspace applied", 2200)
 
     def scroll_panel(self, widget: QWidget, minimum_width: int) -> QScrollArea:
         scroll = QScrollArea()
@@ -566,15 +1316,102 @@ class MainWindow(QMainWindow):
     def build_tools_panel(self) -> QWidget:
         panel = QWidget()
         layout = QVBoxLayout(panel)
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setSpacing(6)
         tabs = QTabWidget()
+        tabs.setObjectName("SideTabs")
+        tabs.setDocumentMode(True)
+        tabs.setUsesScrollButtons(True)
+        self.tools_tabs = tabs
         layout.addWidget(tabs)
 
+        marchers_tab = QWidget()
+        self.marchers_tab = marchers_tab
+        marchers_layout = QVBoxLayout(marchers_tab)
+        marchers_layout.setContentsMargins(4, 4, 4, 4)
+        marchers_header = QHBoxLayout()
+        marchers_title = QLabel("Marchers")
+        marchers_title.setStyleSheet("font-size: 14px; font-weight: 750;")
+        add_button = QPushButton("Add")
+        add_button.clicked.connect(self.add_marcher)
+        delete_button = QPushButton("Delete")
+        delete_button.clicked.connect(self.delete_selected_marchers)
+        marchers_header.addWidget(marchers_title)
+        marchers_header.addStretch()
+        marchers_header.addWidget(add_button)
+        marchers_header.addWidget(delete_button)
+        marchers_layout.addLayout(marchers_header)
+        search_row = QHBoxLayout()
+        self.marcher_search = QLineEdit()
+        self.marcher_search.setPlaceholderText("Search name, section, instrument, rank...")
+        self.marcher_search.textChanged.connect(self.filter_marcher_table)
+        select_visible_button = QPushButton("Select")
+        select_visible_button.setToolTip("Select all visible marchers from the current search.")
+        select_visible_button.clicked.connect(self.select_visible_marchers)
+        clear_search_button = QPushButton("Clear")
+        clear_search_button.clicked.connect(self.marcher_search.clear)
+        search_row.addWidget(self.marcher_search, 1)
+        search_row.addWidget(select_visible_button)
+        search_row.addWidget(clear_search_button)
+        marchers_layout.addLayout(search_row)
+        self.marcher_table = QTableWidget(0, 4)
+        self.marcher_table.setHorizontalHeaderLabels(["", "#", "Section", "Name"])
+        self.marcher_table.verticalHeader().setVisible(False)
+        self.marcher_table.verticalHeader().setDefaultSectionSize(20)
+        self.marcher_table.setAlternatingRowColors(True)
+        self.marcher_table.setShowGrid(False)
+        self.marcher_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.marcher_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.marcher_table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.marcher_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
+        self.marcher_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        self.marcher_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        self.marcher_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
+        self.marcher_table.setColumnWidth(0, 18)
+        self.marcher_table.cellClicked.connect(self.select_marcher_from_table)
+        marchers_layout.addWidget(self.marcher_table, 1)
+        tabs.addTab(marchers_tab, "Marchers")
+
+        props_tab = QWidget()
+        self.props_tab = props_tab
+        props_layout = QVBoxLayout(props_tab)
+        props_layout.setContentsMargins(4, 4, 4, 4)
+        props_header = QHBoxLayout()
+        props_title = QLabel("Props")
+        props_title.setStyleSheet("font-size: 14px; font-weight: 750;")
+        import_prop_button = QPushButton("Import")
+        import_prop_button.clicked.connect(self.import_prop_image)
+        delete_prop_button = QPushButton("Delete")
+        delete_prop_button.clicked.connect(self.delete_selected_props)
+        props_header.addWidget(props_title)
+        props_header.addStretch()
+        props_header.addWidget(import_prop_button)
+        props_header.addWidget(delete_prop_button)
+        props_layout.addLayout(props_header)
+        self.prop_table = QTableWidget(0, 3)
+        self.prop_table.setHorizontalHeaderLabels(["#", "Name", "Layer"])
+        self.prop_table.verticalHeader().setVisible(False)
+        self.prop_table.verticalHeader().setDefaultSectionSize(20)
+        self.prop_table.setAlternatingRowColors(True)
+        self.prop_table.setShowGrid(False)
+        self.prop_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        self.prop_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.prop_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        self.prop_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self.prop_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        self.prop_table.cellClicked.connect(self.select_prop_from_table)
+        props_layout.addWidget(self.prop_table, 1)
+        tabs.addTab(props_tab, "Props")
+
         formation_tab = QWidget()
+        self.formation_tab = formation_tab
         formation_layout = QVBoxLayout(formation_tab)
+        formation_layout.setContentsMargins(4, 4, 4, 4)
         group = QGroupBox("Formation Tools")
-        tools_layout = QVBoxLayout(group)
+        tools_layout = QGridLayout(group)
+        tools_layout.setSpacing(4)
         self.tool_buttons: dict[EditorTool, QPushButton] = {}
-        for tool, label in (
+        for index, (tool, label) in enumerate((
             (EditorTool.SELECT, "Select"),
             (EditorTool.LINE, "Line"),
             (EditorTool.CURVE, "Curve"),
@@ -583,26 +1420,31 @@ class MainWindow(QMainWindow):
             (EditorTool.RECTANGLE, "Rectangle"),
             (EditorTool.SPIRAL, "Spiral"),
             (EditorTool.BLOCK, "Block/Grid"),
+            (EditorTool.SCALE, "Scale Form"),
             (EditorTool.SVG_SHAPE, "SVG Shape"),
             (EditorTool.LASSO, "Lasso Select"),
             (EditorTool.SCATTER, "Scatter"),
             (EditorTool.MIRROR, "Mirror"),
             (EditorTool.SHAPE_LINE, "Shape Line"),
-        ):
+        )):
             button = QPushButton(label)
             button.setCheckable(True)
             button.clicked.connect(lambda _checked=False, selected=tool: self.set_tool(selected))
-            tools_layout.addWidget(button)
+            tools_layout.addWidget(button, index // 2, index % 2)
             self.tool_buttons[tool] = button
         formation_layout.addWidget(group)
 
         self.plugin_form_tool_group = QGroupBox("Plugin Form Tools")
         self.plugin_form_tool_layout = QVBoxLayout(self.plugin_form_tool_group)
+        self.plugin_form_tool_layout.setContentsMargins(6, 6, 6, 6)
+        self.plugin_form_tool_layout.setSpacing(4)
         self.plugin_form_tool_group.setVisible(False)
         formation_layout.addWidget(self.plugin_form_tool_group)
 
         self.plugin_panel_group = QGroupBox("Plugin Actions")
         self.plugin_panel_layout = QVBoxLayout(self.plugin_panel_group)
+        self.plugin_panel_layout.setContentsMargins(6, 6, 6, 6)
+        self.plugin_panel_layout.setSpacing(4)
         self.plugin_panel_group.setVisible(False)
         formation_layout.addWidget(self.plugin_panel_group)
 
@@ -620,6 +1462,11 @@ class MainWindow(QMainWindow):
 
         self.tool_edit_group = QGroupBox("Tool Edit")
         edit_layout = QVBoxLayout(self.tool_edit_group)
+        self.tool_edit_layout = edit_layout
+
+        self.plugin_tool_group = QGroupBox("Plugin Tool")
+        self.plugin_tool_form = QFormLayout(self.plugin_tool_group)
+        self.plugin_tool_group.setVisible(False)
 
         self.line_tool_group = QGroupBox("Line")
         line_layout = QVBoxLayout(self.line_tool_group)
@@ -714,6 +1561,32 @@ class MainWindow(QMainWindow):
         shape_form.addRow("Block Columns", self.block_columns)
         shape_form.addRow("Block Spacing", self.block_spacing)
 
+        self.scale_tool_group = QGroupBox("Scale Form")
+        scale_form = QFormLayout(self.scale_tool_group)
+        self.scale_width = QDoubleSpinBox()
+        self.scale_width.setRange(0.1, 120)
+        self.scale_width.setValue(30)
+        self.scale_width.setSuffix(" yd")
+        self.scale_height = QDoubleSpinBox()
+        self.scale_height.setRange(0.1, 54)
+        self.scale_height.setValue(18)
+        self.scale_height.setSuffix(" yd")
+        self.scale_lock_aspect = QCheckBox("Lock aspect ratio")
+        self.scale_fit_padding = QDoubleSpinBox()
+        self.scale_fit_padding.setRange(0, 20)
+        self.scale_fit_padding.setValue(0.5)
+        self.scale_fit_padding.setSuffix(" yd")
+        fit_prop_button = QPushButton("Fit Selected Prop")
+        fit_prop_button.clicked.connect(self.fit_selected_form_to_prop)
+        scale_note = QLabel("Select marchers plus a prop, then fit or drag the field handles.")
+        scale_note.setWordWrap(True)
+        scale_form.addRow("Target Width", self.scale_width)
+        scale_form.addRow("Target Height", self.scale_height)
+        scale_form.addRow(self.scale_lock_aspect)
+        scale_form.addRow("Prop Padding", self.scale_fit_padding)
+        scale_form.addRow(fit_prop_button)
+        scale_form.addRow("", scale_note)
+
         self.rotate_tool_group = QGroupBox("Rotate")
         rotate_form = QFormLayout(self.rotate_tool_group)
         self.rotation_degrees = QDoubleSpinBox()
@@ -737,8 +1610,12 @@ class MainWindow(QMainWindow):
             self.spiral_turns,
             self.block_columns,
             self.block_spacing,
+            self.scale_width,
+            self.scale_height,
+            self.scale_fit_padding,
         ):
             editor.valueChanged.connect(self.update_formation_preview)
+        self.scale_lock_aspect.toggled.connect(self.update_formation_preview)
         apply_button = QPushButton("Apply Preview")
         apply_button.clicked.connect(self.apply_current_preview)
         clear_button = QPushButton("Clear Preview")
@@ -746,6 +1623,7 @@ class MainWindow(QMainWindow):
         rotate_button = QPushButton("Rotate Selection")
         rotate_button.clicked.connect(self.rotate_selection)
         for group_widget in (
+            self.plugin_tool_group,
             self.line_tool_group,
             self.curve_tool_group,
             self.arc_tool_group,
@@ -754,6 +1632,7 @@ class MainWindow(QMainWindow):
             self.shape_line_tool_group,
             self.svg_tool_group,
             self.shape_tool_group,
+            self.scale_tool_group,
             self.rotate_tool_group,
         ):
             edit_layout.addWidget(group_widget)
@@ -767,6 +1646,7 @@ class MainWindow(QMainWindow):
         tabs.addTab(formation_tab, "Form")
 
         align_tab = QWidget()
+        self.align_tab = align_tab
         align_tab_layout = QVBoxLayout(align_tab)
         align_tab_layout.addWidget(align_group)
         interval_group = QGroupBox("Interval Intelligence")
@@ -792,6 +1672,7 @@ class MainWindow(QMainWindow):
         tabs.addTab(align_tab, "Align")
 
         analysis_tab = QWidget()
+        self.analysis_tab = analysis_tab
         analysis_layout = QVBoxLayout(analysis_tab)
         analysis_group = QGroupBox("Path Safety")
         analysis_form = QFormLayout(analysis_group)
@@ -821,6 +1702,7 @@ class MainWindow(QMainWindow):
         tabs.addTab(analysis_tab, "Safety")
 
         rehearsal_tab = QWidget()
+        self.rehearsal_tab = rehearsal_tab
         rehearsal_layout = QVBoxLayout(rehearsal_tab)
         playback_group = QGroupBox("Rehearsal")
         playback_form = QFormLayout(playback_group)
@@ -840,6 +1722,8 @@ class MainWindow(QMainWindow):
         clear_keyframe_button.clicked.connect(self.clear_micro_keyframe)
         beat_markers_button = QPushButton("Mark Every Count In Set")
         beat_markers_button.clicked.connect(self.add_count_markers_for_set)
+        auto_hit_button = QPushButton("Auto Detect Hit Markers")
+        auto_hit_button.clicked.connect(self.auto_detect_hit_markers)
         self.micro_edit_enabled = QCheckBox("Micro Edit Dragging")
         playback_form.addRow("Playback Rate", self.playback_rate)
         playback_form.addRow(self.loop_current_set)
@@ -849,16 +1733,51 @@ class MainWindow(QMainWindow):
         playback_form.addRow(keyframe_button)
         playback_form.addRow(clear_keyframe_button)
         playback_form.addRow(beat_markers_button)
+        playback_form.addRow(auto_hit_button)
         rehearsal_layout.addWidget(playback_group)
+
+        movement_group = QGroupBox("Marcher Movement Style")
+        movement_form = QFormLayout(movement_group)
+        self.movement_style_combo = QComboBox()
+        for label, style in (
+            ("Normal", MovementStyle.NORMAL),
+            ("Half Time", MovementStyle.HALF_TIME),
+            ("Double Time", MovementStyle.DOUBLE_TIME),
+            ("Jazz Run", MovementStyle.JAZZ_RUN),
+            ("At Halt", MovementStyle.HALT),
+            ("Visual", MovementStyle.VISUAL),
+        ):
+            self.movement_style_combo.addItem(label, style.value)
+        apply_movement_button = QPushButton("Apply To Selected Marchers")
+        apply_movement_button.clicked.connect(self.apply_movement_style_to_selected)
+        clear_movement_button = QPushButton("Clear Selected Style")
+        clear_movement_button.clicked.connect(self.clear_movement_style_for_selected)
+        self.movement_style_status = QLabel("Select marchers to set style for this set.")
+        self.movement_style_status.setWordWrap(True)
+        movement_form.addRow("Style", self.movement_style_combo)
+        movement_form.addRow(apply_movement_button)
+        movement_form.addRow(clear_movement_button)
+        movement_form.addRow("", self.movement_style_status)
+        rehearsal_layout.addWidget(movement_group)
 
         audio_group = QGroupBox("Audio + Timing Map")
         audio_form = QFormLayout(audio_group)
+        self.base_tempo = QDoubleSpinBox()
+        self.base_tempo.setRange(40, 320)
+        self.base_tempo.setValue(self.project.metadata.initial_tempo)
+        self.base_tempo.setDecimals(1)
+        self.base_tempo.setSuffix(" BPM")
+        self.base_tempo.valueChanged.connect(self.update_base_tempo)
         self.audio_version_combo = QComboBox()
         self.audio_version_combo.currentIndexChanged.connect(self.switch_audio_version)
         add_audio_button = QPushButton("Add Audio Version")
         add_audio_button.clicked.connect(self.add_audio_version)
+        reload_audio_button = QPushButton("Reload Audio")
+        reload_audio_button.clicked.connect(self.reload_audio)
         map_anchor_button = QPushButton("Map Current Count To Audio")
         map_anchor_button.clicked.connect(self.map_current_count_to_audio)
+        tempo_here_button = QPushButton("Set Tempo At Current Count")
+        tempo_here_button.clicked.connect(self.add_tempo_change_at_current_count)
         self.timing_event_type = QComboBox()
         self.timing_event_type.addItems(["anchor", "tempo", "ritard", "fermata", "pickup"])
         self.timing_event_tempo = QDoubleSpinBox()
@@ -881,14 +1800,17 @@ class MainWindow(QMainWindow):
         clear_timing_button = QPushButton("Clear Timing Events")
         clear_timing_button.clicked.connect(self.clear_timing_events)
         self.timing_event_list = QListWidget()
+        audio_form.addRow("Base Tempo", self.base_tempo)
         audio_form.addRow("Audio Version", self.audio_version_combo)
         audio_form.addRow(add_audio_button)
+        audio_form.addRow(reload_audio_button)
         audio_form.addRow(map_anchor_button)
         audio_form.addRow("Event Type", self.timing_event_type)
         audio_form.addRow("Tempo", self.timing_event_tempo)
         audio_form.addRow("End Count", self.timing_event_end_count)
         audio_form.addRow("End Tempo", self.timing_event_end_tempo)
         audio_form.addRow("Milliseconds", self.timing_event_ms)
+        audio_form.addRow(tempo_here_button)
         audio_form.addRow(add_timing_button)
         audio_form.addRow(clear_timing_button)
         audio_form.addRow("Timing Events", self.timing_event_list)
@@ -909,6 +1831,7 @@ class MainWindow(QMainWindow):
         view_layout.addWidget(ghost)
         view_layout.addWidget(self.snap_align)
         view_tab = QWidget()
+        self.view_tab = view_tab
         view_tab_layout = QVBoxLayout(view_tab)
         view_tab_layout.addWidget(view_group)
         view_tab_layout.addStretch()
@@ -919,15 +1842,23 @@ class MainWindow(QMainWindow):
     def build_inspector_panel(self) -> QWidget:
         panel = QWidget()
         layout = QVBoxLayout(panel)
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setSpacing(6)
         tabs = QTabWidget()
+        tabs.setObjectName("SideTabs")
+        tabs.setDocumentMode(True)
+        tabs.setUsesScrollButtons(True)
+        self.inspector_tabs = tabs
         layout.addWidget(tabs)
 
         selection_tab = QWidget()
+        self.selection_tab = selection_tab
         selection_layout = QVBoxLayout(selection_tab)
         self.selection_label = QLabel("No selection")
         selection_layout.addWidget(self.selection_label)
 
         dot_group = QGroupBox("Dot Properties")
+        self.dot_properties_group = dot_group
         form = QFormLayout(dot_group)
         self.dot_name = QLineEdit()
         self.dot_section = QLineEdit()
@@ -937,6 +1868,10 @@ class MainWindow(QMainWindow):
         self.dot_layer = QLineEdit("Main")
         self.dot_x = QLineEdit()
         self.dot_y = QLineEdit()
+        self.dot_yardline = QLabel("-")
+        self.dot_hash = QLabel("-")
+        self.dot_yardline.setObjectName("CoordinateReadout")
+        self.dot_hash.setObjectName("CoordinateReadout")
         for editor in (
             self.dot_name,
             self.dot_section,
@@ -956,11 +1891,108 @@ class MainWindow(QMainWindow):
         form.addRow("Layer", self.dot_layer)
         form.addRow("X", self.dot_x)
         form.addRow("Y", self.dot_y)
+        form.addRow("Yard Line", self.dot_yardline)
+        form.addRow("Hash", self.dot_hash)
         selection_layout.addWidget(dot_group)
+
+        appearance_group = QGroupBox("Appearance")
+        appearance_form = QFormLayout(appearance_group)
+        self.selected_color_swatch = QLabel("No selection")
+        self.selected_color_swatch.setObjectName("ColorSwatch")
+        self.selected_color_swatch.setMinimumWidth(90)
+        self.selected_color_swatch.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        selected_color_button = QPushButton("Choose")
+        selected_color_button.clicked.connect(self.choose_selected_dot_color)
+        selected_color_row = QWidget()
+        selected_color_layout = QHBoxLayout(selected_color_row)
+        selected_color_layout.setContentsMargins(0, 0, 0, 0)
+        selected_color_layout.addWidget(self.selected_color_swatch, 1)
+        selected_color_layout.addWidget(selected_color_button)
+        self.selected_color_button = selected_color_button
+
+        self.bulk_section = QLineEdit()
+        self.bulk_section.setPlaceholderText("winds, brass, woodwinds...")
+        bulk_section_button = QPushButton("Apply")
+        bulk_section_button.clicked.connect(self.assign_selected_section)
+        bulk_section_row = QWidget()
+        bulk_section_layout = QHBoxLayout(bulk_section_row)
+        bulk_section_layout.setContentsMargins(0, 0, 0, 0)
+        bulk_section_layout.addWidget(self.bulk_section, 1)
+        bulk_section_layout.addWidget(bulk_section_button)
+        self.bulk_section_button = bulk_section_button
+
+        self.bulk_instrument = QLineEdit()
+        self.bulk_instrument.setPlaceholderText("Trumpet, flute, snare...")
+        self.bulk_rank = QLineEdit()
+        self.bulk_rank.setPlaceholderText("Rank / file")
+        self.bulk_equipment = QLineEdit()
+        self.bulk_equipment.setPlaceholderText("Flag, rifle, prop...")
+        self.bulk_layer = QLineEdit()
+        self.bulk_layer.setPlaceholderText("Main, Brass, Guard...")
+        batch_button = QPushButton("Apply Batch Metadata")
+        batch_button.clicked.connect(self.apply_batch_dot_metadata)
+        self.batch_metadata_button = batch_button
+
+        self.section_color_combo = QComboBox()
+        section_color_button = QPushButton("Color")
+        section_color_button.clicked.connect(self.choose_section_color)
+        section_color_row = QWidget()
+        section_color_layout = QHBoxLayout(section_color_row)
+        section_color_layout.setContentsMargins(0, 0, 0, 0)
+        section_color_layout.addWidget(self.section_color_combo, 1)
+        section_color_layout.addWidget(section_color_button)
+        self.section_color_button = section_color_button
+
+        appearance_form.addRow("Selected", selected_color_row)
+        appearance_form.addRow("Set Section", bulk_section_row)
+        appearance_form.addRow("Instrument", self.bulk_instrument)
+        appearance_form.addRow("Rank", self.bulk_rank)
+        appearance_form.addRow("Equipment", self.bulk_equipment)
+        appearance_form.addRow("Layer", self.bulk_layer)
+        appearance_form.addRow(batch_button)
+        appearance_form.addRow("Section Color", section_color_row)
+        selection_layout.addWidget(appearance_group)
+
+        prop_group = QGroupBox("Prop Properties")
+        self.prop_properties_group = prop_group
+        prop_form = QFormLayout(prop_group)
+        self.prop_name = QLineEdit()
+        self.prop_layer = QLineEdit("Props")
+        self.prop_x = QDoubleSpinBox()
+        self.prop_x.setRange(-80, 80)
+        self.prop_x.setDecimals(2)
+        self.prop_y = QDoubleSpinBox()
+        self.prop_y.setRange(-40, 40)
+        self.prop_y.setDecimals(2)
+        self.prop_width = QDoubleSpinBox()
+        self.prop_width.setRange(0.25, 80)
+        self.prop_width.setDecimals(2)
+        self.prop_width.setSuffix(" yd")
+        self.prop_height = QDoubleSpinBox()
+        self.prop_height.setRange(0.25, 54)
+        self.prop_height.setDecimals(2)
+        self.prop_height.setSuffix(" yd")
+        self.prop_rotation = QDoubleSpinBox()
+        self.prop_rotation.setRange(-360, 360)
+        self.prop_rotation.setDecimals(1)
+        self.prop_rotation.setSuffix(" deg")
+        self.prop_name.editingFinished.connect(self.update_selected_prop_metadata)
+        self.prop_layer.editingFinished.connect(self.update_selected_prop_metadata)
+        for editor in (self.prop_x, self.prop_y, self.prop_width, self.prop_height, self.prop_rotation):
+            editor.valueChanged.connect(self.update_selected_prop_state)
+        prop_form.addRow("Name", self.prop_name)
+        prop_form.addRow("Layer", self.prop_layer)
+        prop_form.addRow("X", self.prop_x)
+        prop_form.addRow("Y", self.prop_y)
+        prop_form.addRow("Width", self.prop_width)
+        prop_form.addRow("Height", self.prop_height)
+        prop_form.addRow("Rotation", self.prop_rotation)
+        selection_layout.addWidget(prop_group)
         selection_layout.addStretch()
         tabs.addTab(selection_tab, "Selection")
 
         sets_tab = QWidget()
+        self.sets_tab = sets_tab
         sets_layout = QVBoxLayout(sets_tab)
         set_group = QGroupBox("Sets")
         set_layout = QVBoxLayout(set_group)
@@ -1011,6 +2043,7 @@ class MainWindow(QMainWindow):
         tabs.addTab(sets_tab, "Sets")
 
         visibility_tab = QWidget()
+        self.visibility_tab = visibility_tab
         visibility_layout = QVBoxLayout(visibility_tab)
         visibility_group = QGroupBox("Visibility")
         visibility_form = QFormLayout(visibility_group)
@@ -1058,6 +2091,19 @@ class MainWindow(QMainWindow):
                 self.waveform.load_audio(audio_path)
         elif hasattr(self, "waveform"):
             self.waveform.load_audio(None)
+
+    def reload_audio(self) -> None:
+        was_playing = self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState
+        position = self.player.position()
+        self.load_audio()
+        if self.player.source().isValid():
+            self.player.setPosition(position)
+            if was_playing:
+                self.player.play()
+        if hasattr(self, "waveform") and self.waveform.samples:
+            self.statusBar().showMessage("Audio waveform reloaded", 2200)
+        elif hasattr(self, "waveform") and self.waveform.load_error:
+            self.statusBar().showMessage(self.waveform.load_error, 4000)
 
     def audio_duration_changed(self, duration_ms: int) -> None:
         if hasattr(self, "waveform"):
@@ -1129,6 +2175,35 @@ class MainWindow(QMainWindow):
         )
         self.refresh_timing_events()
         self.statusBar().showMessage("Timing anchor added", 2000)
+
+    def update_base_tempo(self, value: float) -> None:
+        self.project.metadata.initial_tempo = value
+        self.timing_event_tempo.blockSignals(True)
+        self.timing_event_end_tempo.blockSignals(True)
+        if self.timing_event_tempo.value() <= 0:
+            self.timing_event_tempo.setValue(value)
+        if self.timing_event_end_tempo.value() <= 0:
+            self.timing_event_end_tempo.setValue(value)
+        self.timing_event_tempo.blockSignals(False)
+        self.timing_event_end_tempo.blockSignals(False)
+        self.populate_sets()
+        self.sync_timeline()
+        if hasattr(self, "waveform"):
+            self.waveform.update()
+
+    def add_tempo_change_at_current_count(self) -> None:
+        tempo = self.timing_event_tempo.value() or self.project.metadata.initial_tempo
+        self.project.timing_events.append(
+            TimingEvent(
+                event_type="tempo",
+                count=round(self.current_count, 2),
+                tempo=tempo,
+                label=f"Tempo {tempo:g} BPM",
+            )
+        )
+        self.refresh_timing_events()
+        self.populate_sets()
+        self.statusBar().showMessage(f"Tempo change added at count {self.current_count:.2f}", 2200)
 
     def add_timing_event(self) -> None:
         event_type = self.timing_event_type.currentText()
@@ -1208,6 +2283,10 @@ class MainWindow(QMainWindow):
         return None
 
     def set_tool(self, tool: EditorTool) -> None:
+        if tool != EditorTool.PLUGIN_FORM:
+            self.active_plugin_form_tool_id = ""
+            for button in self.plugin_form_tool_buttons.values():
+                button.setChecked(False)
         self.field.set_tool(tool)
         for key, button in self.tool_buttons.items():
             button.setChecked(key == tool)
@@ -1219,11 +2298,15 @@ class MainWindow(QMainWindow):
             self.initialize_shape_line_anchors(_ids, positions)
         elif tool == EditorTool.MIRROR and positions:
             self.mirror_axis = sum(x for x, _y in positions) / len(positions)
+        elif tool == EditorTool.SCALE and positions:
+            self.initialize_scale_tool(positions)
         self.update_formation_preview()
 
     def update_tool_edit_visibility(self) -> None:
         tool = self.field.active_tool
-        self.tool_edit_group.setVisible(tool != EditorTool.SELECT)
+        plugin_active = bool(self.active_plugin_form_tool_id)
+        self.tool_edit_group.setVisible(tool != EditorTool.SELECT or plugin_active)
+        self.plugin_tool_group.setVisible(plugin_active)
         self.line_tool_group.setVisible(tool == EditorTool.LINE)
         self.curve_tool_group.setVisible(tool == EditorTool.CURVE)
         self.arc_tool_group.setVisible(tool == EditorTool.ARC)
@@ -1234,13 +2317,29 @@ class MainWindow(QMainWindow):
         self.shape_tool_group.setVisible(
             tool in (EditorTool.CIRCLE, EditorTool.RECTANGLE, EditorTool.SPIRAL, EditorTool.BLOCK, EditorTool.SVG_SHAPE)
         )
+        self.scale_tool_group.setVisible(tool == EditorTool.SCALE)
         self.rotate_tool_group.setVisible(False)
+
+    def initialize_scale_tool(self, positions: list[tuple[float, float]]) -> None:
+        min_position_x = min(position_x for position_x, _position_y in positions)
+        max_position_x = max(position_x for position_x, _position_y in positions)
+        min_position_y = min(position_y for _position_x, position_y in positions)
+        max_position_y = max(position_y for _position_x, position_y in positions)
+        self.scale_width.blockSignals(True)
+        self.scale_height.blockSignals(True)
+        self.scale_width.setValue(max(0.1, max_position_x - min_position_x))
+        self.scale_height.setValue(max(0.1, max_position_y - min_position_y))
+        self.scale_width.blockSignals(False)
+        self.scale_height.blockSignals(False)
 
     def current_set(self) -> DrillSet:
         return self.project.sets[self.set_index]
 
     def current_positions(self) -> dict[str, tuple[float, float]]:
         return dict(self.current_set().dot_positions)
+
+    def current_prop_states(self) -> dict[str, dict[str, float]]:
+        return {prop_id: dict(state) for prop_id, state in self.current_set().prop_positions.items()}
 
     def current_transition_start_positions(self) -> dict[str, tuple[float, float]]:
         if self.set_index > 0:
@@ -1264,6 +2363,19 @@ class MainWindow(QMainWindow):
         after = dict(before)
         after.update(positions)
         self.undo_stack.push(MoveDotsCommand(self, self.set_index, before, after, "Move Form"))
+
+    def prop_moved(self, prop_id: str, state: dict[str, float]) -> None:
+        before = self.current_prop_states()
+        after = {key: dict(value) for key, value in before.items()}
+        after[prop_id] = dict(state)
+        self.undo_stack.push(MovePropsCommand(self, self.set_index, before, after, "Move Prop"))
+
+    def props_moved(self, states: dict[str, dict[str, float]]) -> None:
+        before = self.current_prop_states()
+        after = {key: dict(value) for key, value in before.items()}
+        for prop_id, state in states.items():
+            after[prop_id] = dict(state)
+        self.undo_stack.push(MovePropsCommand(self, self.set_index, before, after, "Move Props"))
 
     def next_dot_id(self) -> str:
         used_numbers = []
@@ -1298,7 +2410,9 @@ class MainWindow(QMainWindow):
             drill_set.dot_positions[dot_id] = (new_dot.x, new_dot.y)
         self.field.rebuild_dots()
         self.field.set_positions(self.current_set().dot_positions)
+        self.field.set_prop_states(self.current_set().prop_positions)
         self.field.dot_items[dot_id].setSelected(True)
+        self.refresh_marcher_table()
         self.refresh_visibility_filters()
         self.selection_changed()
 
@@ -1320,9 +2434,110 @@ class MainWindow(QMainWindow):
         self.field.clear_paths()
         self.field.rebuild_dots()
         self.field.set_positions(self.current_set().dot_positions)
+        self.field.set_prop_states(self.current_set().prop_positions)
+        self.refresh_marcher_table()
         self.refresh_visibility_filters()
         self.refresh_constraints()
         self.sync_inspector()
+
+    def next_prop_id(self) -> str:
+        used_numbers = []
+        for prop in self.project.props:
+            if prop.id.startswith("prop") and prop.id[4:].isdigit():
+                used_numbers.append(int(prop.id[4:]))
+        next_number = max(used_numbers, default=0) + 1
+        return f"prop{next_number:03d}"
+
+    def import_prop_image(self) -> None:
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Import Prop Image",
+            str(Path.home()),
+            "Images (*.png *.jpg *.jpeg *.bmp *.webp);;All Files (*)",
+        )
+        if not path:
+            return
+        source = Path(path)
+        prop_id = self.next_prop_id()
+        props_dir = self.project_dir / "props"
+        props_dir.mkdir(exist_ok=True)
+        destination = props_dir / f"{prop_id}{source.suffix.lower() or '.png'}"
+        shutil.copy2(source, destination)
+
+        pixmap = QPixmap(str(destination))
+        aspect = pixmap.width() / pixmap.height() if not pixmap.isNull() and pixmap.height() else 2.0
+        width = 8.0
+        height = max(1.0, width / max(0.1, aspect))
+        prop = Prop(
+            id=prop_id,
+            name=source.stem,
+            image_file=str(destination.relative_to(self.project_dir)),
+            x=0.0,
+            y=0.0,
+            width=width,
+            height=height,
+            rotation=0.0,
+            layer="Props",
+        )
+        self.project.props.append(prop)
+        for drill_set in self.project.sets:
+            drill_set.prop_positions[prop.id] = prop_default_state(prop)
+        self.field.rebuild_props()
+        self.field.set_prop_states(self.current_set().prop_positions)
+        for item in self.field.scene.selectedItems():
+            item.setSelected(False)
+        self.field.prop_items[prop.id].setSelected(True)
+        self.refresh_prop_table()
+        self.refresh_visibility_filters()
+        self.selection_changed()
+        self.statusBar().showMessage(f"Imported prop {prop.name}", 3000)
+
+    def delete_selected_props(self) -> None:
+        selected = set(self.field.selected_prop_ids())
+        if not selected:
+            return
+        self.project.props = [prop for prop in self.project.props if prop.id not in selected]
+        for drill_set in self.project.sets:
+            for prop_id in selected:
+                drill_set.prop_positions.pop(prop_id, None)
+        self.field.rebuild_props()
+        self.field.set_prop_states(self.current_set().prop_positions)
+        self.refresh_prop_table()
+        self.refresh_visibility_filters()
+        self.sync_inspector()
+
+    def apply_prop_states(
+        self,
+        states: dict[str, dict[str, float]],
+        push_undo: bool = True,
+        set_index: int | None = None,
+    ) -> None:
+        target_set_index = self.set_index if set_index is None else set_index
+        normalized = {prop_id: dict(state) for prop_id, state in states.items()}
+        if push_undo:
+            self.undo_stack.push(
+                MovePropsCommand(
+                    self,
+                    target_set_index,
+                    {prop_id: dict(state) for prop_id, state in self.project.sets[target_set_index].prop_positions.items()},
+                    normalized,
+                    "Move Props",
+                )
+            )
+            return
+        self.project.sets[target_set_index].prop_positions.update(normalized)
+        for prop in self.project.props:
+            if prop.id in normalized and target_set_index == 0:
+                state = normalized[prop.id]
+                prop.x = float(state.get("x", prop.x))
+                prop.y = float(state.get("y", prop.y))
+                prop.width = float(state.get("width", prop.width))
+                prop.height = float(state.get("height", prop.height))
+                prop.rotation = float(state.get("rotation", prop.rotation))
+        if target_set_index == self.set_index:
+            self.field.set_prop_states(self.current_set().prop_positions)
+            self.refresh_prop_table()
+            self.sync_inspector()
 
     def apply_positions(
         self,
@@ -1348,6 +2563,7 @@ class MainWindow(QMainWindow):
                 dot.x, dot.y = positions[dot.id]
         if target_set_index == self.set_index:
             self.field.set_positions(self.current_set().dot_positions)
+            self.field.set_prop_states(self.current_set().prop_positions)
             self.update_formation_preview()
             self.refresh_selected_paths()
             self.sync_inspector()
@@ -1480,6 +2696,8 @@ class MainWindow(QMainWindow):
         return [dot_id for dot_id, _position in positions]
 
     def formation_targets(self, tool: EditorTool) -> dict[str, tuple[float, float]]:
+        if tool == EditorTool.PLUGIN_FORM:
+            return self.plugin_formation_targets()
         ids, positions = self.selected_positions()
         if len(ids) < 2 and tool not in (EditorTool.SCATTER, EditorTool.MIRROR):
             return {}
@@ -1548,6 +2766,14 @@ class MainWindow(QMainWindow):
                     for point in self.imported_shape_points
                 ]
                 new_positions = positions_along_path(scaled_path, len(ids))
+        elif tool == EditorTool.SCALE:
+            new_positions = scaled_positions_to_size(
+                positions,
+                self.scale_width.value(),
+                self.scale_height.value(),
+                self.scale_lock_aspect.isChecked(),
+                (center_x, center_y),
+            )
         elif tool == EditorTool.SCATTER:
             new_positions = scatter_positions(
                 positions,
@@ -1565,7 +2791,8 @@ class MainWindow(QMainWindow):
             new_positions = positions_along_path(path, len(ids))
         else:
             return {}
-        return self.assign_targets_to_marchers(ids, new_positions, preserve_order=tool == EditorTool.SHAPE_LINE)
+        preserve_order = tool in (EditorTool.SHAPE_LINE, EditorTool.SCALE)
+        return self.assign_targets_to_marchers(ids, new_positions, preserve_order=preserve_order)
 
     def assign_targets_to_marchers(
         self,
@@ -1577,30 +2804,130 @@ class MainWindow(QMainWindow):
             return {dot_id: targets[index] for index, dot_id in enumerate(ids)}
         starts_source = self.current_transition_start_positions()
         starts = {dot_id: starts_source.get(dot_id, self.current_set().dot_positions[dot_id]) for dot_id in ids}
-        remaining_targets = set(range(len(targets)))
-        assignment: dict[str, int] = {}
-        for dot_id in sorted(ids, key=lambda item: min(distance(starts[item], targets[index]) for index in remaining_targets)):
-            best_target = min(remaining_targets, key=lambda index: distance(starts[dot_id], targets[index]))
-            assignment[dot_id] = best_target
-            remaining_targets.remove(best_target)
+        start_list = [starts[dot_id] for dot_id in ids]
+        if len(ids) > 220:
+            assignment_indexes = self.shortest_pair_target_assignment(start_list, targets)
+        else:
+            assignment_indexes = self.auction_target_assignment(start_list, targets)
+        assignment = {dot_id: assignment_indexes[index] for index, dot_id in enumerate(ids)}
 
-        for _iteration in range(3):
+        swap_iterations = 5 if len(ids) <= 220 else 2
+        use_crossing_penalty = len(ids) <= 220
+        for _iteration in range(swap_iterations):
             changed = False
             for first_index, dot_a in enumerate(ids):
                 for dot_b in ids[first_index + 1 :]:
                     target_a = targets[assignment[dot_a]]
                     target_b = targets[assignment[dot_b]]
-                    current_cost = distance(starts[dot_a], target_a) + distance(starts[dot_b], target_b)
-                    swapped_cost = distance(starts[dot_a], target_b) + distance(starts[dot_b], target_a)
-                    crosses = segments_intersect(starts[dot_a], target_a, starts[dot_b], target_b)
-                    if swapped_cost + 0.5 < current_cost or (crosses and swapped_cost <= current_cost * 1.15 + 2.0):
+                    current_cost = self.assignment_cost(starts[dot_a], target_a) + self.assignment_cost(starts[dot_b], target_b)
+                    swapped_cost = self.assignment_cost(starts[dot_a], target_b) + self.assignment_cost(starts[dot_b], target_a)
+                    crosses = (
+                        use_crossing_penalty
+                        and segments_intersect(starts[dot_a], target_a, starts[dot_b], target_b)
+                    )
+                    if swapped_cost + 0.01 < current_cost or (crosses and swapped_cost <= current_cost * 1.08 + 1.0):
                         assignment[dot_a], assignment[dot_b] = assignment[dot_b], assignment[dot_a]
                         changed = True
             if not changed:
                 break
         return {dot_id: targets[assignment[dot_id]] for dot_id in ids}
 
+    def assignment_cost(self, start: tuple[float, float], target: tuple[float, float]) -> float:
+        move_distance = distance(start, target)
+        return move_distance * move_distance + move_distance * 0.05
+
+    def auction_target_assignment(
+        self,
+        starts: list[tuple[float, float]],
+        targets: list[tuple[float, float]],
+    ) -> list[int]:
+        count = len(starts)
+        costs = [
+            [self.assignment_cost(start, target) for target in targets]
+            for start in starts
+        ]
+        prices = [0.0] * count
+        owners: list[int | None] = [None] * count
+        assignment: list[int | None] = [None] * count
+        unassigned = list(range(count))
+        epsilon = 1 / max(10, count)
+        iterations = 0
+        max_iterations = max(1000, count * count * 4)
+
+        while unassigned and iterations < max_iterations:
+            iterations += 1
+            marcher_index = unassigned.pop()
+            best_target = 0
+            best_value = float("-inf")
+            second_value = float("-inf")
+            row_costs = costs[marcher_index]
+            for target_index, target_cost in enumerate(row_costs):
+                value = -target_cost - prices[target_index]
+                if value > best_value:
+                    second_value = best_value
+                    best_value = value
+                    best_target = target_index
+                elif value > second_value:
+                    second_value = value
+            if second_value == float("-inf"):
+                second_value = best_value - epsilon
+            bid = best_value - second_value + epsilon
+            prices[best_target] += bid
+            previous_owner = owners[best_target]
+            owners[best_target] = marcher_index
+            assignment[marcher_index] = best_target
+            if previous_owner is not None:
+                assignment[previous_owner] = None
+                unassigned.append(previous_owner)
+
+        if any(target_index is None for target_index in assignment):
+            remaining_targets = {index for index in range(count) if index not in assignment}
+            for marcher_index, target_index in enumerate(assignment):
+                if target_index is None:
+                    best_target = min(
+                        remaining_targets,
+                        key=lambda index: costs[marcher_index][index],
+                    )
+                    assignment[marcher_index] = best_target
+                    remaining_targets.remove(best_target)
+        return [int(target_index) for target_index in assignment]
+
+    def shortest_pair_target_assignment(
+        self,
+        starts: list[tuple[float, float]],
+        targets: list[tuple[float, float]],
+    ) -> list[int]:
+        pairs: list[tuple[float, int, int]] = []
+        for marcher_index, start in enumerate(starts):
+            for target_index, target in enumerate(targets):
+                pairs.append((self.assignment_cost(start, target), marcher_index, target_index))
+        pairs.sort(key=lambda item: item[0])
+
+        assignment: list[int | None] = [None] * len(starts)
+        used_marchers: set[int] = set()
+        used_targets: set[int] = set()
+        for _cost, marcher_index, target_index in pairs:
+            if marcher_index in used_marchers or target_index in used_targets:
+                continue
+            assignment[marcher_index] = target_index
+            used_marchers.add(marcher_index)
+            used_targets.add(target_index)
+            if len(used_marchers) == len(starts):
+                break
+        remaining_targets = [index for index in range(len(targets)) if index not in used_targets]
+        for marcher_index, target_index in enumerate(assignment):
+            if target_index is None:
+                best_target = min(
+                    remaining_targets,
+                    key=lambda index: self.assignment_cost(starts[marcher_index], targets[index]),
+                )
+                assignment[marcher_index] = best_target
+                remaining_targets.remove(best_target)
+        return [int(target_index) for target_index in assignment]
+
     def formation_handles(self, tool: EditorTool) -> dict[str, tuple[float, float]]:
+        if tool == EditorTool.PLUGIN_FORM:
+            return self.plugin_formation_handles()
         _ids, positions = self.selected_positions()
         if len(positions) < 2:
             return {}
@@ -1635,6 +2962,11 @@ class MainWindow(QMainWindow):
             }
         if tool == EditorTool.BLOCK:
             return {"block_spacing": (center_x + self.block_spacing.value(), center_y)}
+        if tool == EditorTool.SCALE:
+            return {
+                "scale_width": (center_x + self.scale_width.value() / 2, center_y),
+                "scale_height": (center_x, center_y + self.scale_height.value() / 2),
+            }
         if tool == EditorTool.SCATTER:
             return {"scatter_radius": (center_x + self.scatter_radius.value(), center_y)}
         if tool == EditorTool.MIRROR:
@@ -1642,7 +2974,7 @@ class MainWindow(QMainWindow):
         return {}
 
     def update_formation_preview(self) -> None:
-        if self.field.active_tool == EditorTool.SELECT:
+        if self.field.active_tool == EditorTool.SELECT and not self.active_plugin_form_tool_id:
             self.field.clear_preview()
             return
         targets = self.formation_targets(self.field.active_tool)
@@ -1661,6 +2993,10 @@ class MainWindow(QMainWindow):
         self.field.show_preview(starts, targets, self.formation_handles(self.field.active_tool))
 
     def preview_handle_moved(self, kind: str, x: float, y: float) -> None:
+        if kind.startswith("plugin_setting:"):
+            if self.update_plugin_setting_from_handle(kind.split(":", 1)[1], x, y):
+                self.update_formation_preview()
+            return
         _ids, positions = self.selected_positions()
         if len(positions) < 2:
             return
@@ -1696,6 +3032,10 @@ class MainWindow(QMainWindow):
         elif kind == "block_spacing":
             distance = ((x - center_x) ** 2 + (y - center_y) ** 2) ** 0.5
             self.block_spacing.setValue(max(0.25, distance))
+        elif kind == "scale_width":
+            self.scale_width.setValue(max(0.1, abs(x - center_x) * 2))
+        elif kind == "scale_height":
+            self.scale_height.setValue(max(0.1, abs(y - center_y) * 2))
         elif kind == "scatter_radius":
             distance = ((x - center_x) ** 2 + (y - center_y) ** 2) ** 0.5
             self.scatter_radius.setValue(max(0, distance))
@@ -1785,13 +3125,22 @@ class MainWindow(QMainWindow):
         self.update_formation_preview()
 
     def clear_formation_preview(self) -> None:
+        self.active_plugin_form_tool_id = ""
+        for button in self.plugin_form_tool_buttons.values():
+            button.setChecked(False)
         self.set_tool(EditorTool.SELECT)
         self.field.clear_preview()
 
     def apply_current_preview(self) -> None:
+        if self.active_plugin_form_tool_id:
+            self.apply_active_plugin_form_tool_preview()
+            return
         self.apply_formation(self.field.active_tool)
 
     def apply_formation(self, tool: EditorTool) -> None:
+        if tool == EditorTool.PLUGIN_FORM:
+            self.apply_active_plugin_form_tool_preview()
+            return
         targets = self.formation_targets(tool)
         if not targets:
             return
@@ -1828,6 +3177,74 @@ class MainWindow(QMainWindow):
         self.set_tool(EditorTool.SELECT)
         self.refresh_selected_paths()
 
+    def fit_selected_form_to_prop(self) -> None:
+        dot_ids, positions = self.selected_positions()
+        prop_ids = self.field.selected_prop_ids()
+        if len(dot_ids) < 2:
+            QMessageBox.information(self, "Scale Form", "Select two or more marchers first.")
+            return
+        if not prop_ids:
+            QMessageBox.information(self, "Scale Form", "Select a prop along with the marchers you want to scale.")
+            return
+
+        prop_id = prop_ids[0]
+        prop_state = self.current_set().prop_positions.get(prop_id)
+        if not prop_state:
+            QMessageBox.information(self, "Scale Form", "The selected prop does not have a position in this set.")
+            return
+
+        padding = self.scale_fit_padding.value()
+        target_width = max(0.1, float(prop_state.get("width", 0.0)) - padding * 2)
+        target_height = max(0.1, float(prop_state.get("height", 0.0)) - padding * 2)
+        prop_center = (float(prop_state.get("x", 0.0)), float(prop_state.get("y", 0.0)))
+        scaled = scaled_positions_to_size(
+            positions,
+            target_width,
+            target_height,
+            self.scale_lock_aspect.isChecked(),
+        )
+        fitted = centered_positions(scaled, prop_center)
+        targets = {dot_id: fitted[index] for index, dot_id in enumerate(dot_ids)}
+
+        self.scale_width.blockSignals(True)
+        self.scale_height.blockSignals(True)
+        self.scale_width.setValue(target_width)
+        self.scale_height.setValue(target_height)
+        self.scale_width.blockSignals(False)
+        self.scale_height.blockSignals(False)
+
+        before = self.current_positions()
+        after = dict(before)
+        after.update(targets)
+        before_anchors = self.clone_path_anchors(self.set_index)
+        before_controls = self.clone_path_controls(self.set_index)
+        before_counts = self.clone_count_positions(self.set_index)
+        after_anchors = self.clone_path_anchors(self.set_index)
+        after_controls = self.clone_path_controls(self.set_index)
+        after_counts = self.clone_count_positions(self.set_index)
+        for dot_id in targets:
+            after_anchors.pop(dot_id, None)
+            after_controls.pop(dot_id, None)
+            after_counts.pop(dot_id, None)
+
+        self.undo_stack.push(
+            MoveDotsCommand(
+                self,
+                self.set_index,
+                before,
+                after,
+                "Fit Form to Prop",
+                before_anchors,
+                after_anchors,
+                before_controls,
+                after_controls,
+                before_counts,
+                after_counts,
+            )
+        )
+        self.update_formation_preview()
+        self.refresh_selected_paths()
+
     def context_action(self, name: str) -> None:
         mapping = {
             "Preview Line": EditorTool.LINE,
@@ -1837,6 +3254,7 @@ class MainWindow(QMainWindow):
             "Preview Rectangle": EditorTool.RECTANGLE,
             "Preview Spiral": EditorTool.SPIRAL,
             "Preview Block": EditorTool.BLOCK,
+            "Preview Scale Form": EditorTool.SCALE,
             "Preview SVG Shape": EditorTool.SVG_SHAPE,
             "Preview Scatter": EditorTool.SCATTER,
             "Preview Mirror": EditorTool.MIRROR,
@@ -2021,8 +3439,8 @@ class MainWindow(QMainWindow):
     def populate_sets(self) -> None:
         self.set_list.blockSignals(True)
         self.set_list.clear()
-        for drill_set in self.project.sets:
-            tempo = drill_set.tempo or self.project.metadata.initial_tempo
+        for index, drill_set in enumerate(self.project.sets):
+            tempo = self.project.active_tempo(index)
             self.set_list.addItem(
                 f"{drill_set.name} ({drill_set.start_count}-{drill_set.end_count}, {tempo:g} BPM)"
             )
@@ -2045,8 +3463,9 @@ class MainWindow(QMainWindow):
             name=f"Set {len(self.project.sets) + 1}",
             start_count=start,
             end_count=start + self.project.metadata.default_counts_per_set - 1,
-            tempo=self.project.metadata.initial_tempo,
+            tempo=None,
             dot_positions=dict(previous.dot_positions),
+            prop_positions={prop_id: dict(state) for prop_id, state in previous.prop_positions.items()},
         )
         self.project.sets.append(drill_set)
         self.set_index = len(self.project.sets) - 1
@@ -2063,6 +3482,7 @@ class MainWindow(QMainWindow):
             end_count=source.end_count + source.duration_counts,
             tempo=source.tempo,
             dot_positions=dict(source.dot_positions),
+            prop_positions={prop_id: dict(state) for prop_id, state in source.prop_positions.items()},
             path_anchors={dot_id: list(anchors) for dot_id, anchors in source.path_anchors.items()},
             path_controls={
                 dot_id: [dict(control_set) for control_set in control_sets]
@@ -2156,8 +3576,9 @@ class MainWindow(QMainWindow):
 
     def sync_timeline(self) -> None:
         drill_set = self.current_set()
+        start_count, end_count = playback_bounds_for_set(self.project, self.set_index)
         self.timeline.blockSignals(True)
-        self.timeline.setRange(drill_set.start_count * 100, drill_set.end_count * 100)
+        self.timeline.setRange(int(start_count * 100), int(end_count * 100))
         self.timeline.setValue(int(self.current_count * 100))
         self.timeline.blockSignals(False)
         if hasattr(self, "count_finder"):
@@ -2170,12 +3591,26 @@ class MainWindow(QMainWindow):
         self.refresh_markers()
 
     def scrub(self, value: int) -> None:
-        self.set_count(value / 100, seek_audio=True)
+        count = value / 100
+        target_set_index = set_index_for_count(self.project, count)
+        if target_set_index != self.set_index:
+            self.set_index = target_set_index
+            self.populate_sets()
+            self.sync_timeline()
+            self.refresh_selected_paths()
+        self.set_count(count, seek_audio=True)
 
-    def set_count(self, count: float, seek_audio: bool) -> None:
-        drill_set = self.current_set()
-        self.current_count = max(drill_set.start_count, min(count, drill_set.end_count))
+    def set_count(
+        self,
+        count: float,
+        seek_audio: bool,
+        update_waveform: bool = True,
+        refresh_paths: bool = True,
+    ) -> None:
+        start_count, end_count = playback_bounds_for_set(self.project, self.set_index)
+        self.current_count = max(start_count, min(count, end_count))
         self.field.set_positions(interpolate_project(self.project, self.set_index, self.current_count))
+        self.field.set_prop_states(interpolate_props(self.project, self.set_index, self.current_count))
         self.count_label.setText(f"Count {self.current_count:.2f}")
         if hasattr(self, "count_finder"):
             self.count_finder.blockSignals(True)
@@ -2186,9 +3621,10 @@ class MainWindow(QMainWindow):
         self.timeline.blockSignals(False)
         if seek_audio and self.player.source().isValid():
             self.player.setPosition(self.audio_position_for_count(self.set_index, self.current_count))
-        elif hasattr(self, "waveform"):
+        elif update_waveform and hasattr(self, "waveform"):
             self.waveform.set_position_ms(self.audio_position_for_count(self.set_index, self.current_count))
-        self.refresh_selected_paths()
+        if refresh_paths:
+            self.refresh_selected_paths()
 
     def play(self) -> None:
         if self.play_timer.isActive():
@@ -2215,35 +3651,44 @@ class MainWindow(QMainWindow):
 
     def tick_playback(self) -> None:
         if self.player.source().isValid():
-            next_set_index, next_count = self.count_for_audio_position(self.player.position())
+            audio_position = self.player.position()
+            next_set_index, next_count = self.count_for_audio_position(audio_position)
+            if hasattr(self, "waveform"):
+                self.waveform.set_position_ms(audio_position)
             if self.loop_current_set.isChecked() and next_set_index != self.set_index:
                 self.current_count = self.current_set().start_count
                 self.player.setPosition(self.audio_position_for_count(self.set_index, self.current_count))
-                self.set_count(self.current_count, seek_audio=False)
+                self.set_count(self.current_count, seek_audio=False, update_waveform=False)
                 return
             if next_set_index != self.set_index:
                 self.set_index = next_set_index
                 self.current_count = next_count
                 self.populate_sets()
                 self.sync_timeline()
+                self.refresh_selected_paths()
             else:
                 self.current_count = next_count
-            self.set_count(self.current_count, seek_audio=False)
+            self.set_count(self.current_count, seek_audio=False, update_waveform=False, refresh_paths=False)
             return
 
         tempo = self.project.active_tempo(self.set_index)
         self.current_count += (tempo / 60) * (self.play_timer.interval() / 1000) * self.current_playback_rate()
-        if self.current_count > self.current_set().end_count:
+        _start_count, playback_end_count = playback_bounds_for_set(self.project, self.set_index)
+        if self.current_count > playback_end_count:
             if self.loop_current_set.isChecked():
                 self.current_count = self.current_set().start_count
                 if self.player.source().isValid():
                     self.player.setPosition(self.audio_position_for_count(self.set_index, self.current_count))
             elif self.set_index + 1 < len(self.project.sets):
-                self.change_set(self.set_index + 1)
+                self.set_index += 1
+                self.current_count = self.current_set().start_count
+                self.populate_sets()
+                self.sync_timeline()
+                self.refresh_selected_paths()
             else:
                 self.pause()
                 self.current_count = self.current_set().end_count
-        self.set_count(self.current_count, seek_audio=False)
+        self.set_count(self.current_count, seek_audio=False, refresh_paths=False)
 
     def current_playback_rate(self) -> float:
         if not hasattr(self, "playback_rate"):
@@ -2293,16 +3738,415 @@ class MainWindow(QMainWindow):
         self.refresh_markers()
         self.statusBar().showMessage("Count markers added", 2000)
 
+    def auto_detect_hit_markers(self) -> None:
+        if not hasattr(self, "waveform") or self.waveform.duration_ms <= 0:
+            QMessageBox.information(self, "Auto Hit Markers", "Load audio before detecting hit markers.")
+            return
+        hit_moments = self.waveform.detect_hit_moments()
+        if not hit_moments:
+            QMessageBox.information(self, "Auto Hit Markers", "No clear hit moments were detected in the waveform.")
+            return
+        existing_counts = [round(marker.count, 2) for marker in self.project.markers]
+        added = 0
+        for hit_ms in hit_moments:
+            _set_index, count = set_count_for_audio_ms(self.project, hit_ms)
+            rounded_count = round(count, 2)
+            if any(abs(rounded_count - existing_count) < 0.18 for existing_count in existing_counts):
+                continue
+            self.project.markers.append(Marker(count=rounded_count, label=f"Auto Hit {added + 1}"))
+            existing_counts.append(rounded_count)
+            added += 1
+        self.refresh_markers()
+        if hasattr(self, "waveform"):
+            self.waveform.update()
+        self.statusBar().showMessage(f"Added {added} auto hit marker(s)", 2500)
+
+    def apply_movement_style_to_selected(self) -> None:
+        ids = self.field.selected_dot_ids()
+        if not ids:
+            QMessageBox.information(self, "Movement Style", "Select one or more marchers first.")
+            return
+        style = MovementStyle(str(self.movement_style_combo.currentData() or MovementStyle.NORMAL.value))
+        drill_set = self.current_set()
+        for dot_id in ids:
+            if style == MovementStyle.NORMAL:
+                drill_set.movement_styles.pop(dot_id, None)
+            else:
+                drill_set.movement_styles[dot_id] = style
+        self.sync_movement_style_controls()
+        self.statusBar().showMessage(f"Applied {self.movement_style_combo.currentText()} to {len(ids)} marcher(s)", 2400)
+
+    def clear_movement_style_for_selected(self) -> None:
+        ids = self.field.selected_dot_ids()
+        if not ids:
+            return
+        drill_set = self.current_set()
+        for dot_id in ids:
+            drill_set.movement_styles.pop(dot_id, None)
+        self.sync_movement_style_controls()
+        self.statusBar().showMessage(f"Cleared movement style for {len(ids)} marcher(s)", 2200)
+
+    def sync_movement_style_controls(self) -> None:
+        if not hasattr(self, "movement_style_status"):
+            return
+        ids = self.field.selected_dot_ids()
+        has_selection = bool(ids)
+        self.movement_style_combo.setEnabled(has_selection)
+        if not has_selection:
+            self.movement_style_status.setText("Select marchers to set style for this set.")
+            return
+        drill_set = self.current_set()
+        styles = [
+            drill_set.movement_styles.get(dot_id, MovementStyle.NORMAL)
+            for dot_id in ids
+        ]
+        unique_styles = set(styles)
+        if len(unique_styles) == 1:
+            style = styles[0]
+            index = self.movement_style_combo.findData(style.value)
+            if index >= 0:
+                self.movement_style_combo.blockSignals(True)
+                self.movement_style_combo.setCurrentIndex(index)
+                self.movement_style_combo.blockSignals(False)
+            self.movement_style_status.setText(f"{len(ids)} selected: {self.movement_style_combo.currentText()} for {self.current_set().name}.")
+        else:
+            self.movement_style_status.setText(f"{len(ids)} selected: mixed movement styles for {self.current_set().name}.")
+
     def refresh_markers(self) -> None:
         self.marker_table.setRowCount(len(self.project.markers))
         for row, marker in enumerate(self.project.markers):
             self.marker_table.setItem(row, 0, QTableWidgetItem(f"{marker.count:.2f}"))
             self.marker_table.setItem(row, 1, QTableWidgetItem(marker.label))
 
+    def refresh_marcher_table(self) -> None:
+        if not hasattr(self, "marcher_table"):
+            return
+        selected = set(self.field.selected_dot_ids()) if hasattr(self, "field") else set()
+        self.marcher_table.blockSignals(True)
+        self.marcher_table.clearSelection()
+        self.marcher_table.setRowCount(len(self.project.dots))
+        for row, dot in enumerate(self.project.dots):
+            color_item = QTableWidgetItem("")
+            id_item = QTableWidgetItem(dot.id)
+            section_item = QTableWidgetItem(dot.section or "-")
+            name_item = QTableWidgetItem(dot.name)
+            color_item.setBackground(QColor(dot.color or "#e53935"))
+            color_item.setToolTip(dot.color or "#e53935")
+            for item in (color_item, id_item, section_item, name_item):
+                item.setData(Qt.ItemDataRole.UserRole, dot.id)
+            self.marcher_table.setItem(row, 0, color_item)
+            self.marcher_table.setItem(row, 1, id_item)
+            self.marcher_table.setItem(row, 2, section_item)
+            self.marcher_table.setItem(row, 3, name_item)
+            if dot.id in selected:
+                self.marcher_table.selectRow(row)
+        self.marcher_table.blockSignals(False)
+        self.filter_marcher_table()
+
+    def filter_marcher_table(self) -> None:
+        if not hasattr(self, "marcher_table"):
+            return
+        query = self.marcher_search.text().strip().lower() if hasattr(self, "marcher_search") else ""
+        for row in range(self.marcher_table.rowCount()):
+            values: list[str] = []
+            for column in range(self.marcher_table.columnCount()):
+                item = self.marcher_table.item(row, column)
+                if item:
+                    values.append(item.text())
+            item = self.marcher_table.item(row, 0)
+            dot_id = str(item.data(Qt.ItemDataRole.UserRole)) if item else ""
+            dot = self.project.dot_by_id(dot_id) if dot_id else None
+            if dot:
+                values.extend([dot.instrument, dot.rank, dot.equipment, dot.layer])
+            haystack = " ".join(values).lower()
+            self.marcher_table.setRowHidden(row, bool(query and query not in haystack))
+
+    def select_visible_marchers(self) -> None:
+        if not hasattr(self, "marcher_table"):
+            return
+        selected_ids: list[str] = []
+        for row in range(self.marcher_table.rowCount()):
+            if self.marcher_table.isRowHidden(row):
+                continue
+            item = self.marcher_table.item(row, 0)
+            if item:
+                selected_ids.append(str(item.data(Qt.ItemDataRole.UserRole)))
+        for dot_item in self.field.dot_items.values():
+            dot_item.setSelected(dot_item.dot_id in selected_ids)
+        for prop_item in self.field.prop_items.values():
+            prop_item.setSelected(False)
+        self.selection_changed()
+        self.statusBar().showMessage(f"Selected {len(selected_ids)} visible marcher(s)", 2000)
+
+    def refresh_prop_table(self) -> None:
+        if not hasattr(self, "prop_table"):
+            return
+        selected = set(self.field.selected_prop_ids()) if hasattr(self, "field") else set()
+        self.prop_table.blockSignals(True)
+        self.prop_table.clearSelection()
+        self.prop_table.setRowCount(len(self.project.props))
+        for row, prop in enumerate(self.project.props):
+            id_item = QTableWidgetItem(prop.id)
+            name_item = QTableWidgetItem(prop.name)
+            layer_item = QTableWidgetItem(prop.layer or "Props")
+            for item in (id_item, name_item, layer_item):
+                item.setData(Qt.ItemDataRole.UserRole, prop.id)
+            self.prop_table.setItem(row, 0, id_item)
+            self.prop_table.setItem(row, 1, name_item)
+            self.prop_table.setItem(row, 2, layer_item)
+            if prop.id in selected:
+                self.prop_table.selectRow(row)
+        self.prop_table.blockSignals(False)
+
+    def select_marcher_from_table(self, row: int, _column: int) -> None:
+        item = self.marcher_table.item(row, 0)
+        if not item:
+            return
+        dot_id = str(item.data(Qt.ItemDataRole.UserRole) or item.text())
+        for dot_item in self.field.dot_items.values():
+            dot_item.setSelected(False)
+        for prop_item in self.field.prop_items.values():
+            prop_item.setSelected(False)
+        if dot_id in self.field.dot_items:
+            self.field.dot_items[dot_id].setSelected(True)
+            self.field.centerOn(self.field.dot_items[dot_id])
+        self.selection_changed()
+
+    def select_prop_from_table(self, row: int, _column: int) -> None:
+        item = self.prop_table.item(row, 0)
+        if not item:
+            return
+        prop_id = str(item.data(Qt.ItemDataRole.UserRole) or item.text())
+        for dot_item in self.field.dot_items.values():
+            dot_item.setSelected(False)
+        for prop_item in self.field.prop_items.values():
+            prop_item.setSelected(False)
+        if prop_id in self.field.prop_items:
+            self.field.prop_items[prop_id].setSelected(True)
+            self.field.centerOn(self.field.prop_items[prop_id])
+        self.selection_changed()
+
+    def selected_dot_colors(self, ids: list[str]) -> list[str]:
+        colors: list[str] = []
+        for dot_id in ids:
+            dot = self.project.dot_by_id(dot_id)
+            if dot:
+                colors.append(dot.color or "#e53935")
+        return colors
+
+    def update_selected_color_swatch(self, ids: list[str]) -> None:
+        if not hasattr(self, "selected_color_swatch"):
+            return
+        colors = self.selected_dot_colors(ids)
+        if not colors:
+            self.selected_color_swatch.setText("No selection")
+            self.selected_color_swatch.setStyleSheet("")
+            return
+        unique_colors = sorted(set(colors))
+        if len(unique_colors) == 1:
+            color = QColor(unique_colors[0])
+            text_color = "#101419" if color.lightness() > 145 else "#ffffff"
+            self.selected_color_swatch.setText(unique_colors[0])
+            self.selected_color_swatch.setStyleSheet(
+                f"background: {unique_colors[0]}; color: {text_color}; "
+                "border: 1px solid #4c5566; border-radius: 5px; padding: 3px 6px; font-weight: 650;"
+            )
+            return
+        self.selected_color_swatch.setText("Mixed")
+        self.selected_color_swatch.setStyleSheet(
+            "background: #252b35; color: #f7d154; border: 1px solid #4c5566; "
+            "border-radius: 5px; padding: 3px 6px; font-weight: 650;"
+        )
+
+    def refresh_appearance_groups(self) -> None:
+        if not hasattr(self, "section_color_combo"):
+            return
+        current_section = self.section_color_combo.currentText()
+        selected_sections = [
+            dot.section
+            for dot_id in self.field.selected_dot_ids()
+            if (dot := self.project.dot_by_id(dot_id)) and dot.section
+        ]
+        sections = sorted({dot.section for dot in self.project.dots if dot.section})
+        preferred_section = (
+            current_section
+            if current_section in sections
+            else selected_sections[0]
+            if selected_sections
+            else sections[0]
+            if sections
+            else ""
+        )
+        self.section_color_combo.blockSignals(True)
+        self.section_color_combo.clear()
+        self.section_color_combo.addItems(sections)
+        if preferred_section:
+            self.section_color_combo.setCurrentText(preferred_section)
+        self.section_color_combo.blockSignals(False)
+        has_sections = bool(sections)
+        self.section_color_combo.setEnabled(has_sections)
+        self.section_color_button.setEnabled(has_sections)
+
+    def choose_selected_dot_color(self) -> None:
+        ids = self.field.selected_dot_ids()
+        if not ids:
+            QMessageBox.information(self, "Dot Color", "Select one or more marchers first.")
+            return
+        colors = self.selected_dot_colors(ids)
+        initial = QColor(colors[0] if colors else "#e53935")
+        color = QColorDialog.getColor(initial, self, "Choose Selected Marcher Color")
+        if not color.isValid():
+            return
+        before: dict[str, dict[str, str]] = {}
+        after: dict[str, dict[str, str]] = {}
+        for dot_id in ids:
+            dot = self.project.dot_by_id(dot_id)
+            if not dot:
+                continue
+            before[dot_id] = {"color": dot.color or "#e53935"}
+            after[dot_id] = {"color": color.name()}
+        if after:
+            self.undo_stack.push(DotAppearanceCommand(self, before, after, "Color Selected Marchers"))
+
+    def choose_section_color(self) -> None:
+        section = self.section_color_combo.currentText().strip()
+        if not section:
+            QMessageBox.information(self, "Section Color", "Create or choose a section first.")
+            return
+        target_dots = [dot for dot in self.project.dots if dot.section == section]
+        if not target_dots:
+            return
+        color = QColorDialog.getColor(
+            QColor(target_dots[0].color or "#e53935"),
+            self,
+            f"Choose {section} Color",
+        )
+        if not color.isValid():
+            return
+        before = {dot.id: {"color": dot.color or "#e53935"} for dot in target_dots}
+        after = {dot.id: {"color": color.name()} for dot in target_dots}
+        self.undo_stack.push(DotAppearanceCommand(self, before, after, f"Color {section} Section"))
+
+    def assign_selected_section(self) -> None:
+        ids = self.field.selected_dot_ids()
+        if not ids:
+            QMessageBox.information(self, "Set Section", "Select one or more marchers first.")
+            return
+        section = self.bulk_section.text().strip()
+        if not section:
+            QMessageBox.information(self, "Set Section", "Enter a section name first.")
+            return
+        before: dict[str, dict[str, str]] = {}
+        after: dict[str, dict[str, str]] = {}
+        for dot_id in ids:
+            dot = self.project.dot_by_id(dot_id)
+            if not dot:
+                continue
+            before[dot_id] = {"section": dot.section}
+            after[dot_id] = {"section": section}
+        if after:
+            self.undo_stack.push(DotAppearanceCommand(self, before, after, "Assign Selected Section"))
+
+    def apply_batch_dot_metadata(self) -> None:
+        ids = self.field.selected_dot_ids()
+        if not ids:
+            QMessageBox.information(self, "Batch Edit", "Select one or more marchers first.")
+            return
+        fields = {
+            "section": self.bulk_section.text().strip(),
+            "instrument": self.bulk_instrument.text().strip(),
+            "rank": self.bulk_rank.text().strip(),
+            "equipment": self.bulk_equipment.text().strip(),
+            "layer": self.bulk_layer.text().strip(),
+        }
+        updates = {key: value for key, value in fields.items() if value}
+        if not updates:
+            QMessageBox.information(self, "Batch Edit", "Enter at least one metadata value.")
+            return
+        before: dict[str, dict[str, str]] = {}
+        after: dict[str, dict[str, str]] = {}
+        for dot_id in ids:
+            dot = self.project.dot_by_id(dot_id)
+            if not dot:
+                continue
+            before[dot_id] = {key: str(getattr(dot, key)) for key in updates}
+            after[dot_id] = dict(updates)
+        if after:
+            self.undo_stack.push(DotAppearanceCommand(self, before, after, "Batch Edit Marchers"))
+            self.statusBar().showMessage(f"Updated {len(after)} marcher(s)", 2200)
+
+    def apply_dot_appearance(self, updates: dict[str, dict[str, str]]) -> None:
+        for dot_id, fields in updates.items():
+            dot = self.project.dot_by_id(dot_id)
+            if not dot:
+                continue
+            if "color" in fields:
+                dot.color = fields["color"] or "#e53935"
+            if "section" in fields:
+                dot.section = fields["section"]
+            if "instrument" in fields:
+                dot.instrument = fields["instrument"]
+            if "rank" in fields:
+                dot.rank = fields["rank"]
+            if "equipment" in fields:
+                dot.equipment = fields["equipment"]
+            if "layer" in fields:
+                dot.layer = fields["layer"] or "Main"
+            item = self.field.dot_items.get(dot_id)
+            if item:
+                item.setBrush(QColor(dot.color or "#e53935"))
+                item.label.setPlainText(dot.name)
+        self.refresh_marcher_table()
+        self.refresh_visibility_filters()
+        self.refresh_appearance_groups()
+        self.sync_inspector()
+
     def sync_inspector(self) -> None:
         ids = self.field.selected_dot_ids()
-        self.selection_label.setText(f"{len(ids)} selected" if ids else "No selection")
-        enabled = len(ids) == 1
+        prop_ids = self.field.selected_prop_ids()
+        selected_total = len(ids) + len(prop_ids)
+        self.selection_label.setText(f"{selected_total} selected" if selected_total else "No selection")
+        self.refresh_marcher_table()
+        self.refresh_prop_table()
+        self.refresh_appearance_groups()
+        self.sync_movement_style_controls()
+        self.update_selected_color_swatch(ids)
+        has_selection = bool(ids)
+        for widget in (
+            self.selected_color_button,
+            self.bulk_section,
+            self.bulk_section_button,
+            self.bulk_instrument,
+            self.bulk_rank,
+            self.bulk_equipment,
+            self.bulk_layer,
+            self.batch_metadata_button,
+        ):
+            widget.setEnabled(has_selection)
+        if has_selection:
+            selected_sections = [
+                dot.section
+                for dot_id in ids
+                if (dot := self.project.dot_by_id(dot_id)) and dot.section
+            ]
+            self.bulk_section.setText(
+                selected_sections[0] if selected_sections and len(set(selected_sections)) == 1 else ""
+            )
+            for field_name, editor in (
+                ("instrument", self.bulk_instrument),
+                ("rank", self.bulk_rank),
+                ("equipment", self.bulk_equipment),
+                ("layer", self.bulk_layer),
+            ):
+                values = [
+                    getattr(dot, field_name)
+                    for dot_id in ids
+                    if (dot := self.project.dot_by_id(dot_id)) and getattr(dot, field_name)
+                ]
+                editor.setText(values[0] if values and len(set(values)) == 1 else "")
+        enabled = len(ids) == 1 and not prop_ids
+        self.dot_properties_group.setVisible(enabled)
+        self.prop_properties_group.setVisible(len(prop_ids) == 1 and not ids)
         for widget in (
             self.dot_name,
             self.dot_section,
@@ -2312,21 +4156,61 @@ class MainWindow(QMainWindow):
             self.dot_layer,
             self.dot_x,
             self.dot_y,
+            self.dot_yardline,
+            self.dot_hash,
         ):
             widget.setEnabled(enabled)
         if not enabled:
+            self.dot_yardline.setText("-")
+            self.dot_hash.setText("-")
+        else:
+            dot = self.project.dot_by_id(ids[0])
+            position = self.current_set().dot_positions.get(ids[0], (0, 0))
+            if dot:
+                self.dot_name.setText(dot.name)
+                self.dot_section.setText(dot.section)
+                self.dot_instrument.setText(dot.instrument)
+                self.dot_rank.setText(dot.rank)
+                self.dot_equipment.setText(dot.equipment)
+                self.dot_layer.setText(dot.layer)
+                self.dot_x.setText(f"{position[0]:.2f}")
+                self.dot_y.setText(f"{position[1]:.2f}")
+                yard_text, hash_text = format_drill_coordinate(position[0], position[1])
+                self.dot_yardline.setText(yard_text)
+                self.dot_hash.setText(hash_text)
+
+        prop_enabled = len(prop_ids) == 1 and not ids
+        for widget in (
+            self.prop_name,
+            self.prop_layer,
+            self.prop_x,
+            self.prop_y,
+            self.prop_width,
+            self.prop_height,
+            self.prop_rotation,
+        ):
+            widget.setEnabled(prop_enabled)
+        if not prop_enabled:
             return
-        dot = self.project.dot_by_id(ids[0])
-        position = self.current_set().dot_positions.get(ids[0], (0, 0))
-        if dot:
-            self.dot_name.setText(dot.name)
-            self.dot_section.setText(dot.section)
-            self.dot_instrument.setText(dot.instrument)
-            self.dot_rank.setText(dot.rank)
-            self.dot_equipment.setText(dot.equipment)
-            self.dot_layer.setText(dot.layer)
-            self.dot_x.setText(f"{position[0]:.2f}")
-            self.dot_y.setText(f"{position[1]:.2f}")
+        prop = self.project.prop_by_id(prop_ids[0])
+        state = self.current_set().prop_positions.get(prop_ids[0])
+        if prop and state:
+            self.prop_name.blockSignals(True)
+            self.prop_layer.blockSignals(True)
+            self.prop_name.setText(prop.name)
+            self.prop_layer.setText(prop.layer)
+            self.prop_name.blockSignals(False)
+            self.prop_layer.blockSignals(False)
+            for editor, key in (
+                (self.prop_x, "x"),
+                (self.prop_y, "y"),
+                (self.prop_width, "width"),
+                (self.prop_height, "height"),
+                (self.prop_rotation, "rotation"),
+            ):
+                editor.blockSignals(True)
+                editor.setValue(float(state.get(key, prop_default_state(prop)[key])))
+                editor.blockSignals(False)
 
     def refresh_visibility_filters(self) -> None:
         if not hasattr(self, "section_filter"):
@@ -2334,7 +4218,13 @@ class MainWindow(QMainWindow):
         current_section = self.section_filter.currentText() or "All"
         current_layer = self.layer_filter.currentText() or "All"
         sections = ["All", *sorted({dot.section for dot in self.project.dots if dot.section})]
-        layers = ["All", *sorted({dot.layer for dot in self.project.dots if dot.layer})]
+        layers = [
+            "All",
+            *sorted(
+                {dot.layer for dot in self.project.dots if dot.layer}
+                | {prop.layer for prop in self.project.props if prop.layer}
+            ),
+        ]
         self.section_filter.blockSignals(True)
         self.layer_filter.blockSignals(True)
         self.section_filter.clear()
@@ -2580,9 +4470,14 @@ class MainWindow(QMainWindow):
             dot.rank = self.dot_rank.text()
             dot.equipment = self.dot_equipment.text()
             dot.layer = self.dot_layer.text().strip() or "Main"
+            self.field.preserve_selection()
             self.field.rebuild_dots()
             self.field.set_positions(self.current_set().dot_positions)
+            self.field.set_prop_states(self.current_set().prop_positions)
+            self.field.restore_preserved_selection()
+            self.refresh_marcher_table()
             self.refresh_visibility_filters()
+            self.refresh_appearance_groups()
 
     def update_selected_dot_position(self) -> None:
         ids = self.field.selected_dot_ids()
@@ -2596,6 +4491,34 @@ class MainWindow(QMainWindow):
         after = self.current_positions()
         after[ids[0]] = (x, y)
         self.apply_positions(after)
+
+    def update_selected_prop_metadata(self) -> None:
+        prop_ids = self.field.selected_prop_ids()
+        if len(prop_ids) != 1:
+            return
+        prop = self.project.prop_by_id(prop_ids[0])
+        if not prop:
+            return
+        prop.name = self.prop_name.text().strip() or prop.id
+        prop.layer = self.prop_layer.text().strip() or "Props"
+        self.refresh_prop_table()
+        self.refresh_visibility_filters()
+
+    def update_selected_prop_state(self) -> None:
+        prop_ids = self.field.selected_prop_ids()
+        if len(prop_ids) != 1:
+            return
+        prop_id = prop_ids[0]
+        before = self.current_prop_states()
+        after = {key: dict(value) for key, value in before.items()}
+        after[prop_id] = {
+            "x": self.prop_x.value(),
+            "y": self.prop_y.value(),
+            "width": self.prop_width.value(),
+            "height": self.prop_height.value(),
+            "rotation": self.prop_rotation.value(),
+        }
+        self.apply_prop_states(after)
 
     def save(self) -> None:
         save_project(self.project_dir, self.project)
@@ -2734,7 +4657,7 @@ class MainWindow(QMainWindow):
             QApplication.processEvents()
 
         try:
-            export_drill_sheet_pdf(Path(path), self.project, progress_callback=update_progress)
+            export_drill_sheet_pdf(Path(path), self.project, self.project_dir, progress_callback=update_progress)
         except Exception as exc:
             QMessageBox.warning(self, "Export Failed", str(exc))
             return
@@ -2800,7 +4723,7 @@ class MainWindow(QMainWindow):
             QApplication.processEvents()
 
         try:
-            export_staff_packet_pdf(Path(path), self.project, progress_callback=update_progress)
+            export_staff_packet_pdf(Path(path), self.project, self.project_dir, progress_callback=update_progress)
         except Exception as exc:
             QMessageBox.warning(self, "Export Failed", str(exc))
             return
@@ -2857,5 +4780,7 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("MP4 exported", 3000)
 
     def closeEvent(self, event) -> None:  # type: ignore[override]
+        self.settings.setValue("main_window/dock_state", self.saveState())
+        self.settings.sync()
         self.save()
         super().closeEvent(event)

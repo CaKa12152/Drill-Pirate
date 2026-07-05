@@ -14,6 +14,7 @@ from drill_writer.core.models import (
     DrillSet,
     Marker,
     ProjectMetadata,
+    Prop,
     TimingEvent,
 )
 
@@ -32,6 +33,7 @@ def create_project_folder(
 ) -> Path:
     project_dir = root / safe_folder_name(title)
     (project_dir / "audio").mkdir(parents=True, exist_ok=True)
+    (project_dir / "props").mkdir(parents=True, exist_ok=True)
 
     audio_file = ""
     if audio_source and audio_source.exists():
@@ -55,7 +57,7 @@ def create_project_folder(
                 name="Set 1",
                 start_count=1,
                 end_count=counts_per_set,
-                tempo=tempo,
+                tempo=None,
                 dot_positions={},
             )
         ],
@@ -93,6 +95,7 @@ def discover_projects(root: Path | None = None) -> list[Path]:
 def load_project(project_dir: Path) -> DrillProject:
     metadata = ProjectMetadata.from_json(read_json(project_dir / "metadata.json"))
     dots = [Dot.from_json(item) for item in read_json(project_dir / "dots.json").get("dots", [])]
+    props = [Prop.from_json(item) for item in read_json(project_dir / "props.json").get("props", [])]
     sets = [DrillSet.from_json(item) for item in read_json(project_dir / "sets.json").get("sets", [])]
     show = read_json(project_dir / "show.json")
     markers = [Marker.from_json(item) for item in show.get("markers", [])]
@@ -110,6 +113,7 @@ def load_project(project_dir: Path) -> DrillProject:
     project = DrillProject(
         metadata=metadata,
         dots=dots,
+        props=props,
         sets=sets,
         markers=markers,
         constraints=constraints,
@@ -123,8 +127,10 @@ def load_project(project_dir: Path) -> DrillProject:
 def save_project(project_dir: Path, project: DrillProject) -> None:
     project_dir.mkdir(parents=True, exist_ok=True)
     (project_dir / "audio").mkdir(exist_ok=True)
+    (project_dir / "props").mkdir(exist_ok=True)
     write_json(project_dir / "metadata.json", project.metadata.to_json())
     write_json(project_dir / "dots.json", {"dots": [dot.to_json() for dot in project.dots]})
+    write_json(project_dir / "props.json", {"props": [prop.to_json() for prop in project.props]})
     write_json(project_dir / "sets.json", {"sets": [drill_set.to_json() for drill_set in project.sets]})
     write_json(
         project_dir / "show.json",

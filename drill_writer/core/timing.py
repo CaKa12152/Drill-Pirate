@@ -26,7 +26,27 @@ def show_end_count(project: DrillProject) -> float:
     return float(project.sets[-1].end_count) if project.sets else 1.0
 
 
+def playback_bounds_for_set(project: DrillProject, set_index: int) -> tuple[float, float]:
+    if not project.sets:
+        return (1.0, 1.0)
+    index = max(0, min(set_index, len(project.sets) - 1))
+    drill_set = project.sets[index]
+    start = float(drill_set.start_count)
+    end = float(drill_set.end_count)
+    if index + 1 < len(project.sets):
+        next_start = float(project.sets[index + 1].start_count)
+        if next_start > start:
+            end = max(end, next_start)
+    return start, end
+
+
 def set_index_for_count(project: DrillProject, count: float) -> int:
+    if not project.sets:
+        return 0
+    for index, drill_set in enumerate(project.sets[:-1]):
+        next_start = float(project.sets[index + 1].start_count)
+        if count < next_start:
+            return index
     for index, drill_set in enumerate(project.sets):
         if drill_set.start_count <= count <= drill_set.end_count:
             return index
@@ -36,15 +56,15 @@ def set_index_for_count(project: DrillProject, count: float) -> int:
 def set_count_for_audio_ms(project: DrillProject, milliseconds: int) -> tuple[int, float]:
     count = audio_ms_to_count(project, float(milliseconds))
     set_index = set_index_for_count(project, count)
-    drill_set = project.sets[set_index]
-    return set_index, max(drill_set.start_count, min(count, drill_set.end_count))
+    start, end = playback_bounds_for_set(project, set_index)
+    return set_index, max(start, min(count, end))
 
 
 def audio_ms_for_set_count(project: DrillProject, set_index: int, count: float) -> int:
     if not project.sets:
         return 0
-    drill_set = project.sets[max(0, min(set_index, len(project.sets) - 1))]
-    clamped_count = max(drill_set.start_count, min(count, drill_set.end_count))
+    start, end = playback_bounds_for_set(project, set_index)
+    clamped_count = max(start, min(count, end))
     return int(count_to_audio_ms(project, clamped_count))
 
 

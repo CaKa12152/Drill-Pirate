@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from math import cos, pi
 
-from drill_writer.core.models import DrillProject, Transition
+from drill_writer.core.models import DrillProject, Prop, Transition, prop_default_state
 
 
 @dataclass(slots=True)
@@ -238,7 +238,7 @@ def interpolate_project(project: DrillProject, set_index: int, count: float) -> 
     current_index = max(0, min(set_index, len(project.sets) - 1))
     current = project.sets[current_index]
     previous = project.sets[current_index - 1] if current_index > 0 else current
-    motion_start_count = current.start_count - 1 if current_index > 0 else current.start_count
+    motion_start_count = current.start_count
     movement_counts = max(1, current.end_count - motion_start_count)
     progress = (count - motion_start_count) / movement_counts
     eased = ease(progress, current.transition)
@@ -272,3 +272,37 @@ def interpolate_project(project: DrillProject, set_index: int, count: float) -> 
                 eased,
             )
     return positions
+
+
+def interpolate_props(project: DrillProject, set_index: int, count: float) -> dict[str, dict[str, float]]:
+    if not project.sets:
+        return {prop.id: prop_default_state(prop) for prop in project.props}
+
+    current_index = max(0, min(set_index, len(project.sets) - 1))
+    current = project.sets[current_index]
+    previous = project.sets[current_index - 1] if current_index > 0 else current
+    motion_start_count = current.start_count
+    movement_counts = max(1, current.end_count - motion_start_count)
+    progress = ease((count - motion_start_count) / movement_counts, current.transition)
+
+    states: dict[str, dict[str, float]] = {}
+    for prop in project.props:
+        start = previous.prop_positions.get(prop.id, prop_default_state(prop))
+        end = current.prop_positions.get(prop.id, prop_default_state(prop))
+        states[prop.id] = interpolate_prop_state(prop, start, end, progress)
+    return states
+
+
+def interpolate_prop_state(
+    prop: Prop,
+    start: dict[str, float],
+    end: dict[str, float],
+    progress: float,
+) -> dict[str, float]:
+    default = prop_default_state(prop)
+    state: dict[str, float] = {}
+    for key in ("x", "y", "width", "height", "rotation"):
+        start_value = float(start.get(key, default[key]))
+        end_value = float(end.get(key, default[key]))
+        state[key] = start_value + (end_value - start_value) * progress
+    return state

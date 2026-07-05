@@ -1,15 +1,17 @@
 from __future__ import annotations
 
 from enum import Enum
+from pathlib import Path
 from typing import Callable
 
 from PySide6.QtCore import QPointF, QRectF, Qt, Signal
-from PySide6.QtGui import QAction, QColor, QPainter, QPainterPath, QPen
+from PySide6.QtGui import QAction, QColor, QFont, QPainter, QPainterPath, QPen, QPixmap, QTransform
 from PySide6.QtWidgets import (
     QGraphicsEllipseItem,
     QGraphicsItem,
     QGraphicsLineItem,
     QGraphicsPathItem,
+    QGraphicsPixmapItem,
     QGraphicsRectItem,
     QGraphicsScene,
     QGraphicsTextItem,
@@ -17,7 +19,7 @@ from PySide6.QtWidgets import (
     QMenu,
 )
 
-from drill_writer.core.models import Dot, DrillProject
+from drill_writer.core.models import Dot, DrillProject, Prop, prop_default_state
 
 
 class EditorTool(str, Enum):
@@ -32,24 +34,64 @@ class EditorTool(str, Enum):
     RECTANGLE = "rectangle"
     SPIRAL = "spiral"
     BLOCK = "block"
+    SCALE = "scale"
     LASSO = "lasso"
     SVG_SHAPE = "svg_shape"
+    PLUGIN_FORM = "plugin_form"
 
 
 class DotItem(QGraphicsEllipseItem):
     def __init__(self, dot: Dot, scale: float) -> None:
-        radius = 0.5 * scale
+        radius = 0.34 * scale
         super().__init__(-radius, -radius, radius * 2, radius * 2)
         self.dot_id = dot.id
         self.setBrush(QColor(dot.color))
-        self.setPen(QPen(QColor("#101216"), 0.1 * scale))
+        self.setPen(QPen(QColor("#1d2128"), 0.08 * scale))
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, True)
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, True)
         self.setZValue(10)
         self.label = QGraphicsTextItem(dot.name, self)
-        self.label.setDefaultTextColor(QColor("#111318"))
-        self.label.setScale(0.1 * scale)
-        self.label.setPos(radius, -radius)
+        self.label.setFont(QFont("Arial", 8))
+        self.label.setDefaultTextColor(QColor("#1c2430"))
+        self.label.setScale(0.085 * scale)
+        self.label.setPos(radius + 0.08 * scale, -radius - 0.04 * scale)
+
+
+class PropItem(QGraphicsPixmapItem):
+    def __init__(self, prop: Prop, pixmap: QPixmap, scale: float) -> None:
+        super().__init__(pixmap)
+        self.prop_id = prop.id
+        self.scale_factor = scale
+        self.source_size = pixmap.size()
+        self.setTransformationMode(Qt.TransformationMode.SmoothTransformation)
+        self.setShapeMode(QGraphicsPixmapItem.ShapeMode.BoundingRectShape)
+        self.setOffset(-pixmap.width() / 2, -pixmap.height() / 2)
+        self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, True)
+        self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, True)
+        self.setZValue(7)
+        self.apply_state(prop_default_state(prop))
+
+    def apply_state(self, state: dict[str, float]) -> None:
+        if self.source_size.width() <= 0 or self.source_size.height() <= 0:
+            return
+        width_scene = max(0.1, float(state.get("width", 8.0))) * self.scale_factor
+        height_scene = max(0.1, float(state.get("height", 4.0))) * self.scale_factor
+        transform = QTransform()
+        transform.scale(width_scene / self.source_size.width(), height_scene / self.source_size.height())
+        self.setTransform(transform)
+        self.setRotation(float(state.get("rotation", 0.0)))
+
+    def current_state(self, scene_to_field) -> dict[str, float]:
+        x, y = scene_to_field(self.pos())
+        width = self.boundingRect().width() * self.transform().m11() / self.scale_factor
+        height = self.boundingRect().height() * self.transform().m22() / self.scale_factor
+        return {
+            "x": x,
+            "y": y,
+            "width": width,
+            "height": height,
+            "rotation": self.rotation(),
+        }
 
 
 class PreviewHandleItem(QGraphicsEllipseItem):
@@ -112,6 +154,8 @@ class FieldView(QGraphicsView):
     selection_changed = Signal(list)
     dot_moved = Signal(str, float, float)
     dots_moved = Signal(dict)
+    prop_moved = Signal(str, dict)
+    props_moved = Signal(dict)
     context_action = Signal(str)
     preview_handle_moved = Signal(str, float, float)
     path_anchor_added = Signal(str, float, float)
@@ -124,6 +168,8 @@ class FieldView(QGraphicsView):
         super().__init__()
         self.scene = QGraphicsScene(self)
         self.setScene(self.scene)
+        self.setObjectName("FieldView")
+        self.setBackgroundBrush(QColor("#111318"))
         self.setRenderHints(
             QPainter.RenderHint.Antialiasing | QPainter.RenderHint.SmoothPixmapTransform
         )
@@ -133,7 +179,9 @@ class FieldView(QGraphicsView):
         self.setResizeAnchor(QGraphicsView.ViewportAnchor.AnchorViewCenter)
         self.scale_factor = 10.0
         self.project: DrillProject | None = None
+        self.project_dir: Path | None = None
         self.dot_items: dict[str, DotItem] = {}
+        self.prop_items: dict[str, PropItem] = {}
         self.active_tool = EditorTool.SELECT
         self.show_labels = True
         self.show_ghosts = True
@@ -147,6 +195,7 @@ class FieldView(QGraphicsView):
         self._formation_callback: Callable[[EditorTool], None] | None = None
         self._pan_start: QPointF | None = None
         self._drag_start_positions: dict[str, tuple[float, float]] = {}
+        self._drag_start_prop_states: dict[str, dict[str, float]] = {}
         self._active_preview_handle: PreviewHandleItem | None = None
         self._active_path_anchor: PathAnchorItem | None = None
         self._active_path_tangent: PathTangentItem | None = None
@@ -158,8 +207,13 @@ class FieldView(QGraphicsView):
         self._lasso_additive = False
         self.draw_field()
 
-    def set_project(self, project: DrillProject) -> None:
+    def set_canvas_theme(self, mode: str) -> None:
+        self.setBackgroundBrush(QColor("#eef2f7" if mode == "light" else "#111318"))
+
+    def set_project(self, project: DrillProject, project_dir: Path | None = None) -> None:
         self.project = project
+        self.project_dir = project_dir
+        self.rebuild_props()
         self.rebuild_dots()
 
     def set_tool(self, tool: EditorTool) -> None:
@@ -171,6 +225,8 @@ class FieldView(QGraphicsView):
             else QGraphicsView.DragMode.NoDrag
         )
         for item in self.dot_items.values():
+            item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, tool == EditorTool.SELECT)
+        for item in self.prop_items.values():
             item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, tool == EditorTool.SELECT)
 
     def set_snap_enabled(self, enabled: bool) -> None:
@@ -194,6 +250,14 @@ class FieldView(QGraphicsView):
             section_visible = self.visible_section == "All" or dot.section == self.visible_section
             layer_visible = self.visible_layer == "All" or dot.layer == self.visible_layer
             item.setVisible(section_visible and layer_visible)
+        for prop_id, item in self.prop_items.items():
+            prop = self.project.prop_by_id(prop_id)
+            if not prop:
+                item.setVisible(False)
+                continue
+            section_visible = self.visible_section == "All"
+            layer_visible = self.visible_layer == "All" or prop.layer == self.visible_layer
+            item.setVisible(section_visible and layer_visible)
 
     def set_formation_callback(self, callback: Callable[[EditorTool], None]) -> None:
         self._formation_callback = callback
@@ -203,6 +267,13 @@ class FieldView(QGraphicsView):
             item.dot_id
             for item in self.scene.selectedItems()
             if isinstance(item, DotItem)
+        ]
+
+    def selected_prop_ids(self) -> list[str]:
+        return [
+            item.prop_id
+            for item in self.scene.selectedItems()
+            if isinstance(item, PropItem)
         ]
 
     def normalized_item(self, item: QGraphicsItem | None) -> QGraphicsItem | None:
@@ -226,6 +297,13 @@ class FieldView(QGraphicsView):
             item = self.dot_items.get(dot_id)
             if item:
                 item.setPos(self.field_to_scene(*position))
+
+    def set_prop_states(self, states: dict[str, dict[str, float]]) -> None:
+        for prop_id, state in states.items():
+            item = self.prop_items.get(prop_id)
+            if item:
+                item.apply_state(state)
+                item.setPos(self.field_to_scene(float(state.get("x", 0)), float(state.get("y", 0))))
 
     def show_preview(
         self,
@@ -373,31 +451,88 @@ class FieldView(QGraphicsView):
             self.dot_items[dot.id] = item
         self.apply_visibility_filters()
 
+    def rebuild_props(self) -> None:
+        for item in self.prop_items.values():
+            self.scene.removeItem(item)
+        self.prop_items.clear()
+        if not self.project:
+            return
+        for prop in self.project.props:
+            pixmap = self.load_prop_pixmap(prop)
+            item = PropItem(prop, pixmap, self.scale_factor)
+            item.setPos(self.field_to_scene(prop.x, prop.y))
+            item.setFlag(
+                QGraphicsItem.GraphicsItemFlag.ItemIsMovable,
+                self.active_tool == EditorTool.SELECT,
+            )
+            self.scene.addItem(item)
+            self.prop_items[prop.id] = item
+        self.apply_visibility_filters()
+
+    def load_prop_pixmap(self, prop: Prop) -> QPixmap:
+        path = Path(prop.image_file)
+        if not path.is_absolute() and self.project_dir is not None:
+            path = self.project_dir / prop.image_file
+        pixmap = QPixmap(str(path))
+        if not pixmap.isNull():
+            return pixmap
+        fallback = QPixmap(160, 80)
+        fallback.fill(QColor("#d7dde7"))
+        return fallback
+
     def draw_field(self) -> None:
         self.scene.clear()
         self.dot_items.clear()
+        self.prop_items.clear()
         width = 120 * self.scale_factor
         height = 53.333 * self.scale_factor
         field = QGraphicsRectItem(-width / 2, -height / 2, width, height)
-        field.setBrush(QColor("#5aa052"))
-        field.setPen(QPen(QColor("#e8f6e6"), 0.2 * self.scale_factor))
+        field.setBrush(QColor("#f9fbf7"))
+        field.setPen(QPen(QColor("#88939a"), 0.16 * self.scale_factor))
         field.setZValue(-20)
         self.scene.addItem(field)
 
-        yard_pen = QPen(QColor("#e8f6e6"), 0.12 * self.scale_factor)
-        hash_pen = QPen(QColor("#d9edd7"), 0.08 * self.scale_factor)
+        micro_pen = QPen(QColor("#e3e9e8"), 0.018 * self.scale_factor)
+        minor_pen = QPen(QColor("#d3dcda"), 0.035 * self.scale_factor)
+        yard_pen = QPen(QColor("#5d686f"), 0.09 * self.scale_factor)
+        hash_pen = QPen(QColor("#101318"), 0.16 * self.scale_factor)
+
+        for yard in range(-60, 61):
+            x = yard * self.scale_factor
+            if yard % 5 == 0:
+                continue
+            self.scene.addLine(x, -height / 2, x, height / 2, minor_pen if yard % 2 == 0 else micro_pen)
+        horizontal_index = 0
+        y = -26.0
+        while y <= 26.1:
+            y_scene = y * self.scale_factor
+            if abs(y) not in (20.0,):
+                self.scene.addLine(-width / 2, y_scene, width / 2, y_scene, minor_pen if horizontal_index % 2 == 0 else micro_pen)
+            y += 1.0
+            horizontal_index += 1
+
         for yard in range(-50, 55, 5):
             x = yard * self.scale_factor
             self.scene.addLine(x, -height / 2, x, height / 2, yard_pen)
             label_text = "50" if yard == 0 else str(50 - abs(yard))
-            label = self.scene.addText(label_text)
-            label.setDefaultTextColor(QColor("#f8fff5"))
-            label.setScale(0.6)
-            label.setPos(x - 7, -height / 2 + 8)
+            for y_pos, rotation in ((-height / 2 + 4, 0), (height / 2 - 28, 180)):
+                label = self.scene.addText(label_text, QFont("Arial", 8, QFont.Weight.DemiBold))
+                label.setDefaultTextColor(QColor("#7d858a"))
+                label.setScale(0.75)
+                label.setRotation(rotation)
+                label.setPos(x - 8, y_pos)
 
-        for y in (-20, 0, 20):
-            self.scene.addLine(-width / 2, y * self.scale_factor, width / 2, y * self.scale_factor, hash_pen)
-        self.scene.setSceneRect(QRectF(-width / 2 - 80, -height / 2 - 80, width + 160, height + 160))
+        for boundary_y in (-height / 2, height / 2):
+            self.scene.addLine(-width / 2, boundary_y, width / 2, boundary_y, QPen(QColor("#5f6b72"), 0.11 * self.scale_factor))
+
+        for hash_y in (-20, 20):
+            y_scene = -hash_y * self.scale_factor
+            for yard in range(-50, 55, 5):
+                x = yard * self.scale_factor
+                self.scene.addLine(x - 0.7 * self.scale_factor, y_scene, x + 0.7 * self.scale_factor, y_scene, hash_pen)
+        midfield_pen = QPen(QColor("#b5bec2"), 0.05 * self.scale_factor, Qt.PenStyle.DashLine)
+        self.scene.addLine(-width / 2, 0, width / 2, 0, midfield_pen)
+        self.scene.setSceneRect(QRectF(-width / 2 - 65, -height / 2 - 48, width + 130, height + 96))
 
     def field_to_scene(self, x: float, y: float) -> QPointF:
         return QPointF(x * self.scale_factor, -y * self.scale_factor)
@@ -444,7 +579,7 @@ class FieldView(QGraphicsView):
                 self.restore_preserved_selection()
                 event.accept()
                 return
-            if event.modifiers() & Qt.KeyboardModifier.ShiftModifier and isinstance(clicked_item, DotItem):
+            if event.modifiers() & Qt.KeyboardModifier.ShiftModifier and isinstance(clicked_item, (DotItem, PropItem)):
                 clicked_item.setSelected(not clicked_item.isSelected())
                 self.selection_changed.emit(self.selected_dot_ids())
                 event.accept()
@@ -474,7 +609,7 @@ class FieldView(QGraphicsView):
         if (
             event.button() == Qt.MouseButton.LeftButton
             and self.active_tool == EditorTool.SELECT
-            and isinstance(clicked_item, DotItem)
+            and isinstance(clicked_item, (DotItem, PropItem))
             and not clicked_item.isSelected()
             and not event.modifiers() & Qt.KeyboardModifier.ShiftModifier
         ):
@@ -485,11 +620,18 @@ class FieldView(QGraphicsView):
             for item in self.scene.selectedItems():
                 if isinstance(item, DotItem):
                     self._drag_start_positions[item.dot_id] = self.scene_to_field(item.pos())
+                elif isinstance(item, PropItem):
+                    self._drag_start_prop_states[item.prop_id] = item.current_state(self.scene_to_field)
         super().mousePressEvent(event)
         if event.button() == Qt.MouseButton.LeftButton and self.active_tool == EditorTool.SELECT:
             for item in self.scene.selectedItems():
                 if isinstance(item, DotItem):
                     self._drag_start_positions.setdefault(item.dot_id, self.scene_to_field(item.pos()))
+                elif isinstance(item, PropItem):
+                    self._drag_start_prop_states.setdefault(
+                        item.prop_id,
+                        item.current_state(self.scene_to_field),
+                    )
 
     def mouseMoveEvent(self, event) -> None:  # type: ignore[override]
         if self._manual_drag_item is not None:
@@ -555,6 +697,7 @@ class FieldView(QGraphicsView):
         super().mouseReleaseEvent(event)
         if self.active_tool != EditorTool.SELECT:
             self._drag_start_positions = {}
+            self._drag_start_prop_states = {}
             self.selection_changed.emit(self.selected_dot_ids())
             self.clear_snap_guides()
             return
@@ -567,12 +710,25 @@ class FieldView(QGraphicsView):
                 start = self._drag_start_positions.get(item.dot_id)
                 if start is None or abs(start[0] - x) > 0.001 or abs(start[1] - y) > 0.001:
                     moved_positions[item.dot_id] = (x, y)
+        moved_props: dict[str, dict[str, float]] = {}
+        for item in self.scene.selectedItems():
+            if isinstance(item, PropItem):
+                state = item.current_state(self.scene_to_field)
+                start = self._drag_start_prop_states.get(item.prop_id)
+                if start is None or any(abs(start.get(key, 0) - state.get(key, 0)) > 0.001 for key in state):
+                    moved_props[item.prop_id] = state
         if len(moved_positions) > 1:
             self.dots_moved.emit(moved_positions)
         elif len(moved_positions) == 1:
             dot_id, position = next(iter(moved_positions.items()))
             self.dot_moved.emit(dot_id, position[0], position[1])
+        if len(moved_props) > 1:
+            self.props_moved.emit(moved_props)
+        elif len(moved_props) == 1:
+            prop_id, state = next(iter(moved_props.items()))
+            self.prop_moved.emit(prop_id, state)
         self._drag_start_positions = {}
+        self._drag_start_prop_states = {}
         self.clear_snap_guides()
         self.selection_changed.emit(self.selected_dot_ids())
 
@@ -724,6 +880,7 @@ class FieldView(QGraphicsView):
             "Preview Rectangle",
             "Preview Spiral",
             "Preview Block",
+            "Preview Scale Form",
             "Preview SVG Shape",
             "Preview Scatter",
             "Preview Mirror",

@@ -70,7 +70,19 @@ def apply_startup(context):
         },
         '''from __future__ import annotations
 
+from math import cos, radians, sin
+
 from drill_writer.core.tools import positions_along_path
+
+
+def rotate_point(point, center, degrees):
+    angle = radians(degrees)
+    offset_x = point[0] - center[0]
+    offset_y = point[1] - center[1]
+    return (
+        center[0] + offset_x * cos(angle) - offset_y * sin(angle),
+        center[1] + offset_x * sin(angle) + offset_y * cos(angle),
+    )
 
 
 def apply_main_window(context):
@@ -79,8 +91,11 @@ def apply_main_window(context):
         if count < 3:
             return None
         center_x, center_y = tool_context.center
-        width = tool_context.bounds_width or 24
-        height = tool_context.bounds_height or 18
+        settings = tool_context.settings
+        width = float(settings.get("width", tool_context.bounds_width or 24))
+        height = float(settings.get("height", tool_context.bounds_height or 18))
+        rotation = float(settings.get("rotation", 0))
+        center = (center_x, center_y)
         path = [
             (center_x, center_y + height / 2),
             (center_x + width / 2, center_y),
@@ -88,6 +103,8 @@ def apply_main_window(context):
             (center_x - width / 2, center_y),
             (center_x, center_y + height / 2),
         ]
+        if rotation:
+            path = [rotate_point(point, center, rotation) for point in path]
         return positions_along_path(path, count)
 
     context.register_form_tool(
@@ -96,6 +113,40 @@ def apply_main_window(context):
         shortcut="Ctrl+Alt+D",
         min_selected=3,
         tooltip="Plugin example: reshape the selected marchers into a diamond.",
+        settings=[
+            {
+                "name": "width",
+                "label": "Width",
+                "type": "float",
+                "default": 28,
+                "min": 2,
+                "max": 120,
+                "step": 1,
+                "suffix": " yd",
+                "handle": "width",
+            },
+            {
+                "name": "height",
+                "label": "Height",
+                "type": "float",
+                "default": 18,
+                "min": 2,
+                "max": 54,
+                "step": 1,
+                "suffix": " yd",
+                "handle": "height",
+            },
+            {
+                "name": "rotation",
+                "label": "Rotation",
+                "type": "float",
+                "default": 0,
+                "min": -180,
+                "max": 180,
+                "step": 5,
+                "suffix": " deg",
+            },
+        ],
     )
 ''',
     ),
@@ -152,6 +203,7 @@ class PluginContext:
         shortcut: str | None = None,
         min_selected: int = 2,
         tooltip: str = "",
+        settings: list[dict[str, Any]] | None = None,
     ) -> str:
         if self.main_window is None:
             return ""
@@ -165,6 +217,7 @@ class PluginContext:
             shortcut=shortcut,
             min_selected=min_selected,
             tooltip=tooltip,
+            settings=settings,
         )
 
     def add_menu_action(
@@ -213,7 +266,14 @@ class PluginManager:
             entry_path = plugin_dir / str(manifest["entry"])
             if not manifest_path.exists():
                 manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
-            if not entry_path.exists():
+            should_write_entry = not entry_path.exists()
+            if entry_path.exists() and str(manifest["id"]) == "starter_form_tools":
+                existing = entry_path.read_text(encoding="utf-8", errors="ignore")
+                should_write_entry = (
+                    "Plugin example: reshape the selected marchers into a diamond." in existing
+                    or "settings=[" not in existing
+                )
+            if should_write_entry:
                 entry_path.write_text(code, encoding="utf-8")
 
     def register_app(self, app: QApplication, startup_page: QWidget) -> None:

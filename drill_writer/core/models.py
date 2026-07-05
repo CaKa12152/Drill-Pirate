@@ -11,6 +11,15 @@ class Transition(str, Enum):
     CURVED = "curved"
 
 
+class MovementStyle(str, Enum):
+    NORMAL = "normal"
+    HALF_TIME = "half_time"
+    DOUBLE_TIME = "double_time"
+    JAZZ_RUN = "jazz_run"
+    HALT = "halt"
+    VISUAL = "visual"
+
+
 @dataclass(slots=True)
 class Dot:
     id: str
@@ -55,15 +64,57 @@ class Dot:
 
 
 @dataclass(slots=True)
+class Prop:
+    id: str
+    name: str
+    image_file: str
+    x: float = 0.0
+    y: float = 0.0
+    width: float = 8.0
+    height: float = 4.0
+    rotation: float = 0.0
+    layer: str = "Props"
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "name": self.name,
+            "image_file": self.image_file,
+            "x": self.x,
+            "y": self.y,
+            "width": self.width,
+            "height": self.height,
+            "rotation": self.rotation,
+            "layer": self.layer,
+        }
+
+    @classmethod
+    def from_json(cls, payload: dict[str, Any]) -> "Prop":
+        return cls(
+            id=str(payload["id"]),
+            name=str(payload.get("name", payload["id"])),
+            image_file=str(payload.get("image_file", "")),
+            x=float(payload.get("x", 0)),
+            y=float(payload.get("y", 0)),
+            width=float(payload.get("width", 8)),
+            height=float(payload.get("height", 4)),
+            rotation=float(payload.get("rotation", 0)),
+            layer=str(payload.get("layer", "Props")),
+        )
+
+
+@dataclass(slots=True)
 class DrillSet:
     name: str
     start_count: int
     end_count: int
     tempo: float | None = None
     dot_positions: dict[str, tuple[float, float]] = field(default_factory=dict)
+    prop_positions: dict[str, dict[str, float]] = field(default_factory=dict)
     path_anchors: dict[str, list[tuple[float, float]]] = field(default_factory=dict)
     path_controls: dict[str, list[dict[str, tuple[float, float]]]] = field(default_factory=dict)
     count_positions: dict[str, dict[float, tuple[float, float]]] = field(default_factory=dict)
+    movement_styles: dict[str, MovementStyle] = field(default_factory=dict)
     transition: Transition = Transition.LINEAR
 
     @property
@@ -79,6 +130,16 @@ class DrillSet:
             "dot_positions": {
                 dot_id: {"x": position[0], "y": position[1]}
                 for dot_id, position in self.dot_positions.items()
+            },
+            "prop_positions": {
+                prop_id: {
+                    "x": state.get("x", 0.0),
+                    "y": state.get("y", 0.0),
+                    "width": state.get("width", 8.0),
+                    "height": state.get("height", 4.0),
+                    "rotation": state.get("rotation", 0.0),
+                }
+                for prop_id, state in self.prop_positions.items()
             },
             "path_anchors": {
                 dot_id: [{"x": point[0], "y": point[1]} for point in anchors]
@@ -103,6 +164,11 @@ class DrillSet:
                 for dot_id, keyframes in self.count_positions.items()
                 if keyframes
             },
+            "movement_styles": {
+                dot_id: style.value
+                for dot_id, style in self.movement_styles.items()
+                if style != MovementStyle.NORMAL
+            },
             "transition": self.transition.value,
         }
 
@@ -116,6 +182,17 @@ class DrillSet:
             dot_positions={
                 str(dot_id): (float(pos.get("x", 0)), float(pos.get("y", 0)))
                 for dot_id, pos in payload.get("dot_positions", {}).items()
+            },
+            prop_positions={
+                str(prop_id): {
+                    "x": float(state.get("x", 0)),
+                    "y": float(state.get("y", 0)),
+                    "width": float(state.get("width", 8)),
+                    "height": float(state.get("height", 4)),
+                    "rotation": float(state.get("rotation", 0)),
+                }
+                for prop_id, state in payload.get("prop_positions", {}).items()
+                if isinstance(state, dict)
             },
             path_anchors={
                 str(dot_id): [
@@ -145,6 +222,11 @@ class DrillSet:
                     for count, pos in keyframes.items()
                 }
                 for dot_id, keyframes in payload.get("count_positions", {}).items()
+            },
+            movement_styles={
+                str(dot_id): MovementStyle(str(style))
+                for dot_id, style in payload.get("movement_styles", {}).items()
+                if str(style) in MovementStyle._value2member_map_
             },
             transition=Transition(payload.get("transition", Transition.LINEAR.value)),
         )
@@ -276,6 +358,7 @@ class TimingEvent:
 class DrillProject:
     metadata: ProjectMetadata
     dots: list[Dot] = field(default_factory=list)
+    props: list[Prop] = field(default_factory=list)
     sets: list[DrillSet] = field(default_factory=list)
     markers: list[Marker] = field(default_factory=list)
     constraints: list[DotConstraint] = field(default_factory=list)
@@ -285,16 +368,27 @@ class DrillProject:
     def dot_by_id(self, dot_id: str) -> Dot | None:
         return next((dot for dot in self.dots if dot.id == dot_id), None)
 
+    def prop_by_id(self, prop_id: str) -> Prop | None:
+        return next((prop for prop in self.props if prop.id == prop_id), None)
+
     def active_tempo(self, set_index: int) -> float:
         if 0 <= set_index < len(self.sets) and self.sets[set_index].tempo:
             return float(self.sets[set_index].tempo)
-        return self.metadata.initial_tempo
+        count = self.sets[set_index].start_count if 0 <= set_index < len(self.sets) else 1
+        tempo = self.metadata.initial_tempo
+        for event in sorted(self.timing_events, key=lambda item: item.count):
+            if event.event_type == "tempo" and event.count <= count and event.tempo > 0:
+                tempo = event.tempo
+        return tempo
 
     def ensure_set_positions(self) -> None:
+        valid_dot_ids = {dot.id for dot in self.dots}
+        valid_prop_ids = {prop.id for prop in self.props}
         for drill_set in self.sets:
             for dot in self.dots:
                 drill_set.dot_positions.setdefault(dot.id, (dot.x, dot.y))
-            valid_dot_ids = {dot.id for dot in self.dots}
+            for prop in self.props:
+                drill_set.prop_positions.setdefault(prop.id, prop_default_state(prop))
             for dot_id in list(drill_set.dot_positions):
                 if dot_id not in valid_dot_ids:
                     drill_set.dot_positions.pop(dot_id, None)
@@ -307,10 +401,26 @@ class DrillProject:
             for dot_id in list(drill_set.path_controls):
                 if dot_id not in valid_dot_ids:
                     drill_set.path_controls.pop(dot_id, None)
+            for dot_id in list(drill_set.movement_styles):
+                if dot_id not in valid_dot_ids or drill_set.movement_styles[dot_id] == MovementStyle.NORMAL:
+                    drill_set.movement_styles.pop(dot_id, None)
             for dot_id, anchors in list(drill_set.path_anchors.items()):
                 controls = drill_set.path_controls.get(dot_id, [])
                 if len(controls) > len(anchors):
                     drill_set.path_controls[dot_id] = controls[: len(anchors)]
+            for prop_id in list(drill_set.prop_positions):
+                if prop_id not in valid_prop_ids:
+                    drill_set.prop_positions.pop(prop_id, None)
         for constraint in self.constraints:
             constraint.dot_ids = [dot_id for dot_id in constraint.dot_ids if dot_id in valid_dot_ids]
         self.constraints = [constraint for constraint in self.constraints if constraint.dot_ids]
+
+
+def prop_default_state(prop: Prop) -> dict[str, float]:
+    return {
+        "x": prop.x,
+        "y": prop.y,
+        "width": prop.width,
+        "height": prop.height,
+        "rotation": prop.rotation,
+    }

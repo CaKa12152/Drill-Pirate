@@ -250,25 +250,114 @@ def scatter_rect_positions(
     random: Random,
     min_spacing: float,
 ) -> list[tuple[float, float]]:
-    columns = max(1, int(width / min_spacing))
-    rows = max(1, (count + columns - 1) // columns)
-    height = max(height, rows * min_spacing)
+    width = max(width, min_spacing)
+    height = max(height, min_spacing)
+    positions = blue_noise_rect_positions(count, center, width, height, random, min_spacing)
+    return relax_spacing_in_rect(positions, min_spacing, center, width, height)
+
+
+def blue_noise_rect_positions(
+    count: int,
+    center: tuple[float, float],
+    width: float,
+    height: float,
+    random: Random,
+    min_spacing: float,
+) -> list[tuple[float, float]]:
+    if count <= 0:
+        return []
+
+    left = center[0] - width / 2
+    bottom = center[1] - height / 2
+    spacing = max(0.05, min_spacing * 0.82)
+    cell_size = max(0.05, spacing / 1.41421356237)
+    columns = max(1, int(width / cell_size) + 1)
+    rows = max(1, int(height / cell_size) + 1)
+    grid: list[list[int | None]] = [[None for _column in range(columns)] for _row in range(rows)]
     positions: list[tuple[float, float]] = []
-    for row in range(rows):
-        for column in range(columns):
-            if len(positions) >= count:
-                break
-            base_x = center[0] - width / 2 + (column + 0.5) * width / columns
-            base_y = center[1] - height / 2 + (row + 0.5) * height / rows
-            positions.append(
-                (
-                    base_x + random.uniform(-0.24, 0.24) * min_spacing,
-                    base_y + random.uniform(-0.24, 0.24) * min_spacing,
-                )
+
+    def grid_cell(point: tuple[float, float]) -> tuple[int, int]:
+        return (
+            max(0, min(columns - 1, int((point[0] - left) / cell_size))),
+            max(0, min(rows - 1, int((point[1] - bottom) / cell_size))),
+        )
+
+    def allowed(point: tuple[float, float]) -> bool:
+        column, row = grid_cell(point)
+        for nearby_row in range(max(0, row - 2), min(rows, row + 3)):
+            for nearby_column in range(max(0, column - 2), min(columns, column + 3)):
+                existing_index = grid[nearby_row][nearby_column]
+                if existing_index is None:
+                    continue
+                if distance(point, positions[existing_index]) < spacing:
+                    return False
+        return True
+
+    attempts = max(400, count * 85)
+    while len(positions) < count and attempts > 0:
+        attempts -= 1
+        candidate = (
+            left + random.random() * width,
+            bottom + random.random() * height,
+        )
+        if not allowed(candidate):
+            continue
+        column, row = grid_cell(candidate)
+        grid[row][column] = len(positions)
+        positions.append(candidate)
+
+    while len(positions) < count:
+        best_candidate = (
+            left + random.random() * width,
+            bottom + random.random() * height,
+        )
+        best_distance = -1.0
+        for _sample in range(32):
+            candidate = (
+                left + random.random() * width,
+                bottom + random.random() * height,
             )
-        if len(positions) >= count:
-            break
-    return relax_spacing(positions, min_spacing, center)
+            nearest = min((distance(candidate, point) for point in positions), default=spacing)
+            if nearest > best_distance:
+                best_candidate = candidate
+                best_distance = nearest
+        positions.append(best_candidate)
+
+    return positions
+
+
+def relax_spacing_in_rect(
+    positions: list[tuple[float, float]],
+    min_spacing: float,
+    center: tuple[float, float],
+    width: float,
+    height: float,
+    iterations: int = 8,
+) -> list[tuple[float, float]]:
+    left = center[0] - width / 2
+    right = center[0] + width / 2
+    bottom = center[1] - height / 2
+    top = center[1] + height / 2
+    relaxed = list(positions)
+    for _iteration in range(iterations):
+        offsets = [(0.0, 0.0) for _point in relaxed]
+        for first in range(len(relaxed)):
+            for second in range(first + 1, len(relaxed)):
+                dx = relaxed[first][0] - relaxed[second][0]
+                dy = relaxed[first][1] - relaxed[second][1]
+                current_distance = (dx * dx + dy * dy) ** 0.5
+                if 0.001 < current_distance < min_spacing:
+                    push = (min_spacing - current_distance) / current_distance * 0.5
+                    offsets[first] = (offsets[first][0] + dx * push, offsets[first][1] + dy * push)
+                    offsets[second] = (offsets[second][0] - dx * push, offsets[second][1] - dy * push)
+        relaxed = [
+            (
+                max(left, min(right, x + offset[0] * 0.42)),
+                max(bottom, min(top, y + offset[1] * 0.42)),
+            )
+            for (x, y), offset in zip(relaxed, offsets)
+        ]
+    return relaxed
 
 
 def relax_spacing(
@@ -347,6 +436,51 @@ def centered_positions(
     offset_x = target[0] - center[0]
     offset_y = target[1] - center[1]
     return [(x + offset_x, y + offset_y) for x, y in positions]
+
+
+def scaled_positions(
+    positions: list[tuple[float, float]],
+    scale_x: float,
+    scale_y: float,
+    center: tuple[float, float] | None = None,
+) -> list[tuple[float, float]]:
+    if not positions:
+        return []
+    pivot = center or (
+        sum(position_x for position_x, _position_y in positions) / len(positions),
+        sum(position_y for _position_x, position_y in positions) / len(positions),
+    )
+    return [
+        (
+            pivot[0] + (position_x - pivot[0]) * scale_x,
+            pivot[1] + (position_y - pivot[1]) * scale_y,
+        )
+        for position_x, position_y in positions
+    ]
+
+
+def scaled_positions_to_size(
+    positions: list[tuple[float, float]],
+    target_width: float,
+    target_height: float,
+    lock_aspect: bool = False,
+    center: tuple[float, float] | None = None,
+) -> list[tuple[float, float]]:
+    if not positions:
+        return []
+    min_x = min(position_x for position_x, _position_y in positions)
+    max_x = max(position_x for position_x, _position_y in positions)
+    min_y = min(position_y for _position_x, position_y in positions)
+    max_y = max(position_y for _position_x, position_y in positions)
+    current_width = max_x - min_x
+    current_height = max_y - min_y
+    scale_x = max(0.01, target_width) / current_width if current_width > 0.001 else 1.0
+    scale_y = max(0.01, target_height) / current_height if current_height > 0.001 else 1.0
+    if lock_aspect:
+        uniform_scale = min(scale_x, scale_y)
+        scale_x = uniform_scale
+        scale_y = uniform_scale
+    return scaled_positions(positions, scale_x, scale_y, center)
 
 
 def distance(a: tuple[float, float], b: tuple[float, float]) -> float:
