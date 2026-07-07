@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import QEasingCurve, Property, QPropertyAnimation, QRectF, Signal, Qt
-from PySide6.QtGui import QColor, QPainter, QPen, QPixmap
+from PySide6.QtCore import QEasingCurve, QPointF, Property, QPropertyAnimation, QRectF, Signal, Qt
+from PySide6.QtGui import QColor, QFont, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QDialog,
     QFileDialog,
@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QPlainTextEdit,
     QPushButton,
     QScrollArea,
     QSizePolicy,
@@ -23,6 +24,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from drill_writer.core.coordinates import BACK_HASH_YARDS, FIELD_HALF_HEIGHT_YARDS, FRONT_HASH_YARDS
 from drill_writer.core.models import DrillProject
 from drill_writer.core.plugin_manager import PluginManager, PluginManifest, plugin_library_dir
 from drill_writer.core.project_io import (
@@ -30,9 +32,12 @@ from drill_writer.core.project_io import (
     create_project_folder,
     discover_projects,
     load_project,
+    parse_instrumentation_roster,
     project_library_dir,
+    roster_count,
 )
 from drill_writer.resources import app_icon_path
+from drill_writer.ui.appearance import draw_dot_symbol, generated_prop_pixmap, normalize_dot_symbol, preferred_dot_symbol
 
 
 class SplashPage(QWidget):
@@ -71,7 +76,7 @@ class SplashPage(QWidget):
         title = QLabel("Drill Pirate")
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         title.setStyleSheet("font-size: 48px; font-weight: 850; letter-spacing: 1px; color: #f7c94a;")
-        version = QLabel("Alpha Version 2.3.0")
+        version = QLabel("Alpha Version 2.4.0")
         version.setAlignment(Qt.AlignmentFlag.AlignCenter)
         version.setStyleSheet("font-size: 16px; color: #f4f4f1;")
         tagline = QLabel("Professional drill design for the field")
@@ -111,12 +116,28 @@ class CreateProjectDialog(QDialog):
         self.marcher_count_input = QSpinBox()
         self.marcher_count_input.setRange(1, 500)
         self.marcher_count_input.setValue(30)
+        self.roster_input = QPlainTextEdit()
+        self.roster_input.setPlaceholderText(
+            "Optional roster counts, one per line:\n"
+            "Flute=5\nTrumpet=5\nTrombone=5\nTuba=5\nMellophone=5"
+        )
+        self.roster_input.setFixedHeight(92)
+        self.roster_input.textChanged.connect(self.update_marcher_count_from_roster)
+        self.front_ensemble_input = QSpinBox()
+        self.front_ensemble_input.setRange(0, 50)
+        self.front_ensemble_input.setValue(0)
+        self.drum_major_stands_input = QSpinBox()
+        self.drum_major_stands_input.setRange(0, 10)
+        self.drum_major_stands_input.setValue(0)
         self.signature_input = QLineEdit("4/4")
         self.audio_label = QLabel("No audio selected")
         form.addRow("Show Title", self.title_input)
         form.addRow("Initial Tempo", self.tempo_input)
         form.addRow("Default Counts", self.counts_input)
         form.addRow("Marchers", self.marcher_count_input)
+        form.addRow("Instrumentation", self.roster_input)
+        form.addRow("Front Ensemble Props", self.front_ensemble_input)
+        form.addRow("Drum Major Stands", self.drum_major_stands_input)
         form.addRow("Time Signature", self.signature_input)
         form.addRow("Audio", self.audio_row())
         layout.addLayout(form)
@@ -152,7 +173,16 @@ class CreateProjectDialog(QDialog):
             self.audio_path = Path(path)
             self.audio_label.setText(self.audio_path.name)
 
+    def update_marcher_count_from_roster(self) -> None:
+        total = roster_count(parse_instrumentation_roster(self.roster_input.toPlainText()))
+        if total <= 0:
+            self.marcher_count_input.setEnabled(True)
+            return
+        self.marcher_count_input.setEnabled(False)
+        self.marcher_count_input.setValue(total)
+
     def create_project(self) -> None:
+        roster = parse_instrumentation_roster(self.roster_input.toPlainText())
         project_dir = create_project_folder(
             root=project_library_dir(),
             title=self.title_input.text(),
@@ -161,6 +191,9 @@ class CreateProjectDialog(QDialog):
             counts_per_set=self.counts_input.value(),
             time_signature=self.signature_input.text() or "4/4",
             marcher_count=self.marcher_count_input.value(),
+            instrumentation=roster,
+            front_ensemble_count=self.front_ensemble_input.value(),
+            drum_major_stands=self.drum_major_stands_input.value(),
         )
         self.project_created.emit(project_dir)
         self.accept()
@@ -171,8 +204,13 @@ class FieldPreview(QWidget):
         super().__init__()
         self.project = project
         self.project_dir = project_dir
+        self.dot_symbol = preferred_dot_symbol()
         self.setMinimumSize(260, 132)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+
+    def set_dot_symbol(self, symbol: str) -> None:
+        self.dot_symbol = normalize_dot_symbol(symbol)
+        self.update()
 
     def paintEvent(self, _event) -> None:  # type: ignore[override]
         painter = QPainter(self)
@@ -183,32 +221,43 @@ class FieldPreview(QWidget):
         painter.drawRoundedRect(outer, 10, 10)
 
         rect = self.field_rect(outer)
-        painter.setPen(QPen(QColor("#88939a"), 0.9))
+        painter.setPen(QPen(QColor("#88939a"), 0.55))
         painter.setBrush(QColor("#f9fbf7"))
         painter.drawRoundedRect(rect, 5, 5)
 
-        micro_pen = QPen(QColor("#e3e9e8"), 0.35)
+        micro_pen = QPen(QColor("#e3e9e8"), 0.16)
         painter.setPen(micro_pen)
-        for index in range(25):
-            x = rect.left() + rect.width() * index / 24
+        for index in range(49):
+            x = rect.left() + rect.width() * index / 48
             painter.drawLine(int(x), int(rect.top()), int(x), int(rect.bottom()))
-        for index in range(11):
-            y = rect.top() + rect.height() * index / 10
+        for index in range(9):
+            y = rect.top() + rect.height() * index / 8
             painter.drawLine(int(rect.left()), int(y), int(rect.right()), int(y))
 
-        yard_pen = QPen(QColor("#5d686f"), 0.8)
+        yard_pen = QPen(QColor("#5d686f"), 0.42)
         painter.setPen(yard_pen)
-        for index in range(11):
-            x = rect.left() + rect.width() * index / 10
+        for index in range(13):
+            x = rect.left() + rect.width() * index / 12
             painter.drawLine(int(x), int(rect.top()), int(x), int(rect.bottom()))
 
-        hash_pen = QPen(QColor("#1f2529"), 0.8)
+        hash_pen = QPen(QColor("#1f2529"), 0.42)
         painter.setPen(hash_pen)
-        for y_ratio in (0.125, 0.875):
-            y = rect.top() + rect.height() * y_ratio
+        for field_y in (BACK_HASH_YARDS, FRONT_HASH_YARDS):
+            y = rect.top() + (FIELD_HALF_HEIGHT_YARDS - field_y) / (FIELD_HALF_HEIGHT_YARDS * 2) * rect.height()
             for index in range(25):
                 x = rect.left() + rect.width() * index / 24
-                painter.drawLine(int(x - 2), int(y), int(x + 2), int(y))
+                painter.drawLine(int(x), int(y - 0.8), int(x), int(y + 0.8))
+
+        painter.setPen(QPen(QColor("#6c767e"), 0.35))
+        painter.setFont(QFont("Segoe UI", 4, QFont.Weight.DemiBold))
+        for index, text in enumerate(("G", "10", "20", "30", "40", "50", "40", "30", "20", "10", "G")):
+            x = rect.left() + rect.width() * index / 10
+            painter.drawText(QRectF(x - 5, rect.bottom() - 10, 10, 6), Qt.AlignmentFlag.AlignCenter, text)
+            painter.save()
+            painter.translate(x, rect.top() + 7)
+            painter.rotate(180)
+            painter.drawText(QRectF(-5, -3, 10, 6), Qt.AlignmentFlag.AlignCenter, text)
+            painter.restore()
 
         if not self.project:
             self.draw_empty_field(painter, rect)
@@ -225,9 +274,14 @@ class FieldPreview(QWidget):
             screen_y = rect.top() + (26.666 - y) / 53.333 * rect.height()
             if not rect.adjusted(-4, -4, 4, 4).contains(screen_x, screen_y):
                 continue
-            painter.setPen(QPen(QColor("#1d2128"), 0.55))
-            painter.setBrush(QColor(dot.color or "#e53935"))
-            painter.drawEllipse(QRectF(screen_x - radius, screen_y - radius, radius * 2, radius * 2))
+            draw_dot_symbol(
+                painter,
+                QPointF(screen_x, screen_y),
+                radius,
+                QColor(dot.color or "#e53935"),
+                self.dot_symbol,
+                outline_width=0.42,
+            )
 
     def draw_props(self, painter: QPainter, rect: QRectF, states: dict[str, dict[str, float]]) -> None:
         if not self.project:
@@ -248,7 +302,7 @@ class FieldPreview(QWidget):
             painter.save()
             painter.translate(screen_x, screen_y)
             painter.rotate(prop_rotation)
-            pixmap = self.load_prop_pixmap(prop.image_file)
+            pixmap = self.load_prop_pixmap(prop)
             if pixmap and not pixmap.isNull():
                 painter.setOpacity(0.9)
                 painter.drawPixmap(prop_rect, pixmap, pixmap.rect())
@@ -262,13 +316,16 @@ class FieldPreview(QWidget):
                 painter.drawRoundedRect(prop_rect, 2, 2)
             painter.restore()
 
-    def load_prop_pixmap(self, image_file: str) -> QPixmap:
+    def load_prop_pixmap(self, prop) -> QPixmap:
+        image_file = getattr(prop, "image_file", "")
         if not image_file:
-            return QPixmap()
+            return generated_prop_pixmap(getattr(prop, "name", "Prop"), getattr(prop, "layer", "Props"))
         path = Path(image_file)
         if not path.is_absolute() and self.project_dir is not None:
             path = self.project_dir / image_file
-        return QPixmap(str(path)) if path.exists() else QPixmap()
+        if path.exists():
+            return QPixmap(str(path))
+        return generated_prop_pixmap(getattr(prop, "name", "Prop"), getattr(prop, "layer", "Props"))
 
     def field_rect(self, outer: QRectF) -> QRectF:
         target_ratio = 120 / 53.333
@@ -471,7 +528,7 @@ class StartupPage(QWidget):
         title = QLabel("Drill Pirate")
         title.setObjectName("HomeTitle")
         title.setStyleSheet("font-size: 34px; font-weight: 850; color: #f7c94a;")
-        version = QLabel("Alpha Version 2.3.0")
+        version = QLabel("Alpha Version 2.4.0")
         version.setStyleSheet("font-size: 12px; color: #f1f1ee;")
         path_label = QLabel(f"Project library · {self.library_dir}")
         path_label.setStyleSheet("color: #8d98aa;")
@@ -551,6 +608,10 @@ class StartupPage(QWidget):
 
     def set_plugin_banner(self, text: str) -> None:
         self.plugin_banner.setText(text)
+
+    def apply_dot_symbol(self, symbol: str) -> None:
+        for preview in self.findChildren(FieldPreview):
+            preview.set_dot_symbol(symbol)
 
     def refresh_projects(self) -> None:
         while self.grid.count():

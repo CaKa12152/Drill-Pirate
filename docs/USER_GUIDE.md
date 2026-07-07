@@ -29,10 +29,13 @@ Fields:
 | Initial Tempo | Universal/default BPM for the show. |
 | Default Counts Per Set | Count length used when new sets are created. |
 | Time Signature | Display metadata for the project. |
-| Marchers | Number of performers to create in the starting block. |
+| Marchers | Number of performers to create in the starting block when no instrumentation roster is entered. |
+| Instrumentation | Optional roster lines like `Flute=5`; generated performers use compact labels like `F1`, `T1`, `TR1`, and `M1`. |
+| Front Ensemble Props | Optional movable front ensemble props placed in front of the field. |
+| Drum Major Stands | Optional movable drum major stand props placed in front of the field. |
 | Save Location | Root folder where the project folder is created. |
 
-New projects start with red performers in a centered block that is optimized to fit on the field.
+New projects start with red performers in a centered block that is optimized to fit on the field. Front ensemble and drum major stand items are props, so they can be moved independently through sets.
 
 ## Main Interface
 
@@ -120,11 +123,13 @@ Use the searchable marcher list to find performers by ID, name, section, instrum
 
 ## Props
 
-Props are imported image objects that can move through sets like marchers.
+Props are imported or designed visual objects that can move through sets like marchers.
 
 Use:
 
 - `Tools > Import Prop Image`.
+- `Tools > Open Prop Designer`.
+- Left panel `Prop Designer` tab.
 - `Ctrl+Alt+I`.
 
 Props store:
@@ -139,6 +144,8 @@ Props store:
 - Layer.
 
 Imported images are copied into the project `props\` folder. Props are included in project previews and export images.
+
+The in-app Prop Designer can create props from rectangles, circles/ovals, lines, text, fill/stroke colors, exact yard sizing, and anchor-based shape scaling. Saved designs become transparent PNG props in the project `props\` folder.
 
 Use `Fit Form to Selected Prop` to scale selected marchers to fit a selected prop while preserving the selected form shape.
 
@@ -341,7 +348,7 @@ Tabs:
 
 | Tab | Purpose |
 | --- | --- |
-| Preferences | Switch Dark/Light Mode and choose Stable Releases or Beta / Pre-Releases update channel. |
+| Preferences | Switch Dark/Light Mode, choose marcher symbol style, toggle tooltips, and choose Stable Releases or Beta / Pre-Releases update channel. |
 | Devices | Choose Windows Default or a specific audio output device. |
 
 Use `Refresh` in the Devices tab after plugging in headphones or changing audio hardware.

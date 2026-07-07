@@ -30,6 +30,39 @@ PROJECT_JSON_FILES = ("metadata.json", "dots.json", "props.json", "sets.json", "
 REQUIRED_PROJECT_FILES = ("metadata.json", "dots.json", "sets.json")
 BACKUP_DIR_NAME = ".drill_pirate_backups"
 MAX_PROJECT_BACKUPS = 40
+COMMON_INSTRUMENT_PREFIXES = {
+    "flute": "F",
+    "piccolo": "P",
+    "clarinet": "C",
+    "bass clarinet": "BC",
+    "alto sax": "AS",
+    "alto saxophone": "AS",
+    "tenor sax": "TS",
+    "tenor saxophone": "TS",
+    "baritone sax": "BS",
+    "baritone saxophone": "BS",
+    "saxophone": "S",
+    "trumpet": "T",
+    "mellophone": "M",
+    "french horn": "FH",
+    "horn": "H",
+    "trombone": "TR",
+    "baritone": "B",
+    "euphonium": "E",
+    "tuba": "TU",
+    "sousaphone": "SU",
+    "snare": "S",
+    "tenor": "TN",
+    "quads": "Q",
+    "bass drum": "BD",
+    "cymbal": "CY",
+    "guard": "G",
+    "color guard": "CG",
+    "rifle": "R",
+    "sabre": "SB",
+    "saber": "SB",
+    "flag": "FL",
+}
 
 
 class ProjectLoadError(Exception):
@@ -61,6 +94,9 @@ def create_project_folder(
     counts_per_set: int,
     time_signature: str,
     marcher_count: int = 30,
+    instrumentation: list[tuple[str, int]] | None = None,
+    front_ensemble_count: int = 0,
+    drum_major_stands: int = 0,
 ) -> Path:
     project_dir = root / safe_folder_name(title)
     (project_dir / "audio").mkdir(parents=True, exist_ok=True)
@@ -80,9 +116,11 @@ def create_project_folder(
         time_signature=time_signature,
         audio_file=audio_file,
     )
+    props = default_props(front_ensemble_count, drum_major_stands)
     project = DrillProject(
         metadata=metadata,
-        dots=default_dots(marcher_count),
+        dots=default_dots(marcher_count, instrumentation=instrumentation),
+        props=props,
         sets=[
             DrillSet(
                 name="Set 1",
@@ -470,23 +508,157 @@ def safe_folder_name(title: str) -> str:
     return safe.strip().replace(" ", "_") or "Untitled_Show"
 
 
-def default_dots(count: int = 30) -> list[Dot]:
-    positions = optimized_starting_block(count)
+def parse_instrumentation_roster(text: str) -> list[tuple[str, int]]:
+    roster: list[tuple[str, int]] = []
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "=" in line:
+            name, count_text = line.split("=", 1)
+        elif ":" in line:
+            name, count_text = line.split(":", 1)
+        else:
+            parts = line.rsplit(maxsplit=1)
+            if len(parts) != 2:
+                continue
+            name, count_text = parts
+        try:
+            count = int(count_text.strip())
+        except ValueError:
+            continue
+        name = name.strip()
+        if name and count > 0:
+            roster.append((name, count))
+    return roster
+
+
+def roster_count(instrumentation: list[tuple[str, int]] | None) -> int:
+    return sum(max(0, int(count)) for _name, count in instrumentation or [])
+
+
+def default_dots(count: int = 30, instrumentation: list[tuple[str, int]] | None = None) -> list[Dot]:
+    roster = [(name, int(amount)) for name, amount in (instrumentation or []) if int(amount) > 0]
+    total_count = roster_count(roster) or count
+    positions = optimized_starting_block(total_count)
     dots: list[Dot] = []
-    for index, (x, y) in enumerate(positions):
-        section = "winds"
-        dots.append(
-            Dot(
-                id=f"dot{index + 1:03d}",
-                name=f"Dot {index + 1}",
-                x=x,
-                y=y,
-                color="#e53935",
-                section=section,
-                layer="Main",
+    if not roster:
+        roster = [("Dot", total_count)]
+    prefixes = unique_instrument_prefixes([name for name, _amount in roster])
+    dot_index = 0
+    for instrument, amount in roster:
+        prefix = prefixes[instrument]
+        section = default_section_for_instrument(instrument)
+        for number in range(1, amount + 1):
+            if dot_index >= len(positions):
+                break
+            x, y = positions[dot_index]
+            compact_name = f"{prefix}{number}"
+            dots.append(
+                Dot(
+                    id=f"dot{dot_index + 1:03d}",
+                    name=compact_name,
+                    x=x,
+                    y=y,
+                    color="#e53935",
+                    section=section,
+                    instrument="" if instrument == "Dot" else instrument,
+                    rank=compact_name,
+                    layer="Main",
+                )
+            )
+            dot_index += 1
+    return dots
+
+
+def unique_instrument_prefixes(instruments: list[str]) -> dict[str, str]:
+    prefixes: dict[str, str] = {}
+    used: set[str] = set()
+    for instrument in instruments:
+        base = preferred_instrument_prefix(instrument)
+        prefix = base
+        if prefix in used:
+            compact = "".join(char for char in instrument.upper() if char.isalpha())
+            for length in range(2, min(len(compact), 5) + 1):
+                candidate = compact[:length]
+                if candidate not in used:
+                    prefix = candidate
+                    break
+            else:
+                suffix = 2
+                while f"{base}{suffix}" in used:
+                    suffix += 1
+                prefix = f"{base}{suffix}"
+        prefixes[instrument] = prefix
+        used.add(prefix)
+    return prefixes
+
+
+def preferred_instrument_prefix(instrument: str) -> str:
+    normalized = " ".join(instrument.lower().replace("/", " ").replace("-", " ").split())
+    if normalized in COMMON_INSTRUMENT_PREFIXES:
+        return COMMON_INSTRUMENT_PREFIXES[normalized]
+    words = [word for word in normalized.split() if word]
+    if len(words) > 1:
+        return "".join(word[0] for word in words[:3]).upper()
+    compact = "".join(char for char in instrument.upper() if char.isalpha())
+    if not compact:
+        return "D"
+    if compact == "DOT":
+        return "D"
+    return compact[:2] if len(compact) > 1 else compact[0]
+
+
+def default_section_for_instrument(instrument: str) -> str:
+    normalized = instrument.lower()
+    if any(token in normalized for token in ("snare", "tenor", "quad", "bass drum", "cymbal")):
+        return "battery"
+    if any(token in normalized for token in ("guard", "flag", "rifle", "sabre", "saber")):
+        return "guard"
+    if any(token in normalized for token in ("trumpet", "mello", "horn", "trombone", "baritone", "euphonium", "tuba", "sousaphone")):
+        return "brass"
+    if any(token in normalized for token in ("flute", "piccolo", "clarinet", "sax")):
+        return "woodwinds"
+    return "winds"
+
+
+def default_props(front_ensemble_count: int = 0, drum_major_stands: int = 0) -> list[Prop]:
+    props: list[Prop] = []
+    for index, x_position in enumerate(spread_positions(max(0, int(front_ensemble_count)), center_y=-31.5, spacing=7.0), start=1):
+        props.append(
+            Prop(
+                id=f"prop_fe_{index:03d}",
+                name=f"FE{index}",
+                image_file="",
+                x=x_position[0],
+                y=x_position[1],
+                width=5.0,
+                height=2.4,
+                layer="Front Ensemble",
             )
         )
-    return dots
+    for index, x_position in enumerate(spread_positions(max(0, int(drum_major_stands)), center_y=-37.0, spacing=14.0), start=1):
+        props.append(
+            Prop(
+                id=f"prop_dm_{index:03d}",
+                name=f"DM Stand {index}",
+                image_file="",
+                x=x_position[0],
+                y=x_position[1],
+                width=3.0,
+                height=3.0,
+                layer="Drum Major",
+            )
+        )
+    return props
+
+
+def spread_positions(count: int, center_y: float, spacing: float) -> list[tuple[float, float]]:
+    if count <= 0:
+        return []
+    total_width = (count - 1) * spacing
+    start_x = -total_width / 2
+    return [(start_x + index * spacing, center_y) for index in range(count)]
 
 
 def optimized_starting_block(count: int) -> list[tuple[float, float]]:

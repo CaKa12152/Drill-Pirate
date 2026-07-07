@@ -24,6 +24,9 @@ This page is a full reference of the major Drill Pirate features currently repre
 | Default counts | Sets the default count length for new sets. |
 | Time signature | Stores display metadata. |
 | Marcher count | Creates a starting block with the requested number of performers. |
+| Instrumentation roster | Creates compact performer labels from instrument prefixes, such as `F1`, `T1`, `TR1`, `TU1`, and `M1`. |
+| Front ensemble props | Adds movable front ensemble props in front of the field. |
+| Drum major stands | Adds movable drum major stand props. |
 | Optimized starting block | Fits the initial performer block inside the field. |
 
 ## Main Window
@@ -35,6 +38,7 @@ This page is a full reference of the major Drill Pirate features currently repre
 | Command palette | Search and run commands from the keyboard. |
 | Shortcut editor | Search commands and assign custom keyboard shortcuts. |
 | Dark/light themes | Switch themes in Settings while the field remains readable. |
+| Marcher symbols | Switch performer rendering between filled circles, hollow circles, X marks, plus marks, squares, diamonds, and triangles. |
 | Update channel | Choose Stable Releases or Beta / Pre-Releases from Settings. |
 | Less panel crowding | Workspaces and floating docks allow large-show layouts on smaller screens. |
 
@@ -67,6 +71,7 @@ This page is a full reference of the major Drill Pirate features currently repre
 | Feature | Description |
 | --- | --- |
 | Image import | Imports a prop image into the project `props\` folder. |
+| In-app prop designer | Draws props with rectangles, circles/ovals, lines, text, colors, stroke controls, exact field sizing, and anchor-based shape scaling. |
 | Scalable props | Props store width, height, rotation, and position. |
 | Set-based prop movement | Props store per-set state like marchers. |
 | Preview/export support | Props appear in home previews and printed field images. |

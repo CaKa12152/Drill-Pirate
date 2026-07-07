@@ -46,6 +46,7 @@ from drill_writer.ui.audio_devices import (
     audio_output_label_for_id,
     normalize_audio_output_device_id,
 )
+from drill_writer.ui.appearance import DOT_SYMBOL_SETTING, dot_symbol_label, preferred_dot_symbol
 from drill_writer.ui.main_window import MainWindow
 from drill_writer.ui.preferences import PreferencesDialog
 from drill_writer.ui.startup import SplashPage, StartupPage
@@ -182,6 +183,9 @@ class DrillWriterApp(QStackedWidget):
     def tooltips_enabled(self) -> bool:
         return self.settings.value("ui/tooltips_enabled", True, type=bool)
 
+    def dot_symbol(self) -> str:
+        return preferred_dot_symbol(self.settings)
+
     def update_channel(self) -> str:
         return normalize_update_channel(self.settings.value("updates/channel", "stable"))
 
@@ -191,6 +195,7 @@ class DrillWriterApp(QStackedWidget):
             self.audio_output_device_id(),
             self.update_channel(),
             self.tooltips_enabled(),
+            self.dot_symbol(),
             self,
         )
         dialog.exec()
@@ -247,6 +252,18 @@ class DrillWriterApp(QStackedWidget):
         if isinstance(current, MainWindow):
             state = "enabled" if enabled else "disabled"
             current.statusBar().showMessage(f"Tooltips {state}", 2200)
+
+    def apply_dot_symbol(self, symbol: str) -> None:
+        self.settings.setValue(DOT_SYMBOL_SETTING, symbol)
+        self.settings.sync()
+        for index in range(self.count()):
+            widget = self.widget(index)
+            handler = getattr(widget, "apply_dot_symbol", None)
+            if callable(handler):
+                handler(symbol)
+        current = self.currentWidget()
+        if isinstance(current, MainWindow):
+            current.statusBar().showMessage(f"Marcher symbol: {dot_symbol_label(symbol)}", 2200)
 
     def return_home(self, window: MainWindow) -> None:
         self.startup.refresh_projects()

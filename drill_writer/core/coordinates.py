@@ -4,8 +4,8 @@ from __future__ import annotations
 STEPS_PER_YARD = 8 / 5
 FIELD_HALF_WIDTH_YARDS = 60.0
 FIELD_HALF_HEIGHT_YARDS = 26.6665
-FRONT_HASH_YARDS = -20.0
-BACK_HASH_YARDS = 20.0
+FRONT_HASH_YARDS = -FIELD_HALF_HEIGHT_YARDS + 20.0
+BACK_HASH_YARDS = FIELD_HALF_HEIGHT_YARDS - 20.0
 
 
 def format_drill_coordinate(x: float, y: float) -> tuple[str, str]:
@@ -33,24 +33,16 @@ def format_yardline_coordinate(x: float) -> str:
 
 
 def format_hash_coordinate(y: float) -> str:
-    if y < -FIELD_HALF_HEIGHT_YARDS:
-        name = "FS"
-        reference = -FIELD_HALF_HEIGHT_YARDS
-    elif y > FIELD_HALF_HEIGHT_YARDS:
-        name = "BS"
-        reference = FIELD_HALF_HEIGHT_YARDS
-    elif abs(y + FIELD_HALF_HEIGHT_YARDS) * STEPS_PER_YARD < 0.05:
-        return "On FS"
-    elif abs(y - FIELD_HALF_HEIGHT_YARDS) * STEPS_PER_YARD < 0.05:
-        return "On BS"
-    elif abs(y) * STEPS_PER_YARD < 0.05:
-        return "On Mid"
-    elif y < 0:
-        name = "FH"
-        reference = FRONT_HASH_YARDS
-    else:
-        name = "BH"
-        reference = BACK_HASH_YARDS
+    name, reference = min(
+        (
+            ("FS", -FIELD_HALF_HEIGHT_YARDS),
+            ("FH", FRONT_HASH_YARDS),
+            ("Mid", 0.0),
+            ("BH", BACK_HASH_YARDS),
+            ("BS", FIELD_HALF_HEIGHT_YARDS),
+        ),
+        key=lambda item: abs(y - item[1]),
+    )
 
     offset_steps = abs(y - reference) * STEPS_PER_YARD
     if offset_steps < 0.05:
@@ -59,6 +51,8 @@ def format_hash_coordinate(y: float) -> str:
         direction = "behind" if y > reference else "outside"
     elif name == "BS":
         direction = "in front of" if y < reference else "outside"
+    elif name == "Mid":
+        direction = "in front of" if y < reference else "behind"
     else:
         direction = "in front of" if y < reference else "behind"
     return f"{format_steps(offset_steps)} {step_word(offset_steps)} {direction} {name}"

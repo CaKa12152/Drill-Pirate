@@ -7,13 +7,13 @@ This page is for maintainers distributing public alpha builds and collecting use
 Current app version:
 
 ```text
-Alpha 2.3.0
+Alpha 2.4.0
 ```
 
 Git tags should use the `v` prefix:
 
 ```text
-v2.3.0
+v2.4.0
 ```
 
 The in-app updater compares GitHub release tags against the app's current version.
@@ -52,7 +52,7 @@ The app uses the GitHub latest release description for the post-update release l
 Expected build artifact:
 
 ```text
-dist\Drill Pirate Alpha 2.3.0 Windows.zip
+dist\Drill Pirate Alpha 2.4.0 Windows.zip
 ```
 
 ## What to Upload
@@ -64,7 +64,7 @@ Do not upload only the raw `.exe` unless you have a separate installer that incl
 ## Release Description Template
 
 ```markdown
-## Drill Pirate Alpha 2.3.0
+## Drill Pirate Alpha 2.4.0
 
 ### Added
 - ...
@@ -89,7 +89,7 @@ Ask users for:
 
 ```markdown
 ## Version
-Alpha 2.3.0
+Alpha 2.4.0
 
 ## Windows Version
 Example: Windows 11 23H2

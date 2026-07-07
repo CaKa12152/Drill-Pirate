@@ -2,7 +2,7 @@
 
 Drill Pirate is a desktop drill-writing application for marching band and DCI-style visual design. It combines a field editor, set-based animation, audio synchronization, formation tools, props, plugins, and production exports into one Windows-first creative workflow.
 
-> Current release: **Alpha 2.3.0**
+> Current release: **Alpha 2.4.0**
 
 ## Quick Links
 
@@ -63,7 +63,7 @@ The build output is created at:
 
 ```text
 dist\Drill Pirate\Drill Pirate.exe
-dist\Drill Pirate Alpha 2.3.0 Windows.zip
+dist\Drill Pirate Alpha 2.4.0 Windows.zip
 ```
 
 ## Important Locations

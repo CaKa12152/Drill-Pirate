@@ -22,6 +22,7 @@ from drill_writer.ui.audio_devices import (
     audio_output_devices,
     normalize_audio_output_device_id,
 )
+from drill_writer.ui.appearance import DOT_SYMBOL_OPTIONS, normalize_dot_symbol
 
 
 class PreferencesDialog(QDialog):
@@ -31,6 +32,7 @@ class PreferencesDialog(QDialog):
         current_audio_device_id: str = DEFAULT_AUDIO_OUTPUT_DEVICE_ID,
         current_update_channel: str = "stable",
         current_tooltips_enabled: bool = True,
+        current_dot_symbol: str = "circle",
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -62,9 +64,15 @@ class PreferencesDialog(QDialog):
         self.update_channel_combo.setCurrentIndex(1 if current_update_channel == "beta" else 0)
         self.tooltips_checkbox = QCheckBox("Show hover tooltips and tool hints")
         self.tooltips_checkbox.setChecked(current_tooltips_enabled)
+        self.dot_symbol_combo = QComboBox()
+        for value, label in DOT_SYMBOL_OPTIONS:
+            self.dot_symbol_combo.addItem(label, value)
+        symbol_index = self.dot_symbol_combo.findData(normalize_dot_symbol(current_dot_symbol))
+        self.dot_symbol_combo.setCurrentIndex(max(0, symbol_index))
         note = QLabel("Changes apply immediately and are saved for the next launch.")
         note.setWordWrap(True)
         form.addRow("Appearance", self.theme_combo)
+        form.addRow("Marcher Symbol", self.dot_symbol_combo)
         form.addRow("Tooltips", self.tooltips_checkbox)
         form.addRow("Update Channel", self.update_channel_combo)
         form.addRow("", note)
@@ -127,6 +135,13 @@ class PreferencesDialog(QDialog):
             "hint",
             "hints",
             "help",
+            "marcher",
+            "symbol",
+            "symbols",
+            "dot",
+            "dots",
+            "x",
+            "shape",
         )
         device_terms = (
             "audio",
@@ -159,6 +174,9 @@ class PreferencesDialog(QDialog):
     def selected_tooltips_enabled(self) -> bool:
         return self.tooltips_checkbox.isChecked()
 
+    def selected_dot_symbol(self) -> str:
+        return normalize_dot_symbol(self.dot_symbol_combo.currentData())
+
     def refresh_audio_devices(self) -> None:
         selected_id = self.selected_audio_output_device_id() if hasattr(self, "audio_output_combo") else self.current_audio_device_id
         self.audio_output_combo.blockSignals(True)
@@ -184,6 +202,9 @@ class PreferencesDialog(QDialog):
         tooltip_handler = getattr(parent, "apply_tooltips_enabled", None)
         if callable(tooltip_handler):
             tooltip_handler(self.selected_tooltips_enabled())
+        dot_symbol_handler = getattr(parent, "apply_dot_symbol", None)
+        if callable(dot_symbol_handler):
+            dot_symbol_handler(self.selected_dot_symbol())
         audio_handler = getattr(parent, "apply_audio_output_device", None)
         if callable(audio_handler):
             self.current_audio_device_id = self.selected_audio_output_device_id()

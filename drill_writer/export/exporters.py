@@ -7,6 +7,7 @@ import threading
 import time
 import zipfile
 import csv
+from dataclasses import dataclass, field
 from queue import Empty, Queue
 from pathlib import Path
 from typing import Callable
@@ -28,6 +29,32 @@ CancelCallback = Callable[[], bool]
 
 class ExportCancelled(RuntimeError):
     pass
+
+
+@dataclass(slots=True)
+class PrintTemplateOptions:
+    title: str = ""
+    section_filter: str = "All"
+    include_field: bool = True
+    include_warnings: bool = True
+    compact: bool = False
+
+
+@dataclass(slots=True)
+class Mp4ExportOptions:
+    fps: int = 30
+    size: QSize = field(default_factory=lambda: QSize(1920, 1080))
+    crf: int = 18
+    preset: str = "slow"
+    video_encoder: str = "auto"
+    title_splash: bool = False
+    title_splash_seconds: float = 2.5
+
+
+@dataclass(slots=True)
+class Mp4FrameRenderResult:
+    total_frames: int
+    audio_path: Path | None
 
 
 INK = QColor("#17202a")
@@ -265,6 +292,14 @@ def movement_style_export_label(style: object) -> str:
     return labels.get(str(value), str(value).replace("_", " ").title())
 
 
+def filtered_dots(project: DrillProject, options: PrintTemplateOptions | None = None):
+    options = options or PrintTemplateOptions()
+    section_filter = (options.section_filter or "All").strip()
+    if not section_filter or section_filter == "All":
+        return list(project.dots)
+    return [dot for dot in project.dots if dot.section == section_filter]
+
+
 def field_scene_source(field_view: FieldView) -> QRectF:
     return QRectF(
         -60 * field_view.scale_factor,
@@ -306,6 +341,7 @@ def export_drill_sheet_pdf(
     progress_callback: ProgressCallback | None = None,
 ) -> None:
     ensure_export_font()
+    project.ensure_set_positions()
     writer = QPdfWriter(str(output_path))
     writer.setResolution(150)
     writer.setPageLayout(
@@ -376,8 +412,12 @@ def export_dot_book_pdf(
     output_path: Path,
     project: DrillProject,
     progress_callback: ProgressCallback | None = None,
+    options: PrintTemplateOptions | None = None,
 ) -> None:
     ensure_export_font()
+    project.ensure_set_positions()
+    options = options or PrintTemplateOptions()
+    dots = filtered_dots(project, options)
     writer = QPdfWriter(str(output_path))
     writer.setResolution(150)
     writer.setPageLayout(
@@ -390,8 +430,8 @@ def export_dot_book_pdf(
     )
     pdf_painter = QPainter(writer)
     try:
-        total = max(1, len(project.dots))
-        for dot_index, dot in enumerate(project.dots):
+        total = max(1, len(dots))
+        for dot_index, dot in enumerate(dots):
             if dot_index:
                 writer.newPage()
             if progress_callback:
@@ -416,7 +456,7 @@ def export_dot_book_pdf(
                 content_rect = draw_header(
                     painter,
                     page_rect,
-                    f"{dot.name} - Dot Book",
+                    options.title or f"{dot.name} - Dot Book",
                     project.metadata.show_title,
                 )
                 chip_values = [
@@ -447,7 +487,7 @@ def export_dot_book_pdf(
                     table_width * 0.12,
                     table_width * 0.12,
                 ]
-                draw_clean_table(painter, table_rect, headers, rows, widths, row_height=30)
+                draw_clean_table(painter, table_rect, headers, rows, widths, row_height=24 if options.compact else 30)
                 draw_footer(painter, page_rect, f"Performer {dot_index + 1} of {total}")
 
             draw_raster_pdf_page(writer, pdf_painter, draw_page)
@@ -459,8 +499,13 @@ def export_staff_packet_pdf(
     project: DrillProject,
     project_dir: Path | None = None,
     progress_callback: ProgressCallback | None = None,
+    options: PrintTemplateOptions | None = None,
 ) -> None:
     ensure_export_font()
+    project.ensure_set_positions()
+    options = options or PrintTemplateOptions()
+    dots = filtered_dots(project, options)
+    section_label = "" if options.section_filter in ("", "All") else f" - {options.section_filter}"
     writer = QPdfWriter(str(output_path))
     writer.setResolution(150)
     writer.setPageLayout(
@@ -484,7 +529,7 @@ def export_staff_packet_pdf(
         ]
 
         def draw_overview_page(painter: QPainter, page_rect: QRectF) -> None:
-            content_rect = draw_header(painter, page_rect, project.metadata.show_title, "Staff rehearsal packet")
+            content_rect = draw_header(painter, page_rect, project.metadata.show_title, f"Staff rehearsal packet{section_label}")
             draw_chips(
                 painter,
                 content_rect.left(),
@@ -492,7 +537,7 @@ def export_staff_packet_pdf(
                 content_rect.width(),
                 [
                     ("Sets", str(len(project.sets))),
-                    ("Performers", str(len(project.dots))),
+                    ("Performers", str(len(dots))),
                     ("Base Tempo", f"{project.metadata.initial_tempo:g} BPM"),
                     ("Time Signature", project.metadata.time_signature),
                 ],
@@ -529,8 +574,9 @@ def export_staff_packet_pdf(
         draw_raster_pdf_page(writer, pdf_painter, draw_overview_page)
 
         warnings = []
-        for set_index in range(len(project.sets)):
-            warnings.extend(detect_path_warnings(project, set_index, warning_limit=60))
+        if options.include_warnings:
+            for set_index in range(len(project.sets)):
+                warnings.extend(detect_path_warnings(project, set_index, warning_limit=60))
         if warnings:
             writer.newPage()
             rows = [
@@ -571,6 +617,7 @@ def export_staff_packet_pdf(
         sheet_field = FieldView()
         sheet_field.set_project(project, project_dir)
         sheet_field.update_labels(False)
+        sheet_field.set_visibility_filters(options.section_filter or "All", "All")
         scene_source = field_scene_source(sheet_field)
         total = max(1, len(project.sets))
         for index, drill_set in enumerate(project.sets):
@@ -601,6 +648,7 @@ def export_staff_packet_pdf(
         pdf_painter.end()
 
 def export_coordinate_csv(output_path: Path, project: DrillProject) -> None:
+    project.ensure_set_positions()
     with output_path.open("w", newline="", encoding="utf-8") as file:
         writer = csv.writer(file)
         writer.writerow(
@@ -649,6 +697,92 @@ def export_coordinate_csv(output_path: Path, project: DrillProject) -> None:
                         drill_set.transition.value,
                     ]
                 )
+
+
+def export_coordinate_summary_pdf(
+    output_path: Path,
+    project: DrillProject,
+    progress_callback: ProgressCallback | None = None,
+    options: PrintTemplateOptions | None = None,
+) -> None:
+    ensure_export_font()
+    project.ensure_set_positions()
+    options = options or PrintTemplateOptions()
+    dots = filtered_dots(project, options)
+    section_label = "" if options.section_filter in ("", "All") else f" - {options.section_filter}"
+    rows: list[list[str]] = []
+    for set_index, drill_set in enumerate(project.sets):
+        for dot in dots:
+            x, y = drill_set.dot_positions.get(dot.id, (dot.x, dot.y))
+            yard_text, hash_text = format_drill_coordinate(x, y)
+            rows.append(
+                [
+                    drill_set.name,
+                    f"{drill_set.start_count}-{drill_set.end_count}",
+                    dot.name,
+                    dot.section or "-",
+                    yard_text,
+                    hash_text,
+                    movement_style_export_label(drill_set.movement_styles.get(dot.id)),
+                ]
+            )
+
+    writer = QPdfWriter(str(output_path))
+    writer.setResolution(150)
+    writer.setPageLayout(
+        QPageLayout(
+            QPageSize(QPageSize.PageSizeId.Letter),
+            QPageLayout.Orientation.Landscape,
+            QMarginsF(0.35, 0.35, 0.35, 0.35),
+            QPageLayout.Unit.Inch,
+        )
+    )
+    rows_per_page = 23 if not options.compact else 29
+    chunks = [rows[index : index + rows_per_page] for index in range(0, len(rows), rows_per_page)] or [[]]
+    pdf_painter = QPainter(writer)
+    try:
+        total = max(1, len(chunks))
+        for page_index, chunk in enumerate(chunks):
+            if page_index:
+                writer.newPage()
+            if progress_callback:
+                progress_callback("Creating coordinate summary", page_index + 1, total)
+
+            def draw_page(painter: QPainter, page_rect: QRectF, page_rows=chunk) -> None:
+                content_rect = draw_header(
+                    painter,
+                    page_rect,
+                    options.title or f"{project.metadata.show_title} - Coordinate Summary",
+                    f"All set coordinates{section_label}",
+                )
+                table_rect = QRectF(
+                    content_rect.left(),
+                    content_rect.top(),
+                    content_rect.width(),
+                    content_rect.height() - 8,
+                )
+                table_width = table_rect.width()
+                draw_clean_table(
+                    painter,
+                    table_rect,
+                    ["Set", "Counts", "Performer", "Section", "Yard Line", "Hash / Side", "Move"],
+                    page_rows,
+                    [
+                        table_width * 0.14,
+                        table_width * 0.09,
+                        table_width * 0.12,
+                        table_width * 0.13,
+                        table_width * 0.20,
+                        table_width * 0.22,
+                        table_width * 0.10,
+                    ],
+                    row_height=22 if options.compact else 28,
+                )
+                draw_footer(painter, page_rect, f"Coordinate summary page {page_index + 1} of {total}")
+
+            draw_raster_pdf_page(writer, pdf_painter, draw_page)
+    finally:
+        pdf_painter.end()
 
 
 def draw_table_row(
@@ -747,6 +881,293 @@ def seconds_from_ffmpeg_timestamp(value: str) -> float | None:
         return None
 
 
+def parse_ffmpeg_encoder_names(output: str) -> set[str]:
+    encoders: set[str] = set()
+    for line in output.splitlines():
+        parts = line.strip().split(maxsplit=2)
+        if len(parts) >= 2 and parts[0].startswith("V"):
+            encoders.add(parts[1])
+    return encoders
+
+
+def available_ffmpeg_video_encoders(ffmpeg: str) -> set[str]:
+    try:
+        result = subprocess.run(
+            [ffmpeg, "-hide_banner", "-encoders"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            timeout=8,
+            check=False,
+        )
+    except Exception:
+        return set()
+    return parse_ffmpeg_encoder_names(result.stdout or "")
+
+
+def choose_mp4_video_encoder(ffmpeg: str, requested_encoder: str) -> str:
+    available = available_ffmpeg_video_encoders(ffmpeg)
+    requested = (requested_encoder or "auto").strip()
+    if requested != "auto" and requested in available:
+        return requested
+    for candidate in ("libx264", "libopenh264", "mpeg4", "libxvid"):
+        if candidate in available:
+            return candidate
+    if requested != "auto":
+        return requested
+    return "mpeg4"
+
+
+def mp4_video_bitrate(options: Mp4ExportOptions) -> str:
+    pixels_per_second = max(1, options.size.width() * options.size.height() * options.fps)
+    kilobits = max(3500, int(pixels_per_second * 0.08 / 1000))
+    return f"{kilobits}k"
+
+
+def mpeg4_quality_from_crf(crf: int) -> int:
+    if crf <= 14:
+        return 2
+    if crf <= 18:
+        return 3
+    if crf <= 22:
+        return 4
+    return 5
+
+
+def video_encoder_args(encoder: str, options: Mp4ExportOptions) -> list[str]:
+    if encoder == "libx264":
+        return ["-c:v", "libx264", "-preset", options.preset, "-crf", str(options.crf)]
+    if encoder == "libopenh264":
+        return ["-c:v", "libopenh264", "-b:v", mp4_video_bitrate(options)]
+    if encoder in {"mpeg4", "libxvid"}:
+        return ["-c:v", encoder, "-q:v", str(mpeg4_quality_from_crf(options.crf))]
+    return ["-c:v", encoder, "-b:v", mp4_video_bitrate(options)]
+
+
+def draw_mp4_title_splash(painter: QPainter, rect: QRectF, title: str) -> None:
+    painter.fillRect(rect, QColor(8, 10, 14, 178))
+    painter.setPen(QColor("#f5c542"))
+    set_font(painter, 52, True)
+    painter.drawText(
+        rect.adjusted(80, rect.height() * 0.35, -80, -rect.height() * 0.45),
+        Qt.AlignmentFlag.AlignCenter,
+        clean_text(title),
+    )
+    painter.setPen(QColor("#f4f6fa"))
+    set_font(painter, 18)
+    painter.drawText(
+        rect.adjusted(80, rect.height() * 0.52, -80, -rect.height() * 0.36),
+        Qt.AlignmentFlag.AlignCenter,
+        "Drill Pirate",
+    )
+
+
+def render_mp4_frame(
+    field_view: FieldView,
+    size: QSize,
+    title_splash_text: str = "",
+) -> QImage:
+    image = QImage(size, QImage.Format.Format_ARGB32)
+    image.fill(QColor("#101216"))
+    painter = QPainter(image)
+    painter.setRenderHints(
+        QPainter.RenderHint.Antialiasing
+        | QPainter.RenderHint.TextAntialiasing
+        | QPainter.RenderHint.SmoothPixmapTransform
+    )
+    try:
+        source = field_scene_source(field_view)
+        target = QRectF(0, 0, image.width(), image.height())
+        source_aspect = source.width() / max(1.0, source.height())
+        target_aspect = target.width() / max(1.0, target.height())
+        if target_aspect > source_aspect:
+            render_height = target.height()
+            render_width = render_height * source_aspect
+        else:
+            render_width = target.width()
+            render_height = render_width / source_aspect
+        render_rect = QRectF(
+            (target.width() - render_width) / 2,
+            (target.height() - render_height) / 2,
+            render_width,
+            render_height,
+        )
+        field_view.scene.render(painter, render_rect, source, Qt.AspectRatioMode.KeepAspectRatio)
+        if title_splash_text:
+            draw_mp4_title_splash(painter, target, title_splash_text)
+    finally:
+        painter.end()
+    return image
+
+
+def render_mp4_frames(
+    field_view: FieldView,
+    project_dir: Path,
+    frames_dir: Path,
+    project: DrillProject,
+    options: Mp4ExportOptions | None = None,
+    progress_callback: ProgressCallback | None = None,
+    cancel_callback: CancelCallback | None = None,
+    progress_total: int = 1000,
+    render_steps: int = 720,
+) -> Mp4FrameRenderResult:
+    options = options or Mp4ExportOptions()
+    project.ensure_set_positions()
+
+    def report(stage: str, current: int, total: int) -> None:
+        if progress_callback:
+            progress_callback(stage, current, total)
+
+    def check_cancelled() -> None:
+        if cancel_callback and cancel_callback():
+            raise ExportCancelled("MP4 export cancelled.")
+
+    audio_path = project_dir / project.metadata.audio_file if project.metadata.audio_file else None
+    frame_counts = [
+        max(1, int(drill_set.duration_counts * (60 / project.active_tempo(set_index)) * options.fps))
+        for set_index, drill_set in enumerate(project.sets)
+    ]
+    total_frames = sum(frame_counts)
+    title_frames = max(0, int(options.title_splash_seconds * options.fps)) if options.title_splash else 0
+    frame_index = 0
+    for set_index, drill_set in enumerate(project.sets):
+        frame_count = frame_counts[set_index]
+        for local_frame in range(frame_count):
+            check_cancelled()
+            progress = local_frame / max(1, frame_count - 1)
+            count = drill_set.start_count + progress * (drill_set.end_count - drill_set.start_count)
+            field_view.set_positions(interpolate_project(project, set_index, count))
+            field_view.set_prop_states(interpolate_props(project, set_index, count))
+            title_text = project.metadata.show_title if frame_index < title_frames else ""
+            image = render_mp4_frame(field_view, options.size, title_text)
+            image.save(str(frames_dir / f"frame_{frame_index:06d}.png"))
+            frame_index += 1
+            render_progress = int((frame_index / max(1, total_frames)) * render_steps)
+            report("Rendering MP4 frames", render_progress, progress_total)
+    return Mp4FrameRenderResult(total_frames=total_frames, audio_path=audio_path if audio_path and audio_path.exists() else None)
+
+
+def encode_mp4_frames(
+    frames_dir: Path,
+    output_path: Path,
+    frame_result: Mp4FrameRenderResult,
+    ffmpeg_path: str | None = None,
+    options: Mp4ExportOptions | None = None,
+    progress_callback: ProgressCallback | None = None,
+    cancel_callback: CancelCallback | None = None,
+    progress_total: int = 1000,
+    render_steps: int = 720,
+) -> None:
+    options = options or Mp4ExportOptions()
+    ffmpeg = ffmpeg_path or shutil.which("ffmpeg")
+    if not ffmpeg:
+        raise RuntimeError("ffmpeg was not found on PATH.")
+
+    encode_steps = progress_total - render_steps
+
+    def report(stage: str, current: int, total: int) -> None:
+        if progress_callback:
+            progress_callback(stage, current, total)
+
+    def check_cancelled(process: subprocess.Popen | None = None) -> None:
+        if cancel_callback and cancel_callback():
+            if process and process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+            raise ExportCancelled("MP4 export cancelled.")
+
+    command = [
+        ffmpeg,
+        "-y",
+        "-nostdin",
+        "-hide_banner",
+        "-loglevel",
+        "warning",
+        "-stats_period",
+        "0.5",
+        "-framerate",
+        str(options.fps),
+        "-i",
+        str(frames_dir / "frame_%06d.png"),
+    ]
+    if frame_result.audio_path and frame_result.audio_path.exists():
+        command += ["-i", str(frame_result.audio_path), "-shortest"]
+    video_encoder = choose_mp4_video_encoder(ffmpeg, options.video_encoder)
+    command += video_encoder_args(video_encoder, options)
+    if frame_result.audio_path and frame_result.audio_path.exists():
+        command += ["-c:a", "aac", "-b:a", "192k"]
+    command += [
+        "-pix_fmt",
+        "yuv420p",
+        "-movflags",
+        "+faststart",
+        "-progress",
+        "pipe:1",
+        str(output_path),
+    ]
+
+    report(f"Encoding MP4 with ffmpeg ({video_encoder})", render_steps, progress_total)
+    process = subprocess.Popen(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+    )
+    output_queue: Queue[str] = Queue()
+    output_lines: list[str] = []
+    reader_thread: threading.Thread | None = None
+    if process.stdout is not None:
+        reader_thread = threading.Thread(
+            target=read_process_output,
+            args=(process.stdout, output_queue),
+            daemon=True,
+        )
+        reader_thread.start()
+
+    last_encode_progress = render_steps
+    while process.poll() is None:
+        check_cancelled(process)
+        last_encode_progress = drain_ffmpeg_progress(
+            output_queue,
+            output_lines,
+            options.fps,
+            frame_result.total_frames,
+            render_steps,
+            encode_steps,
+            last_encode_progress,
+        )
+        stage = (
+            "Finalizing MP4 file - ffmpeg is still writing"
+            if last_encode_progress >= progress_total - 20
+            else f"Encoding MP4 with ffmpeg ({video_encoder})"
+        )
+        report(stage, last_encode_progress, progress_total)
+        time.sleep(0.1)
+    process.wait()
+    if reader_thread:
+        reader_thread.join(timeout=1.0)
+    last_encode_progress = drain_ffmpeg_progress(
+        output_queue,
+        output_lines,
+        options.fps,
+        frame_result.total_frames,
+        render_steps,
+        encode_steps,
+        last_encode_progress,
+    )
+    if process.returncode != 0:
+        message = "\n".join(output_lines[-20:]).strip()
+        raise RuntimeError(
+            "ffmpeg failed while encoding the MP4.\n\n"
+            + (message or "No ffmpeg output was captured. Check that the output folder is writable.")
+        )
+    report("MP4 export complete", progress_total, progress_total)
+
+
 def export_mp4(
     field_view: FieldView,
     project_dir: Path,
@@ -757,115 +1178,26 @@ def export_mp4(
     size: QSize = QSize(1920, 1080),
     progress_callback: ProgressCallback | None = None,
     cancel_callback: CancelCallback | None = None,
+    options: Mp4ExportOptions | None = None,
 ) -> None:
-    ffmpeg = ffmpeg_path or shutil.which("ffmpeg")
-    if not ffmpeg:
-        raise RuntimeError("ffmpeg was not found on PATH.")
-
-    def report(stage: str, current: int, total: int) -> None:
-        if progress_callback:
-            progress_callback(stage, current, total)
-
-    def check_cancelled(process: subprocess.Popen | None = None) -> None:
-        if cancel_callback and cancel_callback():
-            if process and process.poll() is None:
-                process.terminate()
-            raise ExportCancelled("MP4 export cancelled.")
-
-    audio_path = project_dir / project.metadata.audio_file if project.metadata.audio_file else None
-    frame_counts = [
-        max(1, int(drill_set.duration_counts * (60 / project.active_tempo(set_index)) * fps))
-        for set_index, drill_set in enumerate(project.sets)
-    ]
-    total_frames = sum(frame_counts)
-    progress_total = 1000
-    render_steps = 720
-    encode_steps = progress_total - render_steps
-
+    export_options = options or Mp4ExportOptions(fps=fps, size=size)
     with tempfile.TemporaryDirectory(prefix="drill_writer_frames_") as temp_dir:
         frames_dir = Path(temp_dir)
-        frame_index = 0
-        for set_index, drill_set in enumerate(project.sets):
-            frame_count = frame_counts[set_index]
-            for local_frame in range(frame_count):
-                check_cancelled()
-                progress = local_frame / max(1, frame_count - 1)
-                count = drill_set.start_count + progress * (drill_set.end_count - drill_set.start_count)
-                field_view.set_positions(interpolate_project(project, set_index, count))
-                field_view.set_prop_states(interpolate_props(project, set_index, count))
-                image = QImage(size, QImage.Format.Format_ARGB32)
-                image.fill(0xFF16181D)
-                painter = QPainter(image)
-                field_view.scene.render(painter)
-                painter.end()
-                image.save(str(frames_dir / f"frame_{frame_index:06d}.png"))
-                frame_index += 1
-                render_progress = int((frame_index / max(1, total_frames)) * render_steps)
-                report("Rendering MP4 frames", render_progress, progress_total)
-
-        command = [
-            ffmpeg,
-            "-y",
-            "-nostdin",
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-nostats",
-            "-framerate",
-            str(fps),
-            "-i",
-            str(frames_dir / "frame_%06d.png"),
-        ]
-        if audio_path and audio_path.exists():
-            command += ["-i", str(audio_path), "-shortest"]
-        command += ["-pix_fmt", "yuv420p", "-movflags", "+faststart", "-progress", "pipe:1", str(output_path)]
-        report("Encoding MP4 with ffmpeg", render_steps, progress_total)
-        process = subprocess.Popen(
-            command,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            bufsize=1,
+        frame_result = render_mp4_frames(
+            field_view,
+            project_dir,
+            frames_dir,
+            project,
+            options=export_options,
+            progress_callback=progress_callback,
+            cancel_callback=cancel_callback,
         )
-        output_queue: Queue[str] = Queue()
-        output_lines: list[str] = []
-        reader_thread: threading.Thread | None = None
-        if process.stdout is not None:
-            reader_thread = threading.Thread(
-                target=read_process_output,
-                args=(process.stdout, output_queue),
-                daemon=True,
-            )
-            reader_thread.start()
-
-        last_encode_progress = render_steps
-        while process.poll() is None:
-            check_cancelled(process)
-            last_encode_progress = drain_ffmpeg_progress(
-                output_queue,
-                output_lines,
-                fps,
-                total_frames,
-                render_steps,
-                encode_steps,
-                last_encode_progress,
-            )
-            stage = "Finalizing MP4 file" if last_encode_progress >= progress_total - 20 else "Encoding MP4 with ffmpeg"
-            report(stage, last_encode_progress, progress_total)
-            time.sleep(0.1)
-        process.wait()
-        if reader_thread:
-            reader_thread.join(timeout=1.0)
-        last_encode_progress = drain_ffmpeg_progress(
-            output_queue,
-            output_lines,
-            fps,
-            total_frames,
-            render_steps,
-            encode_steps,
-            last_encode_progress,
+        encode_mp4_frames(
+            frames_dir,
+            output_path,
+            frame_result,
+            ffmpeg_path=ffmpeg_path,
+            options=export_options,
+            progress_callback=progress_callback,
+            cancel_callback=cancel_callback,
         )
-        if process.returncode != 0:
-            message = "\n".join(output_lines[-20:])
-            raise RuntimeError(message.strip() or "ffmpeg failed.")
-        report("MP4 export complete", progress_total, progress_total)

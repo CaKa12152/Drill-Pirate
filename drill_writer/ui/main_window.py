@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import json
 import shutil
+import tempfile
 from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
-from PySide6.QtCore import QElapsedTimer, QSettings, QTimer, Qt, QUrl, Signal
+from PySide6.QtCore import QElapsedTimer, QSettings, QSize, QThread, QTimer, Qt, QUrl, Signal
 from PySide6.QtGui import QAction, QColor, QIcon, QKeySequence, QPixmap, QUndoCommand, QUndoStack
 from PySide6.QtMultimedia import QAudioOutput, QMediaDevices, QMediaPlayer
 from PySide6.QtWidgets import (
@@ -99,13 +100,18 @@ from drill_writer.core.tools import (
 from drill_writer.resources import app_icon_path
 from drill_writer.export.exporters import (
     ExportCancelled,
+    Mp4ExportOptions,
+    PrintTemplateOptions,
+    encode_mp4_frames,
     export_coordinate_csv,
+    export_coordinate_summary_pdf,
     export_dot_book_pdf,
     export_drill_sheet_pdf,
-    export_mp4,
     export_project_zip,
     export_staff_packet_pdf,
+    render_mp4_frames,
 )
+from drill_writer.ui.pdf_preview import PdfPreviewDialog
 from drill_writer.ui.audio_devices import (
     AUDIO_OUTPUT_DEVICE_SETTING,
     DEFAULT_AUDIO_OUTPUT_DEVICE_ID,
@@ -115,6 +121,7 @@ from drill_writer.ui.audio_devices import (
     normalize_audio_output_device_id,
 )
 from drill_writer.ui.field_view import EditorTool, FieldView
+from drill_writer.ui.prop_designer import CreatedPropDesign, PropDesignerDialog
 from drill_writer.ui.waveform import WaveformWidget
 
 
@@ -139,6 +146,51 @@ class PluginFormTool:
     callback: Callable[[FormToolContext], Any]
     min_selected: int
     settings: list[dict[str, Any]]
+
+
+class Mp4EncodeThread(QThread):
+    progress_changed = Signal(str, int, int)
+    export_completed = Signal()
+    export_cancelled = Signal()
+    export_failed = Signal(str)
+
+    def __init__(
+        self,
+        frames_dir: Path,
+        output_path: Path,
+        frame_result: Any,
+        ffmpeg_path: str,
+        options: Mp4ExportOptions,
+        parent=None,
+    ) -> None:
+        super().__init__(parent)
+        self.frames_dir = frames_dir
+        self.output_path = output_path
+        self.frame_result = frame_result
+        self.ffmpeg_path = ffmpeg_path
+        self.options = options
+        self._cancel_requested = False
+
+    def request_cancel(self) -> None:
+        self._cancel_requested = True
+
+    def run(self) -> None:  # type: ignore[override]
+        try:
+            encode_mp4_frames(
+                self.frames_dir,
+                self.output_path,
+                self.frame_result,
+                ffmpeg_path=self.ffmpeg_path,
+                options=self.options,
+                progress_callback=self.progress_changed.emit,
+                cancel_callback=lambda: self._cancel_requested,
+            )
+        except ExportCancelled:
+            self.export_cancelled.emit()
+        except Exception as exc:
+            self.export_failed.emit(str(exc))
+        else:
+            self.export_completed.emit()
 
 
 TOOL_HINTS: dict[EditorTool, str] = {
@@ -554,10 +606,22 @@ class MainWindow(QMainWindow):
         add_marcher_action = self.menu_action("Add Marcher", self.add_marcher, QKeySequence("Ctrl+M"))
         delete_marcher_action = self.menu_action("Delete Selected", self.delete_selected_marchers, QKeySequence("Del"))
         import_prop_action = self.menu_action("Import Prop Image", self.import_prop_image, QKeySequence("Ctrl+Alt+I"))
+        design_prop_action = self.menu_action("Open Prop Designer", self.open_prop_designer, QKeySequence("Ctrl+Alt+Shift+P"))
+        add_front_ensemble_action = self.menu_action("Add Front Ensemble Prop", self.add_front_ensemble_prop, QKeySequence("Ctrl+Alt+E"))
+        add_drum_major_stand_action = self.menu_action("Add Drum Major Stand", self.add_drum_major_stand, QKeySequence("Ctrl+Alt+D"))
         add_set_action = self.menu_action("Add Set", self.add_set, QKeySequence("Ctrl+Alt+S"))
         remove_set_action = self.menu_action("Remove Set", self.remove_set, QKeySequence("Ctrl+Alt+Backspace"))
         tools_menu.addActions(
-            [add_marcher_action, delete_marcher_action, import_prop_action, add_set_action, remove_set_action]
+            [
+                add_marcher_action,
+                delete_marcher_action,
+                import_prop_action,
+                design_prop_action,
+                add_front_ensemble_action,
+                add_drum_major_stand_action,
+                add_set_action,
+                remove_set_action,
+            ]
         )
         tools_menu.addSeparator()
         tool_shortcuts = (
@@ -595,6 +659,9 @@ class MainWindow(QMainWindow):
                 add_marcher_action,
                 delete_marcher_action,
                 import_prop_action,
+                design_prop_action,
+                add_front_ensemble_action,
+                add_drum_major_stand_action,
                 add_set_action,
                 remove_set_action,
                 *tool_actions,
@@ -672,6 +739,12 @@ class MainWindow(QMainWindow):
         self.tooltip_actions = valid_actions
         if hasattr(self, "tool_hint_label"):
             self.tool_hint_label.setVisible(active)
+
+    def apply_dot_symbol(self, symbol: str) -> None:
+        self.field.set_dot_symbol(symbol)
+        self.field.set_positions(self.current_set().dot_positions)
+        self.field.set_prop_states(self.current_set().prop_positions)
+        self.refresh_selected_paths()
 
     def unique_command_id(self, text: str) -> str:
         base = "".join(char.lower() if char.isalnum() else "_" for char in text).strip("_")
@@ -1728,11 +1801,23 @@ class MainWindow(QMainWindow):
         props_title.setStyleSheet("font-size: 14px; font-weight: 750;")
         import_prop_button = QPushButton("Import")
         import_prop_button.clicked.connect(self.import_prop_image)
+        design_prop_button = QPushButton("Design")
+        design_prop_button.setToolTip("Open the in-app prop designer to draw a prop from shapes.")
+        design_prop_button.clicked.connect(self.open_prop_designer)
+        front_ensemble_button = QPushButton("Pit")
+        front_ensemble_button.setToolTip("Add a movable front ensemble prop at the front sideline.")
+        front_ensemble_button.clicked.connect(self.add_front_ensemble_prop)
+        drum_major_button = QPushButton("DM")
+        drum_major_button.setToolTip("Add a movable drum major stand prop.")
+        drum_major_button.clicked.connect(self.add_drum_major_stand)
         delete_prop_button = QPushButton("Delete")
         delete_prop_button.clicked.connect(self.delete_selected_props)
         props_header.addWidget(props_title)
         props_header.addStretch()
         props_header.addWidget(import_prop_button)
+        props_header.addWidget(design_prop_button)
+        props_header.addWidget(front_ensemble_button)
+        props_header.addWidget(drum_major_button)
         props_header.addWidget(delete_prop_button)
         props_layout.addLayout(props_header)
         self.prop_table = QTableWidget(0, 3)
@@ -1749,6 +1834,25 @@ class MainWindow(QMainWindow):
         self.prop_table.cellClicked.connect(self.select_prop_from_table)
         props_layout.addWidget(self.prop_table, 1)
         tabs.addTab(props_tab, "Props")
+
+        prop_designer_tab = QWidget()
+        designer_layout = QVBoxLayout(prop_designer_tab)
+        designer_layout.setContentsMargins(8, 8, 8, 8)
+        designer_title = QLabel("Prop Designer")
+        designer_title.setStyleSheet("font-size: 14px; font-weight: 750;")
+        designer_note = QLabel(
+            "Draw field-ready props with rectangles, circles, lines, text, colors, exact yard sizing, "
+            "and anchor-based shape scaling. Saved designs become movable props in every set."
+        )
+        designer_note.setWordWrap(True)
+        designer_note.setStyleSheet("color: #aeb7c8;")
+        open_designer_button = QPushButton("Open Prop Designer")
+        open_designer_button.clicked.connect(self.open_prop_designer)
+        designer_layout.addWidget(designer_title)
+        designer_layout.addWidget(designer_note)
+        designer_layout.addWidget(open_designer_button)
+        designer_layout.addStretch(1)
+        tabs.addTab(prop_designer_tab, "Prop Designer")
 
         formation_tab = QWidget()
         self.formation_tab = formation_tab
@@ -2901,6 +3005,140 @@ class MainWindow(QMainWindow):
             before_dot_selection,
             before_prop_selection,
             "Import Prop",
+        )
+
+    def open_prop_designer(self) -> None:
+        dialog = PropDesignerDialog(self.project_dir, self)
+        if dialog.exec() != QDialog.DialogCode.Accepted or not dialog.created_design:
+            return
+        self.add_designed_prop(dialog.created_design)
+
+    def add_designed_prop(self, design: CreatedPropDesign) -> None:
+        before_dots = deepcopy(self.project.dots)
+        before_props = deepcopy(self.project.props)
+        before_sets = deepcopy(self.project.sets)
+        before_dot_selection = self.field.selected_dot_ids()
+        before_prop_selection = self.field.selected_prop_ids()
+        prop = Prop(
+            id=self.next_prop_id(),
+            name=design.name,
+            image_file=design.image_file,
+            x=0.0,
+            y=-31.5,
+            width=design.width,
+            height=design.height,
+            rotation=0.0,
+            layer=design.layer or "Props",
+        )
+        self.project.props.append(prop)
+        for drill_set in self.project.sets:
+            drill_set.prop_positions[prop.id] = prop_default_state(prop)
+        self.field.rebuild_props()
+        self.field.set_prop_states(self.current_set().prop_positions)
+        for item in self.field.scene.selectedItems():
+            item.setSelected(False)
+        self.field.prop_items[prop.id].setSelected(True)
+        self.refresh_prop_table()
+        self.refresh_visibility_filters()
+        self.selection_changed()
+        self.statusBar().showMessage(f"Added designed prop {prop.name}", 2600)
+        self.push_project_content_snapshot(
+            before_dots,
+            before_props,
+            before_sets,
+            before_dot_selection,
+            before_prop_selection,
+            "Add Designed Prop",
+        )
+
+    def add_front_ensemble_prop(self) -> None:
+        count = 1 + sum(1 for prop in self.project.props if prop.layer == "Front Ensemble")
+        x_position = self.next_open_front_ensemble_x(count)
+        self.add_generated_prop(
+            name=f"FE{count}",
+            layer="Front Ensemble",
+            x=x_position,
+            y=-31.5,
+            width=5.0,
+            height=2.4,
+            label="Add Front Ensemble Prop",
+        )
+
+    def add_drum_major_stand(self) -> None:
+        count = 1 + sum(1 for prop in self.project.props if prop.layer == "Drum Major")
+        offsets = [0.0, -24.0, 24.0, -40.0, 40.0]
+        x_position = offsets[count - 1] if count <= len(offsets) else 0.0
+        self.add_generated_prop(
+            name=f"DM Stand {count}",
+            layer="Drum Major",
+            x=x_position,
+            y=-37.0,
+            width=3.0,
+            height=3.0,
+            label="Add Drum Major Stand",
+        )
+
+    def next_open_front_ensemble_x(self, count: int) -> float:
+        if count <= 1:
+            return 0.0
+        spacing = 7.0
+        existing = [
+            prop.x
+            for prop in self.project.props
+            if prop.layer == "Front Ensemble"
+        ]
+        candidate = ((count - 1) // 2 + 1) * spacing
+        if count % 2 == 0:
+            candidate = -candidate
+        while any(abs(candidate - value) < 1.0 for value in existing):
+            candidate += spacing
+        return candidate
+
+    def add_generated_prop(
+        self,
+        name: str,
+        layer: str,
+        x: float,
+        y: float,
+        width: float,
+        height: float,
+        label: str,
+    ) -> None:
+        before_dots = deepcopy(self.project.dots)
+        before_props = deepcopy(self.project.props)
+        before_sets = deepcopy(self.project.sets)
+        before_dot_selection = self.field.selected_dot_ids()
+        before_prop_selection = self.field.selected_prop_ids()
+        prop = Prop(
+            id=self.next_prop_id(),
+            name=name,
+            image_file="",
+            x=x,
+            y=y,
+            width=width,
+            height=height,
+            rotation=0.0,
+            layer=layer,
+        )
+        self.project.props.append(prop)
+        for drill_set in self.project.sets:
+            drill_set.prop_positions[prop.id] = prop_default_state(prop)
+        self.field.rebuild_props()
+        self.field.set_prop_states(self.current_set().prop_positions)
+        for item in self.field.scene.selectedItems():
+            item.setSelected(False)
+        self.field.prop_items[prop.id].setSelected(True)
+        self.refresh_prop_table()
+        self.refresh_visibility_filters()
+        self.selection_changed()
+        self.statusBar().showMessage(f"Added {name}", 2500)
+        self.push_project_content_snapshot(
+            before_dots,
+            before_props,
+            before_sets,
+            before_dot_selection,
+            before_prop_selection,
+            label,
         )
 
     def delete_selected_props(self) -> None:
@@ -5404,7 +5642,7 @@ class MainWindow(QMainWindow):
         dialog = QDialog(self)
         dialog.setWindowTitle("Export")
         dialog.setModal(True)
-        dialog.setMinimumWidth(420)
+        dialog.setMinimumWidth(640)
         layout = QVBoxLayout(dialog)
 
         title = QLabel("Choose Export Type")
@@ -5412,23 +5650,42 @@ class MainWindow(QMainWindow):
         layout.addWidget(title)
 
         mp4_button = QPushButton("MP4 Video")
-        mp4_button.setToolTip("Render the full show animation synced with audio using ffmpeg.")
+        mp4_button.setToolTip("Render a high-quality show video with ffmpeg, cancel support, and optional title splash.")
         pdf_button = QPushButton("Drill Sheet PDF")
-        pdf_button.setToolTip("Create one landscape page per set with counts, tempo, and field image.")
+        pdf_button.setToolTip("Preview and save one clean landscape set chart per set.")
         dot_book_button = QPushButton("Dot Book PDF")
-        dot_book_button.setToolTip("Create one coordinate packet page per performer.")
+        dot_book_button.setToolTip("Preview and save one coordinate packet page per performer.")
         staff_packet_button = QPushButton("Staff Packet PDF")
-        staff_packet_button.setToolTip("Create a staff packet with show summary, warnings, and large set pages.")
+        staff_packet_button.setToolTip("Preview and save a staff packet with show summary, warnings, and large set pages.")
+        section_packet_button = QPushButton("Section Packet PDF")
+        section_packet_button.setToolTip("Preview and save a packet filtered to one section.")
+        coordinate_summary_button = QPushButton("Coordinate Summary PDF")
+        coordinate_summary_button.setToolTip("Preview and save a readable coordinate table for all sets.")
         coordinate_button = QPushButton("Coordinate CSV")
         coordinate_button.setToolTip("Export all performer coordinates for every set.")
         zip_button = QPushButton("Project Zip")
         zip_button.setToolTip("Package the project folder for backup or sharing.")
+        batch_button = QPushButton("Batch: Staff + Dot Books + CSV + ZIP")
+        batch_button.setToolTip("Run the standard export package in one folder.")
         ffmpeg_button = QPushButton("Set ffmpeg.exe")
         ffmpeg_button.setToolTip("Choose a local ffmpeg executable for MP4 export.")
 
-        for button in (mp4_button, pdf_button, dot_book_button, staff_packet_button, coordinate_button, zip_button):
+        grid = QGridLayout()
+        buttons = [
+            mp4_button,
+            pdf_button,
+            dot_book_button,
+            staff_packet_button,
+            section_packet_button,
+            coordinate_summary_button,
+            coordinate_button,
+            zip_button,
+            batch_button,
+        ]
+        for index, button in enumerate(buttons):
             button.setMinimumHeight(42)
-            layout.addWidget(button)
+            grid.addWidget(button, index // 2, index % 2)
+        layout.addLayout(grid)
 
         layout.addSpacing(8)
         layout.addWidget(ffmpeg_button)
@@ -5444,8 +5701,11 @@ class MainWindow(QMainWindow):
         pdf_button.clicked.connect(lambda: self.accept_export_choice(dialog, self.export_drill_sheet_pdf))
         dot_book_button.clicked.connect(lambda: self.accept_export_choice(dialog, self.export_dot_book_pdf))
         staff_packet_button.clicked.connect(lambda: self.accept_export_choice(dialog, self.export_staff_packet_pdf))
+        section_packet_button.clicked.connect(lambda: self.accept_export_choice(dialog, self.export_section_packet_pdf))
+        coordinate_summary_button.clicked.connect(lambda: self.accept_export_choice(dialog, self.export_coordinate_summary_pdf))
         coordinate_button.clicked.connect(lambda: self.accept_export_choice(dialog, self.export_coordinate_csv))
         zip_button.clicked.connect(lambda: self.accept_export_choice(dialog, self.export_zip))
+        batch_button.clicked.connect(lambda: self.accept_export_choice(dialog, self.export_batch_profile))
         ffmpeg_button.clicked.connect(self.choose_ffmpeg_exe)
         dialog.exec()
 
@@ -5472,18 +5732,66 @@ class MainWindow(QMainWindow):
         export_coordinate_csv(Path(path), self.project)
         self.statusBar().showMessage("Coordinate CSV exported", 3000)
 
-    def export_drill_sheet_pdf(self) -> None:
-        path, _ = QFileDialog.getSaveFileName(
-            self,
-            "Export Drill Sheet PDF",
-            str(self.project_dir / "drill_sheet.pdf"),
-            "PDF (*.pdf)",
+    def print_template_options(
+        self,
+        title: str,
+        default_title: str = "",
+        allow_section: bool = False,
+        force_section: str = "",
+        include_warning_option: bool = False,
+    ) -> PrintTemplateOptions | None:
+        dialog = QDialog(self)
+        dialog.setWindowTitle(title)
+        dialog.setModal(True)
+        layout = QVBoxLayout(dialog)
+        form = QFormLayout()
+        title_input = QLineEdit(default_title)
+        compact_check = QCheckBox("Compact table spacing")
+        warnings_check = QCheckBox("Include conflict warnings")
+        warnings_check.setChecked(True)
+        section_combo = QComboBox()
+        section_combo.addItem("All")
+        for section in sorted({dot.section for dot in self.project.dots if dot.section}):
+            section_combo.addItem(section)
+        if force_section:
+            index = section_combo.findText(force_section)
+            if index >= 0:
+                section_combo.setCurrentIndex(index)
+            section_combo.setEnabled(False)
+        form.addRow("Template Title", title_input)
+        if allow_section or force_section:
+            form.addRow("Section", section_combo)
+        form.addRow("Compact", compact_check)
+        if include_warning_option:
+            form.addRow("Warnings", warnings_check)
+        layout.addLayout(form)
+        buttons = QHBoxLayout()
+        cancel_button = QPushButton("Cancel")
+        preview_button = QPushButton("Preview")
+        cancel_button.clicked.connect(dialog.reject)
+        preview_button.clicked.connect(dialog.accept)
+        buttons.addStretch()
+        buttons.addWidget(cancel_button)
+        buttons.addWidget(preview_button)
+        layout.addLayout(buttons)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return None
+        return PrintTemplateOptions(
+            title=title_input.text().strip(),
+            section_filter=section_combo.currentText(),
+            include_warnings=warnings_check.isChecked(),
+            compact=compact_check.isChecked(),
         )
-        if not path:
-            return
 
-        progress = QProgressDialog("Preparing drill sheet PDF...", None, 0, max(1, len(self.project.sets)), self)
-        progress.setWindowTitle("Exporting Drill Sheet PDF")
+    def preview_pdf_export(
+        self,
+        title: str,
+        default_name: str,
+        progress_max: int,
+        export_callback: Callable[[Path, Callable[[str, int, int], None]], None],
+    ) -> None:
+        progress = QProgressDialog(f"Preparing {title}...", None, 0, max(1, progress_max), self)
+        progress.setWindowTitle(f"Exporting {title}")
         progress.setWindowModality(Qt.WindowModality.ApplicationModal)
         progress.setMinimumDuration(0)
         progress.setAutoClose(False)
@@ -5496,80 +5804,220 @@ class MainWindow(QMainWindow):
             progress.setValue(min(current, total))
             QApplication.processEvents()
 
+        temp_dir = tempfile.TemporaryDirectory(prefix="drill_pirate_pdf_preview_")
+        preview_path = Path(temp_dir.name) / default_name
         try:
-            export_drill_sheet_pdf(Path(path), self.project, self.project_dir, progress_callback=update_progress)
+            export_callback(preview_path, update_progress)
         except Exception as exc:
             QMessageBox.warning(self, "Export Failed", str(exc))
+            temp_dir.cleanup()
             return
         finally:
             progress.close()
-        self.statusBar().showMessage("Drill sheet PDF exported", 3000)
+        preview = PdfPreviewDialog(preview_path, self.project_dir / default_name, self)
+        try:
+            if preview.exec() == QDialog.DialogCode.Accepted and preview.saved_path:
+                self.statusBar().showMessage(f"{title} saved", 3000)
+        finally:
+            temp_dir.cleanup()
+
+    def export_drill_sheet_pdf(self) -> None:
+        self.preview_pdf_export(
+            "Drill Sheet PDF",
+            "drill_sheet.pdf",
+            len(self.project.sets),
+            lambda path, progress_callback: export_drill_sheet_pdf(
+                path,
+                self.project,
+                self.project_dir,
+                progress_callback=progress_callback,
+            ),
+        )
 
     def export_dot_book_pdf(self) -> None:
-        path, _ = QFileDialog.getSaveFileName(
-            self,
-            "Export Dot Book PDF",
-            str(self.project_dir / "dot_book.pdf"),
-            "PDF (*.pdf)",
+        options = self.print_template_options(
+            "Dot Book Options",
+            default_title="",
+            allow_section=True,
         )
-        if not path:
+        if not options:
             return
-
-        progress = QProgressDialog("Preparing dot book PDF...", None, 0, max(1, len(self.project.dots)), self)
-        progress.setWindowTitle("Exporting Dot Book PDF")
-        progress.setWindowModality(Qt.WindowModality.ApplicationModal)
-        progress.setMinimumDuration(0)
-        progress.setAutoClose(False)
-        progress.setAutoReset(False)
-        progress.show()
-
-        def update_progress(stage: str, current: int, total: int) -> None:
-            progress.setLabelText(stage)
-            progress.setMaximum(max(1, total))
-            progress.setValue(min(current, total))
-            QApplication.processEvents()
-
-        try:
-            export_dot_book_pdf(Path(path), self.project, progress_callback=update_progress)
-        except Exception as exc:
-            QMessageBox.warning(self, "Export Failed", str(exc))
-            return
-        finally:
-            progress.close()
-        self.statusBar().showMessage("Dot book PDF exported", 3000)
+        dot_count = len([dot for dot in self.project.dots if options.section_filter == "All" or dot.section == options.section_filter])
+        self.preview_pdf_export(
+            "Dot Book PDF",
+            "dot_book.pdf",
+            max(1, dot_count),
+            lambda path, progress_callback: export_dot_book_pdf(
+                path,
+                self.project,
+                progress_callback=progress_callback,
+                options=options,
+            ),
+        )
 
     def export_staff_packet_pdf(self) -> None:
-        path, _ = QFileDialog.getSaveFileName(
-            self,
-            "Export Staff Packet PDF",
-            str(self.project_dir / "staff_packet.pdf"),
-            "PDF (*.pdf)",
+        options = self.print_template_options(
+            "Staff Packet Options",
+            default_title="",
+            include_warning_option=True,
         )
-        if not path:
+        if not options:
             return
+        self.preview_pdf_export(
+            "Staff Packet PDF",
+            "staff_packet.pdf",
+            len(self.project.sets) + 2,
+            lambda path, progress_callback: export_staff_packet_pdf(
+                path,
+                self.project,
+                self.project_dir,
+                progress_callback=progress_callback,
+                options=options,
+            ),
+        )
 
-        progress = QProgressDialog("Preparing staff packet PDF...", None, 0, max(1, len(self.project.sets)), self)
-        progress.setWindowTitle("Exporting Staff Packet PDF")
+    def export_section_packet_pdf(self) -> None:
+        sections = sorted({dot.section for dot in self.project.dots if dot.section})
+        if not sections:
+            QMessageBox.information(self, "No Sections", "No section names are assigned to marchers yet.")
+            return
+        section, ok = QInputDialog.getItem(self, "Section Packet", "Section", sections, 0, False)
+        if not ok or not section:
+            return
+        options = self.print_template_options(
+            "Section Packet Options",
+            default_title=f"{section} Section Packet",
+            force_section=section,
+            include_warning_option=True,
+        )
+        if not options:
+            return
+        safe_section = "".join(character if character.isalnum() else "_" for character in section).strip("_") or "section"
+        self.preview_pdf_export(
+            "Section Packet PDF",
+            f"{safe_section}_packet.pdf",
+            len(self.project.sets) + 2,
+            lambda path, progress_callback: export_staff_packet_pdf(
+                path,
+                self.project,
+                self.project_dir,
+                progress_callback=progress_callback,
+                options=options,
+            ),
+        )
+
+    def export_coordinate_summary_pdf(self) -> None:
+        options = self.print_template_options(
+            "Coordinate Summary Options",
+            default_title=f"{self.project.metadata.show_title} - Coordinate Summary",
+            allow_section=True,
+        )
+        if not options:
+            return
+        self.preview_pdf_export(
+            "Coordinate Summary PDF",
+            "coordinate_summary.pdf",
+            max(1, len(self.project.sets)),
+            lambda path, progress_callback: export_coordinate_summary_pdf(
+                path,
+                self.project,
+                progress_callback=progress_callback,
+                options=options,
+            ),
+        )
+
+    def export_batch_profile(self) -> None:
+        folder = QFileDialog.getExistingDirectory(self, "Export Batch Profile", str(self.project_dir))
+        if not folder:
+            return
+        output_dir = Path(folder)
+        progress = QProgressDialog("Starting batch export...", None, 0, 5, self)
+        progress.setWindowTitle("Batch Export")
         progress.setWindowModality(Qt.WindowModality.ApplicationModal)
         progress.setMinimumDuration(0)
         progress.setAutoClose(False)
         progress.setAutoReset(False)
         progress.show()
 
-        def update_progress(stage: str, current: int, total: int) -> None:
-            progress.setLabelText(stage)
-            progress.setMaximum(max(1, total))
-            progress.setValue(min(current, total))
+        def set_step(label: str, value: int) -> None:
+            progress.setLabelText(label)
+            progress.setValue(value)
             QApplication.processEvents()
 
         try:
-            export_staff_packet_pdf(Path(path), self.project, self.project_dir, progress_callback=update_progress)
+            set_step("Exporting staff packet...", 0)
+            export_staff_packet_pdf(output_dir / "staff_packet.pdf", self.project, self.project_dir)
+            set_step("Exporting dot books...", 1)
+            export_dot_book_pdf(output_dir / "dot_book.pdf", self.project, options=PrintTemplateOptions(compact=True))
+            set_step("Exporting coordinate summary...", 2)
+            export_coordinate_summary_pdf(output_dir / "coordinate_summary.pdf", self.project, options=PrintTemplateOptions(compact=True))
+            set_step("Exporting coordinate CSV...", 3)
+            export_coordinate_csv(output_dir / "coordinates.csv", self.project)
+            set_step("Exporting project zip...", 4)
+            export_project_zip(self.project_dir, output_dir / f"{self.project_dir.name}.zip", self.project)
+            set_step("Batch export complete", 5)
         except Exception as exc:
-            QMessageBox.warning(self, "Export Failed", str(exc))
+            QMessageBox.warning(self, "Batch Export Failed", str(exc))
             return
         finally:
             progress.close()
-        self.statusBar().showMessage("Staff packet PDF exported", 3000)
+        self.statusBar().showMessage("Batch export complete", 3500)
+
+    def choose_mp4_options(self) -> Mp4ExportOptions | None:
+        dialog = QDialog(self)
+        dialog.setWindowTitle("MP4 Export Options")
+        dialog.setModal(True)
+        layout = QVBoxLayout(dialog)
+        form = QFormLayout()
+        resolution_combo = QComboBox()
+        for label, width, height in (
+            ("1080p - 1920 x 1080", 1920, 1080),
+            ("1440p - 2560 x 1440", 2560, 1440),
+            ("4K - 3840 x 2160", 3840, 2160),
+        ):
+            resolution_combo.addItem(label, (width, height))
+        quality_combo = QComboBox()
+        for label, crf, preset in (
+            ("High quality (CRF 18)", 18, "slow"),
+            ("Very high quality (CRF 14)", 14, "slow"),
+            ("Draft / faster (CRF 24)", 24, "medium"),
+        ):
+            quality_combo.addItem(label, (crf, preset))
+        encoder_combo = QComboBox()
+        encoder_combo.addItem("Auto - best available", "auto")
+        encoder_combo.addItem("H.264 - libx264", "libx264")
+        encoder_combo.addItem("MPEG-4 - compatibility fallback", "mpeg4")
+        fps_input = QSpinBox()
+        fps_input.setRange(24, 60)
+        fps_input.setValue(30)
+        title_splash = QCheckBox("Show title splash at start")
+        form.addRow("Resolution", resolution_combo)
+        form.addRow("Quality", quality_combo)
+        form.addRow("Video Encoder", encoder_combo)
+        form.addRow("Frames Per Second", fps_input)
+        form.addRow("Title Splash", title_splash)
+        layout.addLayout(form)
+        buttons = QHBoxLayout()
+        cancel_button = QPushButton("Cancel")
+        export_button = QPushButton("Export")
+        cancel_button.clicked.connect(dialog.reject)
+        export_button.clicked.connect(dialog.accept)
+        buttons.addStretch()
+        buttons.addWidget(cancel_button)
+        buttons.addWidget(export_button)
+        layout.addLayout(buttons)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return None
+        width, height = resolution_combo.currentData()
+        crf, preset = quality_combo.currentData()
+        return Mp4ExportOptions(
+            fps=fps_input.value(),
+            size=QSize(width, height),
+            crf=crf,
+            preset=preset,
+            video_encoder=str(encoder_combo.currentData()),
+            title_splash=title_splash.isChecked(),
+        )
 
     def export_video(self) -> None:
         path, _ = QFileDialog.getSaveFileName(self, "Export MP4", str(self.project_dir / "show.mp4"), "MP4 (*.mp4)")
@@ -5579,9 +6027,12 @@ class MainWindow(QMainWindow):
         if not ffmpeg_path:
             QMessageBox.warning(self, "Export Failed", "Select ffmpeg.exe first.")
             return
+        options = self.choose_mp4_options()
+        if not options:
+            return
         previous_set_index = self.set_index
         previous_count = self.current_count
-        progress = QProgressDialog("Preparing MP4 export...", "Cancel", 0, 100, self)
+        progress = QProgressDialog("Preparing MP4 export...", "Cancel", 0, 1000, self)
         progress.setWindowTitle("Exporting MP4")
         progress.setWindowModality(Qt.WindowModality.ApplicationModal)
         progress.setMinimumDuration(0)
@@ -5595,29 +6046,73 @@ class MainWindow(QMainWindow):
             progress.setValue(min(current, total))
             QApplication.processEvents()
 
+        temp_dir = tempfile.TemporaryDirectory(prefix="drill_pirate_mp4_frames_")
+        frames_dir = Path(temp_dir.name)
         try:
-            export_mp4(
+            frame_result = render_mp4_frames(
                 self.field,
                 self.project_dir,
-                Path(path),
+                frames_dir,
                 self.project,
-                ffmpeg_path=ffmpeg_path,
+                options=options,
                 progress_callback=update_progress,
                 cancel_callback=progress.wasCanceled,
             )
         except ExportCancelled:
+            progress.close()
+            temp_dir.cleanup()
             self.statusBar().showMessage("MP4 export cancelled", 3000)
             return
         except Exception as exc:
+            progress.close()
+            temp_dir.cleanup()
             QMessageBox.warning(self, "Export Failed", str(exc))
             return
         finally:
-            progress.close()
             self.set_index = min(previous_set_index, len(self.project.sets) - 1)
             self.populate_sets()
             self.sync_timeline()
             self.set_count(previous_count, seek_audio=False)
-        self.statusBar().showMessage("MP4 exported", 3000)
+        if progress.wasCanceled():
+            progress.close()
+            temp_dir.cleanup()
+            self.statusBar().showMessage("MP4 export cancelled", 3000)
+            return
+
+        thread = Mp4EncodeThread(frames_dir, Path(path), frame_result, ffmpeg_path, options, self)
+        self._active_mp4_thread = thread
+        self._active_mp4_temp_dir = temp_dir
+        self._active_mp4_progress = progress
+        progress.canceled.connect(thread.request_cancel)
+        thread.progress_changed.connect(update_progress)
+
+        def cleanup_mp4_export() -> None:
+            progress.close()
+            if getattr(self, "_active_mp4_temp_dir", None) is temp_dir:
+                temp_dir.cleanup()
+                self._active_mp4_temp_dir = None
+            if getattr(self, "_active_mp4_thread", None) is thread:
+                self._active_mp4_thread = None
+            if getattr(self, "_active_mp4_progress", None) is progress:
+                self._active_mp4_progress = None
+            thread.deleteLater()
+
+        def complete_mp4_export() -> None:
+            cleanup_mp4_export()
+            self.statusBar().showMessage("MP4 exported", 3000)
+
+        def cancel_mp4_export() -> None:
+            cleanup_mp4_export()
+            self.statusBar().showMessage("MP4 export cancelled", 3000)
+
+        def fail_mp4_export(message: str) -> None:
+            cleanup_mp4_export()
+            QMessageBox.warning(self, "Export Failed", message)
+
+        thread.export_completed.connect(complete_mp4_export)
+        thread.export_cancelled.connect(cancel_mp4_export)
+        thread.export_failed.connect(fail_mp4_export)
+        thread.start()
 
     def resizeEvent(self, event) -> None:  # type: ignore[override]
         super().resizeEvent(event)

@@ -17,9 +17,17 @@ from PySide6.QtWidgets import (
     QGraphicsTextItem,
     QGraphicsView,
     QMenu,
+    QStyle,
 )
 
+from drill_writer.core.coordinates import (
+    BACK_HASH_YARDS,
+    FIELD_HALF_HEIGHT_YARDS,
+    FIELD_HALF_WIDTH_YARDS,
+    FRONT_HASH_YARDS,
+)
 from drill_writer.core.models import Dot, DrillProject, Prop, prop_default_state
+from drill_writer.ui.appearance import draw_dot_symbol, generated_prop_pixmap, normalize_dot_symbol, preferred_dot_symbol
 
 
 class EditorTool(str, Enum):
@@ -41,10 +49,12 @@ class EditorTool(str, Enum):
 
 
 class DotItem(QGraphicsEllipseItem):
-    def __init__(self, dot: Dot, scale: float) -> None:
+    def __init__(self, dot: Dot, scale: float, symbol: str) -> None:
         radius = 0.34 * scale
         super().__init__(-radius, -radius, radius * 2, radius * 2)
         self.dot_id = dot.id
+        self.symbol = normalize_dot_symbol(symbol)
+        self.scale_factor = scale
         self.setBrush(QColor(dot.color))
         self.setPen(QPen(QColor("#1d2128"), 0.08 * scale))
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, True)
@@ -55,6 +65,52 @@ class DotItem(QGraphicsEllipseItem):
         self.label.setDefaultTextColor(QColor("#1c2430"))
         self.label.setScale(0.085 * scale)
         self.label.setPos(radius + 0.08 * scale, -radius - 0.04 * scale)
+
+    def set_symbol(self, symbol: str) -> None:
+        self.symbol = normalize_dot_symbol(symbol)
+        self.update()
+
+    def paint(self, painter: QPainter, option, widget=None) -> None:  # type: ignore[override]
+        selected = bool(option.state & QStyle.StateFlag.State_Selected)
+        draw_dot_symbol(
+            painter,
+            self.rect().center(),
+            self.rect().width() / 2,
+            self.brush().color(),
+            self.symbol,
+            outline_color=self.pen().color(),
+            outline_width=max(0.7, self.pen().widthF()),
+            selected=selected,
+        )
+
+
+class DotSymbolPreviewItem(QGraphicsEllipseItem):
+    def __init__(
+        self,
+        radius: float,
+        color: QColor,
+        symbol: str,
+        outline_color: QColor,
+        outline_width: float,
+    ) -> None:
+        super().__init__(-radius, -radius, radius * 2, radius * 2)
+        self.symbol = normalize_dot_symbol(symbol)
+        self.preview_color = color
+        self.outline_color = outline_color
+        self.outline_width = outline_width
+        self.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+        self.setZValue(9)
+
+    def paint(self, painter: QPainter, _option, _widget=None) -> None:  # type: ignore[override]
+        draw_dot_symbol(
+            painter,
+            self.rect().center(),
+            self.rect().width() / 2,
+            self.preview_color,
+            self.symbol,
+            outline_color=self.outline_color,
+            outline_width=self.outline_width,
+        )
 
 
 class PropItem(QGraphicsPixmapItem):
@@ -192,6 +248,7 @@ class FieldView(QGraphicsView):
         self.snap_threshold = 0.85
         self.visible_section = "All"
         self.visible_layer = "All"
+        self.dot_symbol = preferred_dot_symbol()
         self._formation_callback: Callable[[EditorTool], None] | None = None
         self._pan_start: QPointF | None = None
         self._drag_start_positions: dict[str, tuple[float, float]] = {}
@@ -209,6 +266,25 @@ class FieldView(QGraphicsView):
 
     def set_canvas_theme(self, mode: str) -> None:
         self.setBackgroundBrush(QColor("#eef2f7" if mode == "light" else "#111318"))
+
+    def set_dot_symbol(self, symbol: str) -> None:
+        normalized = normalize_dot_symbol(symbol)
+        if normalized == self.dot_symbol:
+            return
+        selected_ids = self.selected_dot_ids()
+        current_positions = {
+            dot_id: self.scene_to_field(item.pos())
+            for dot_id, item in self.dot_items.items()
+        }
+        self.dot_symbol = normalized
+        self.rebuild_dots()
+        if current_positions:
+            self.set_positions(current_positions)
+        for dot_id in selected_ids:
+            item = self.dot_items.get(dot_id)
+            if item:
+                item.setSelected(True)
+        self.selection_changed.emit(self.selected_dot_ids())
 
     def set_project(self, project: DrillProject, project_dir: Path | None = None) -> None:
         self.project = project
@@ -329,12 +405,14 @@ class FieldView(QGraphicsView):
                 line.setZValue(15)
                 self.scene.addItem(line)
                 self.preview_items.append(line)
-            target_item = QGraphicsEllipseItem(-radius, -radius, radius * 2, radius * 2)
-            target_item.setBrush(preview_fill)
-            target_item.setPen(QPen(QColor("#fff2a6"), 0.12 * self.scale_factor))
+            target_item = DotSymbolPreviewItem(
+                radius,
+                preview_fill,
+                self.dot_symbol,
+                QColor("#fff2a6"),
+                0.12 * self.scale_factor,
+            )
             target_item.setPos(self.field_to_scene(*target))
-            target_item.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
-            target_item.setZValue(9)
             self.scene.addItem(target_item)
             self.preview_items.append(target_item)
         for kind, position in (handles or {}).items():
@@ -364,12 +442,14 @@ class FieldView(QGraphicsView):
             self.preview_items.append(handle)
         radius = 0.35 * self.scale_factor
         for target in targets.values():
-            target_item = QGraphicsEllipseItem(-radius, -radius, radius * 2, radius * 2)
-            target_item.setBrush(QColor(247, 209, 84, 130))
-            target_item.setPen(QPen(QColor("#fff2a6"), 0.1 * self.scale_factor))
+            target_item = DotSymbolPreviewItem(
+                radius,
+                QColor(247, 209, 84, 130),
+                self.dot_symbol,
+                QColor("#fff2a6"),
+                0.1 * self.scale_factor,
+            )
             target_item.setPos(self.field_to_scene(*target))
-            target_item.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
-            target_item.setZValue(9)
             self.scene.addItem(target_item)
             self.preview_items.append(target_item)
 
@@ -440,7 +520,7 @@ class FieldView(QGraphicsView):
         if not self.project:
             return
         for dot in self.project.dots:
-            item = DotItem(dot, self.scale_factor)
+            item = DotItem(dot, self.scale_factor, self.dot_symbol)
             item.setPos(self.field_to_scene(dot.x, dot.y))
             item.label.setVisible(self.show_labels)
             item.setFlag(
@@ -471,68 +551,161 @@ class FieldView(QGraphicsView):
 
     def load_prop_pixmap(self, prop: Prop) -> QPixmap:
         path = Path(prop.image_file)
+        if not prop.image_file:
+            return generated_prop_pixmap(prop.name, prop.layer)
         if not path.is_absolute() and self.project_dir is not None:
             path = self.project_dir / prop.image_file
         pixmap = QPixmap(str(path))
         if not pixmap.isNull():
             return pixmap
-        fallback = QPixmap(160, 80)
-        fallback.fill(QColor("#d7dde7"))
-        return fallback
+        return generated_prop_pixmap(prop.name, prop.layer)
 
     def draw_field(self) -> None:
         self.scene.clear()
         self.dot_items.clear()
         self.prop_items.clear()
-        width = 120 * self.scale_factor
-        height = 53.333 * self.scale_factor
-        field = QGraphicsRectItem(-width / 2, -height / 2, width, height)
-        field.setBrush(QColor("#f9fbf7"))
-        field.setPen(QPen(QColor("#88939a"), 0.16 * self.scale_factor))
-        field.setZValue(-20)
-        self.scene.addItem(field)
+        scale = self.scale_factor
+        field_half_width = FIELD_HALF_WIDTH_YARDS
+        field_half_height = FIELD_HALF_HEIGHT_YARDS
+        width = field_half_width * 2 * scale
+        height = field_half_height * 2 * scale
 
-        micro_pen = QPen(QColor("#e3e9e8"), 0.018 * self.scale_factor)
-        minor_pen = QPen(QColor("#d3dcda"), 0.035 * self.scale_factor)
-        yard_pen = QPen(QColor("#5d686f"), 0.09 * self.scale_factor)
-        hash_pen = QPen(QColor("#101318"), 0.16 * self.scale_factor)
+        def scene_x(x_yards: float) -> float:
+            return x_yards * scale
 
-        for yard in range(-60, 61):
-            x = yard * self.scale_factor
+        def scene_y(y_yards: float) -> float:
+            return -y_yards * scale
+
+        def add_line(
+            x1: float,
+            y1: float,
+            x2: float,
+            y2: float,
+            pen: QPen,
+            z_value: float = -12,
+        ) -> QGraphicsLineItem:
+            item = self.scene.addLine(scene_x(x1), scene_y(y1), scene_x(x2), scene_y(y2), pen)
+            item.setZValue(z_value)
+            return item
+
+        def add_rect(
+            x1: float,
+            y1: float,
+            x2: float,
+            y2: float,
+            pen: QPen,
+            brush: QColor | Qt.BrushStyle,
+            z_value: float = -18,
+        ) -> QGraphicsRectItem:
+            item = QGraphicsRectItem(scene_x(x1), scene_y(y2), (x2 - x1) * scale, (y2 - y1) * scale)
+            item.setPen(pen)
+            item.setBrush(brush)
+            item.setZValue(z_value)
+            self.scene.addItem(item)
+            return item
+
+        def add_label(
+            text: str,
+            x: float,
+            y: float,
+            size: int = 8,
+            color: str = "#2b3138",
+            rotation: float = 0,
+            weight: QFont.Weight = QFont.Weight.DemiBold,
+            z_value: float = -7,
+        ) -> QGraphicsTextItem:
+            label = self.scene.addText(text, QFont("Arial", size, weight))
+            label.setDefaultTextColor(QColor(color))
+            bounds = label.boundingRect()
+            label.setTransformOriginPoint(bounds.center())
+            label.setRotation(rotation)
+            label.setPos(scene_x(x) - bounds.width() / 2, scene_y(y) - bounds.height() / 2)
+            label.setZValue(z_value)
+            return label
+
+        turf_pen = QPen(QColor("#89939a"), 0.16 * scale)
+        add_rect(-field_half_width, -field_half_height, field_half_width, field_half_height, turf_pen, QColor("#f9fbf7"), -24)
+        add_rect(-60, -field_half_height, -50, field_half_height, QPen(QColor("#b8c2c5"), 0.06 * scale), QColor("#edf3ef"), -23)
+        add_rect(50, -field_half_height, 60, field_half_height, QPen(QColor("#b8c2c5"), 0.06 * scale), QColor("#edf3ef"), -23)
+
+        perimeter_pen = QPen(QColor("#747e85"), 0.08 * scale, Qt.PenStyle.DashLine)
+        add_rect(-65, -31.5, 65, 31.5, perimeter_pen, Qt.BrushStyle.NoBrush, -25)
+
+        micro_pen = QPen(QColor("#e2e9e7"), 0.018 * scale)
+        minor_pen = QPen(QColor("#d3dcda"), 0.034 * scale)
+        yard_pen = QPen(QColor("#66717a"), 0.08 * scale)
+        heavy_pen = QPen(QColor("#28313a"), 0.14 * scale)
+        hash_pen = QPen(QColor("#20262d"), 0.12 * scale)
+        sideline_tick_pen = QPen(QColor("#313a42"), 0.085 * scale)
+        restraining_pen = QPen(QColor("#929aa0"), 0.055 * scale, Qt.PenStyle.DashLine)
+
+        for yard in range(-59, 60):
             if yard % 5 == 0:
                 continue
-            self.scene.addLine(x, -height / 2, x, height / 2, minor_pen if yard % 2 == 0 else micro_pen)
-        horizontal_index = 0
-        y = -26.0
-        while y <= 26.1:
-            y_scene = y * self.scale_factor
-            if abs(y) not in (20.0,):
-                self.scene.addLine(-width / 2, y_scene, width / 2, y_scene, minor_pen if horizontal_index % 2 == 0 else micro_pen)
-            y += 1.0
-            horizontal_index += 1
+            add_line(yard, -field_half_height, yard, field_half_height, micro_pen if yard % 2 else minor_pen, -19)
+        horizontal_y = -26
+        while horizontal_y <= 26:
+            if abs(horizontal_y - FRONT_HASH_YARDS) > 0.08 and abs(horizontal_y - BACK_HASH_YARDS) > 0.08:
+                add_line(-60, horizontal_y, 60, horizontal_y, micro_pen, -20)
+            horizontal_y += 1
 
-        for yard in range(-50, 55, 5):
-            x = yard * self.scale_factor
-            self.scene.addLine(x, -height / 2, x, height / 2, yard_pen)
-            label_text = "50" if yard == 0 else str(50 - abs(yard))
-            for y_pos, rotation in ((-height / 2 + 4, 0), (height / 2 - 28, 180)):
-                label = self.scene.addText(label_text, QFont("Arial", 8, QFont.Weight.DemiBold))
-                label.setDefaultTextColor(QColor("#7d858a"))
-                label.setScale(0.75)
-                label.setRotation(rotation)
-                label.setPos(x - 8, y_pos)
+        for yard in range(-60, 61, 5):
+            pen = heavy_pen if abs(yard) in (50, 60) else yard_pen
+            add_line(yard, -field_half_height, yard, field_half_height, pen, -13)
 
-        for boundary_y in (-height / 2, height / 2):
-            self.scene.addLine(-width / 2, boundary_y, width / 2, boundary_y, QPen(QColor("#5f6b72"), 0.11 * self.scale_factor))
+        add_line(-60, -field_half_height, 60, -field_half_height, heavy_pen, -12)
+        add_line(-60, field_half_height, 60, field_half_height, heavy_pen, -12)
+        add_line(-60, 0, 60, 0, QPen(QColor("#bbc4c8"), 0.045 * scale, Qt.PenStyle.DashLine), -18)
 
-        for hash_y in (-20, 20):
-            y_scene = -hash_y * self.scale_factor
-            for yard in range(-50, 55, 5):
-                x = yard * self.scale_factor
-                self.scene.addLine(x - 0.7 * self.scale_factor, y_scene, x + 0.7 * self.scale_factor, y_scene, hash_pen)
-        midfield_pen = QPen(QColor("#b5bec2"), 0.05 * self.scale_factor, Qt.PenStyle.DashLine)
-        self.scene.addLine(-width / 2, 0, width / 2, 0, midfield_pen)
-        self.scene.setSceneRect(QRectF(-width / 2 - 65, -height / 2 - 48, width + 130, height + 96))
+        hash_half_length = 1 / 3
+        sideline_tick_length = 0.9
+        for yard in range(-49, 50):
+            if yard % 5 == 0:
+                continue
+            add_line(yard, FRONT_HASH_YARDS - hash_half_length, yard, FRONT_HASH_YARDS + hash_half_length, hash_pen, -10)
+            add_line(yard, BACK_HASH_YARDS - hash_half_length, yard, BACK_HASH_YARDS + hash_half_length, hash_pen, -10)
+            add_line(yard, -field_half_height, yard, -field_half_height + sideline_tick_length, sideline_tick_pen, -10)
+            add_line(yard, field_half_height, yard, field_half_height - sideline_tick_length, sideline_tick_pen, -10)
+
+        for hash_y, label_text in ((BACK_HASH_YARDS, "BACK HASH"), (FRONT_HASH_YARDS, "FRONT HASH")):
+            add_line(-50, hash_y, 50, hash_y, QPen(QColor("#98a3a8"), 0.045 * scale, Qt.PenStyle.DashLine), -17)
+            add_label(label_text, 66.5, hash_y, 7, "#1d232b", 0, QFont.Weight.Bold, -6)
+
+        for yard in range(-50, 51, 10):
+            if abs(yard) == 50:
+                label_text = "G"
+            elif yard == 0:
+                label_text = "50"
+            else:
+                label_text = str(50 - abs(yard))
+            add_label(label_text, yard, -21.4, 9, "#3f464c", 0, QFont.Weight.Bold, -6)
+            add_label(label_text, yard, 21.4, 9, "#3f464c", 180, QFont.Weight.Bold, -6)
+
+        add_label("END ZONE", -55, 0, 10, "#2f363c", -90, QFont.Weight.Bold, -6)
+        add_label("END ZONE", 55, 0, 10, "#2f363c", 90, QFont.Weight.Bold, -6)
+        add_label("FRONT", 0, -42.5, 14, "#05070a", 0, QFont.Weight.Black, -6)
+        add_label("BACK", 0, 42.5, 14, "#05070a", 0, QFont.Weight.Black, -6)
+        add_label("SIDE\nONE", -76, 0, 12, "#05070a", 0, QFont.Weight.Black, -6)
+        add_label("SIDE\nTWO", 76, 0, 12, "#05070a", 0, QFont.Weight.Black, -6)
+        add_label("BACK SIDELINE", 70.5, field_half_height, 7, "#11151a", 0, QFont.Weight.Bold, -6)
+        add_label("FRONT SIDELINE", 70.5, -field_half_height, 7, "#11151a", 0, QFont.Weight.Bold, -6)
+
+        for side, y_start, y_end, label_y, label_rotation in (
+            ("BACK", field_half_height + 3, field_half_height + 7.5, field_half_height + 5.2, 0),
+            ("FRONT", -field_half_height - 7.5, -field_half_height - 3, -field_half_height - 5.2, 0),
+        ):
+            add_line(-50, y_start, 50, y_start, restraining_pen, -15)
+            add_line(-50, y_end, 50, y_end, restraining_pen, -15)
+            add_line(-50, y_start, -50, y_end, restraining_pen, -15)
+            add_line(50, y_start, 50, y_end, restraining_pen, -15)
+            add_label("COACHES AREA", 0, label_y, 7, "#333a40", label_rotation, QFont.Weight.Bold, -6)
+            bench_y1 = field_half_height + 8.2 if side == "BACK" else -field_half_height - 11.8
+            bench_y2 = field_half_height + 11.8 if side == "BACK" else -field_half_height - 8.2
+            add_rect(-30, bench_y1, 30, bench_y2, QPen(QColor("#565f66"), 0.08 * scale), Qt.BrushStyle.NoBrush, -15)
+            add_label("BENCH", 0, (bench_y1 + bench_y2) / 2, 7, "#333a40", 0, QFont.Weight.Bold, -6)
+            add_label("TEAM\nBOX", 34, (bench_y1 + bench_y2) / 2, 6, "#333a40", 0, QFont.Weight.Bold, -6)
+
+        self.scene.setSceneRect(QRectF(-width / 2 - 300, -height / 2 - 210, width + 600, height + 420))
 
     def field_to_scene(self, x: float, y: float) -> QPointF:
         return QPointF(x * self.scale_factor, -y * self.scale_factor)
