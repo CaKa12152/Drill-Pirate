@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 from PySide6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QDialog,
     QDialogButtonBox,
     QFormLayout,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QPushButton,
     QTabWidget,
     QVBoxLayout,
@@ -27,6 +29,8 @@ class PreferencesDialog(QDialog):
         self,
         current_theme: str,
         current_audio_device_id: str = DEFAULT_AUDIO_OUTPUT_DEVICE_ID,
+        current_update_channel: str = "stable",
+        current_tooltips_enabled: bool = True,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -36,7 +40,14 @@ class PreferencesDialog(QDialog):
         self.current_audio_device_id = normalize_audio_output_device_id(current_audio_device_id)
 
         layout = QVBoxLayout(self)
+        self.search_input = QLineEdit()
+        self.search_input.setPlaceholderText("Search settings...")
+        self.search_status = QLabel("")
+        self.search_status.setWordWrap(True)
         tabs = QTabWidget()
+        self.tabs = tabs
+        layout.addWidget(self.search_input)
+        layout.addWidget(self.search_status)
         layout.addWidget(tabs)
 
         preferences_tab = QWidget()
@@ -45,9 +56,17 @@ class PreferencesDialog(QDialog):
         self.theme_combo.addItem("Dark Mode", "dark")
         self.theme_combo.addItem("Light Mode", "light")
         self.theme_combo.setCurrentIndex(1 if current_theme == "light" else 0)
+        self.update_channel_combo = QComboBox()
+        self.update_channel_combo.addItem("Stable Releases", "stable")
+        self.update_channel_combo.addItem("Beta / Pre-Releases", "beta")
+        self.update_channel_combo.setCurrentIndex(1 if current_update_channel == "beta" else 0)
+        self.tooltips_checkbox = QCheckBox("Show hover tooltips and tool hints")
+        self.tooltips_checkbox.setChecked(current_tooltips_enabled)
         note = QLabel("Changes apply immediately and are saved for the next launch.")
         note.setWordWrap(True)
         form.addRow("Appearance", self.theme_combo)
+        form.addRow("Tooltips", self.tooltips_checkbox)
+        form.addRow("Update Channel", self.update_channel_combo)
         form.addRow("", note)
         tabs.addTab(preferences_tab, "Preferences")
 
@@ -73,6 +92,7 @@ class PreferencesDialog(QDialog):
         devices_layout.addStretch(1)
         tabs.addTab(devices_tab, "Devices")
         self.refresh_audio_devices()
+        self.search_input.textChanged.connect(self.filter_settings)
 
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok
@@ -88,11 +108,56 @@ class PreferencesDialog(QDialog):
 
         self._applied_theme = current_theme
 
+    def filter_settings(self, text: str) -> None:
+        query = text.strip().lower()
+        if not query:
+            self.search_status.setText("")
+            return
+        preferences_terms = (
+            "appearance",
+            "theme",
+            "dark",
+            "light",
+            "update",
+            "stable",
+            "beta",
+            "release",
+            "tooltip",
+            "tooltips",
+            "hint",
+            "hints",
+            "help",
+        )
+        device_terms = (
+            "audio",
+            "device",
+            "output",
+            "speaker",
+            "headphone",
+            "windows",
+            "default",
+        )
+        if any(term in query or query in term for term in preferences_terms):
+            self.tabs.setCurrentIndex(0)
+            self.search_status.setText("Showing matching settings in Preferences.")
+            return
+        if any(term in query or query in term for term in device_terms):
+            self.tabs.setCurrentIndex(1)
+            self.search_status.setText("Showing matching settings in Devices.")
+            return
+        self.search_status.setText("No direct setting match. Try theme, update, audio, device, or output.")
+
     def selected_theme(self) -> str:
         return str(self.theme_combo.currentData() or "dark")
 
     def selected_audio_output_device_id(self) -> str:
         return normalize_audio_output_device_id(self.audio_output_combo.currentData())
+
+    def selected_update_channel(self) -> str:
+        return "beta" if self.update_channel_combo.currentData() == "beta" else "stable"
+
+    def selected_tooltips_enabled(self) -> bool:
+        return self.tooltips_checkbox.isChecked()
 
     def refresh_audio_devices(self) -> None:
         selected_id = self.selected_audio_output_device_id() if hasattr(self, "audio_output_combo") else self.current_audio_device_id
@@ -113,6 +178,12 @@ class PreferencesDialog(QDialog):
         handler = getattr(parent, "apply_theme", None)
         if callable(handler):
             handler(self._applied_theme)
+        update_handler = getattr(parent, "apply_update_channel", None)
+        if callable(update_handler):
+            update_handler(self.selected_update_channel())
+        tooltip_handler = getattr(parent, "apply_tooltips_enabled", None)
+        if callable(tooltip_handler):
+            tooltip_handler(self.selected_tooltips_enabled())
         audio_handler = getattr(parent, "apply_audio_output_device", None)
         if callable(audio_handler):
             self.current_audio_device_id = self.selected_audio_output_device_id()

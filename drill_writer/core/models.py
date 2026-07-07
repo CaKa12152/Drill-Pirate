@@ -279,6 +279,7 @@ class DotConstraint:
     constraint_type: str
     dot_ids: list[str]
     spacing: float = 0.0
+    metadata: dict[str, Any] = field(default_factory=dict)
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -286,6 +287,7 @@ class DotConstraint:
             "constraint_type": self.constraint_type,
             "dot_ids": list(self.dot_ids),
             "spacing": self.spacing,
+            "metadata": dict(self.metadata),
         }
 
     @classmethod
@@ -295,6 +297,7 @@ class DotConstraint:
             constraint_type=str(payload.get("constraint_type", "line")),
             dot_ids=[str(dot_id) for dot_id in payload.get("dot_ids", [])],
             spacing=float(payload.get("spacing", 0)),
+            metadata=dict(payload.get("metadata", {})) if isinstance(payload.get("metadata", {}), dict) else {},
         )
 
 

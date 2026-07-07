@@ -60,6 +60,13 @@ When an update is available:
 
 After a successful update, the next run shows the release log pulled from the GitHub latest release description. The release-log dialog has `Ok` and `Dont Show Again`.
 
+Update settings:
+
+- `Stable Releases` checks GitHub latest release.
+- `Beta / Pre-Releases` checks recent GitHub releases and can offer pre-release builds.
+
+ZIP updates are size-checked, optionally SHA-256 checked when a checksum asset is published, validated as ZIP files, and installed with rollback if the copy step fails.
+
 ## Source Setup
 
 Use this if you are developing or testing directly from the repository.
@@ -83,7 +90,7 @@ Expected output:
 
 ```text
 dist\Drill Pirate\Drill Pirate.exe
-dist\Drill Pirate Alpha 2.2.1 Windows.zip
+dist\Drill Pirate Alpha 2.3.0 Windows.zip
 ```
 
 Give testers the ZIP or the whole `dist\Drill Pirate` folder.

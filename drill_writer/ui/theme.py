@@ -15,6 +15,13 @@ QMenuBar, QMenu {
 QMenu::item:selected {
     background: #303847;
 }
+QToolTip {
+    background: #20242d;
+    color: #f2f4f8;
+    border: 1px solid #f7c94a;
+    border-radius: 5px;
+    padding: 6px 8px;
+}
 QToolBar, QStatusBar {
     background: #111318;
     border: 0;
@@ -189,6 +196,13 @@ QMenuBar, QMenu {
 }
 QMenu::item:selected {
     background: #dce7ff;
+}
+QToolTip {
+    background: #ffffff;
+    color: #18202b;
+    border: 1px solid #2f6fed;
+    border-radius: 5px;
+    padding: 6px 8px;
 }
 QToolBar, QStatusBar {
     background: #ffffff;

@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
 from drill_writer.core.models import DrillProject
 from drill_writer.core.plugin_manager import PluginManager, PluginManifest, plugin_library_dir
 from drill_writer.core.project_io import (
+    ProjectLoadError,
     create_project_folder,
     discover_projects,
     load_project,
@@ -70,7 +71,7 @@ class SplashPage(QWidget):
         title = QLabel("Drill Pirate")
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         title.setStyleSheet("font-size: 48px; font-weight: 850; letter-spacing: 1px; color: #f7c94a;")
-        version = QLabel("Alpha Version 2.2.1")
+        version = QLabel("Alpha Version 2.3.0")
         version.setAlignment(Qt.AlignmentFlag.AlignCenter)
         version.setStyleSheet("font-size: 16px; color: #f4f4f1;")
         tagline = QLabel("Professional drill design for the field")
@@ -322,6 +323,43 @@ class ProjectCard(QFrame):
         super().mousePressEvent(event)
 
 
+class RecoveryProjectCard(QFrame):
+    clicked = Signal(Path)
+
+    def __init__(self, project_dir: Path, error: Exception) -> None:
+        super().__init__()
+        self.project_dir = project_dir
+        self.setObjectName("ProjectCard")
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setMinimumSize(300, 220)
+        self.setMaximumWidth(330)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(9)
+        preview = FieldPreview(None, project_dir)
+        title = QLabel(project_dir.name.replace("_", " "))
+        title.setStyleSheet("font-size: 14px; font-weight: 700; color: #f7d154;")
+        title.setWordWrap(True)
+        detail = QLabel("Project needs recovery")
+        detail.setStyleSheet("color: #ff9f8a; font-size: 12px; font-weight: 650;")
+        message = QLabel(str(error))
+        message.setStyleSheet("color: #9da7b8; font-size: 10px;")
+        message.setWordWrap(True)
+        message.setMaximumHeight(42)
+        layout.addWidget(preview)
+        layout.addWidget(title)
+        layout.addWidget(detail)
+        layout.addWidget(message)
+
+    def mousePressEvent(self, event) -> None:  # type: ignore[override]
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit(self.project_dir)
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+
 class CreateProjectCard(QFrame):
     clicked = Signal()
 
@@ -433,7 +471,7 @@ class StartupPage(QWidget):
         title = QLabel("Drill Pirate")
         title.setObjectName("HomeTitle")
         title.setStyleSheet("font-size: 34px; font-weight: 850; color: #f7c94a;")
-        version = QLabel("Alpha Version 2.2.1")
+        version = QLabel("Alpha Version 2.3.0")
         version.setStyleSheet("font-size: 12px; color: #f1f1ee;")
         path_label = QLabel(f"Project library · {self.library_dir}")
         path_label.setStyleSheet("color: #8d98aa;")
@@ -529,9 +567,11 @@ class StartupPage(QWidget):
         for index, project_dir in enumerate(discover_projects(self.library_dir), start=1):
             try:
                 project = load_project(project_dir)
-            except Exception:
-                continue
-            card = ProjectCard(project_dir, project)
+                card = ProjectCard(project_dir, project)
+            except ProjectLoadError as exc:
+                card = RecoveryProjectCard(project_dir, exc)
+            except Exception as exc:
+                card = RecoveryProjectCard(project_dir, exc)
             card.clicked.connect(self.project_ready.emit)
             row = index // col_count
             col = index % col_count

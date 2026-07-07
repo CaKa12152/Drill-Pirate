@@ -18,7 +18,7 @@ from drill_writer.core.analysis import detect_path_warnings
 from drill_writer.core.animation import interpolate_project, interpolate_props
 from drill_writer.core.coordinates import format_drill_coordinate
 from drill_writer.core.models import DrillProject
-from drill_writer.core.project_io import save_project
+from drill_writer.core.project_io import BACKUP_DIR_NAME, save_project
 from drill_writer.ui.field_view import FieldView
 
 
@@ -63,9 +63,11 @@ def ensure_export_font() -> str:
 
 
 def export_project_zip(project_dir: Path, output_path: Path, project: DrillProject) -> None:
-    save_project(project_dir, project)
+    save_project(project_dir, project, backup_reason="project_zip")
     with zipfile.ZipFile(output_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
         for path in project_dir.rglob("*"):
+            if BACKUP_DIR_NAME in path.relative_to(project_dir).parts:
+                continue
             if path.is_file():
                 archive.write(path, path.relative_to(project_dir))
 

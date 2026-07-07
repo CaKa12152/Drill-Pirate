@@ -293,6 +293,16 @@ Alignment tools include:
 - Fit form to prop.
 - Scale form.
 
+Constraint tools include:
+
+- Create Line Constraint.
+- Create Pivot Constraint.
+- Create Arc Constraint.
+- Create Block Constraint.
+- Apply Constraints.
+
+Active constraints are enforced while constrained marchers are moved.
+
 ## Path Safety
 
 Path analysis warns about:
@@ -300,6 +310,7 @@ Path analysis warns about:
 - Close spacing.
 - Crossing paths.
 - High travel speed.
+- Conflict-heavy counts in the timeline.
 
 Auto-plan selected paths can add basic route anchors, but it is not a full commercial-grade collision solver yet. Review all automated results visually before relying on them.
 
@@ -330,7 +341,7 @@ Tabs:
 
 | Tab | Purpose |
 | --- | --- |
-| Preferences | Switch between Dark Mode and Light Mode. |
+| Preferences | Switch Dark/Light Mode and choose Stable Releases or Beta / Pre-Releases update channel. |
 | Devices | Choose Windows Default or a specific audio output device. |
 
 Use `Refresh` in the Devices tab after plugging in headphones or changing audio hardware.
@@ -346,6 +357,29 @@ Documents\Drill Pirate Plugins
 ```
 
 Plugins can add form tools, commands, buttons, styles, and UI changes. See [Plugin Development](PLUGIN_DEVELOPMENT.md).
+
+## Data Safety and Recovery
+
+Drill Pirate protects project data with:
+
+- Atomic JSON saves.
+- Versioned save/autosave backups.
+- Project schema migrations.
+- Corrupt-project detection.
+- Recovery cards on the home screen.
+- `File > Restore Previous Save`.
+
+If a project cannot open, Drill Pirate offers to restore the newest backup or export a bug report bundle.
+
+## Crash Reports
+
+Use:
+
+```text
+Help > Export Bug Report Bundle
+```
+
+The bundle includes recent crash logs, diagnostics, and the current project folder. Send this ZIP when reporting project-specific bugs.
 
 ## Recommended Workflow
 

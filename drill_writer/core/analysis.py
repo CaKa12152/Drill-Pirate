@@ -17,6 +17,22 @@ class PathWarning:
     count: float = 0.0
 
 
+@dataclass(slots=True)
+class ConflictTimelineEntry:
+    set_index: int
+    set_name: str
+    count: float
+    spacing_conflicts: int = 0
+    speed_conflicts: int = 0
+    crossing_conflicts: int = 0
+    worst_spacing: float = 999.0
+    fastest_yards_per_count: float = 0.0
+
+    @property
+    def total(self) -> int:
+        return self.spacing_conflicts + self.speed_conflicts + self.crossing_conflicts
+
+
 def detect_path_warnings(
     project: DrillProject,
     set_index: int,
@@ -38,10 +54,7 @@ def detect_path_warnings(
         + (drill_set.end_count - drill_set.start_count) * sample_index / max(1, samples - 1)
         for sample_index in range(samples)
     ]
-    sampled_positions = [
-        interpolate_project(project, set_index, count)
-        for count in sampled_counts
-    ]
+    sampled_positions = [interpolate_project(project, set_index, count) for count in sampled_counts]
 
     for first_index, dot_a in enumerate(all_dot_ids):
         for dot_b in all_dot_ids[first_index + 1 :]:
@@ -82,7 +95,7 @@ def detect_path_warnings(
             for dot_id in all_dot_ids
         }
 
-        check_crossings = len(all_dot_ids) <= 160 or dot_ids is not None
+        check_crossings = len(all_dot_ids) <= 450 or dot_ids is not None
         if check_crossings:
             for first_index, dot_a in enumerate(all_dot_ids):
                 for dot_b in all_dot_ids[first_index + 1 :]:
@@ -115,7 +128,7 @@ def detect_path_warnings(
                         "speed",
                         set_index,
                         drill_set.name,
-                        f"{dot_id} travels {yards_per_count:.2f} yd/count",
+                        f"{dot_id} travels {yards_per_count:.2f} yd/count (stride/speed risk)",
                         dot_id,
                         "",
                         drill_set.start_count,
@@ -125,6 +138,82 @@ def detect_path_warnings(
                     return warnings
 
     return warnings
+
+
+def build_conflict_timeline(
+    project: DrillProject,
+    set_index: int,
+    min_spacing: float = 1.25,
+    max_yards_per_count: float = 4.0,
+    samples: int = 24,
+    dot_ids: list[str] | None = None,
+) -> list[ConflictTimelineEntry]:
+    if not project.sets or not 0 <= set_index < len(project.sets):
+        return []
+    drill_set = project.sets[set_index]
+    all_dot_ids = [dot.id for dot in project.dots]
+    selected_dot_ids = set(dot_ids or all_dot_ids)
+    sampled_counts = [
+        drill_set.start_count
+        + (drill_set.end_count - drill_set.start_count) * sample_index / max(1, samples - 1)
+        for sample_index in range(samples)
+    ]
+    sampled_positions = [interpolate_project(project, set_index, count) for count in sampled_counts]
+    entries = [
+        ConflictTimelineEntry(set_index=set_index, set_name=drill_set.name, count=count)
+        for count in sampled_counts
+    ]
+
+    for sample_index, positions in enumerate(sampled_positions):
+        entry = entries[sample_index]
+        for first_index, dot_a in enumerate(all_dot_ids):
+            for dot_b in all_dot_ids[first_index + 1 :]:
+                if dot_a not in selected_dot_ids and dot_b not in selected_dot_ids:
+                    continue
+                current_distance = distance(positions[dot_a], positions[dot_b])
+                entry.worst_spacing = min(entry.worst_spacing, current_distance)
+                if current_distance < min_spacing:
+                    entry.spacing_conflicts += 1
+
+    for sample_index in range(1, len(sampled_positions)):
+        previous_count = sampled_counts[sample_index - 1]
+        current_count = sampled_counts[sample_index]
+        count_span = max(0.0001, current_count - previous_count)
+        entry = entries[sample_index]
+        previous_positions = sampled_positions[sample_index - 1]
+        current_positions = sampled_positions[sample_index]
+        for dot_id in all_dot_ids:
+            if dot_id not in selected_dot_ids:
+                continue
+            yards_per_count = distance(previous_positions[dot_id], current_positions[dot_id]) / count_span
+            entry.fastest_yards_per_count = max(entry.fastest_yards_per_count, yards_per_count)
+            if yards_per_count > max_yards_per_count:
+                entry.speed_conflicts += 1
+
+    if set_index > 0 and (len(all_dot_ids) <= 450 or dot_ids is not None):
+        previous = project.sets[set_index - 1]
+        path_by_dot = {
+            dot_id: sample_transition_path(
+                previous.dot_positions.get(dot_id, project.dot_by_id(dot_id) and (project.dot_by_id(dot_id).x, project.dot_by_id(dot_id).y) or (0, 0)),
+                drill_set.dot_positions.get(dot_id, project.dot_by_id(dot_id) and (project.dot_by_id(dot_id).x, project.dot_by_id(dot_id).y) or (0, 0)),
+                drill_set.path_anchors.get(dot_id, []),
+                drill_set.path_controls.get(dot_id, []),
+                samples=max(12, samples),
+            )
+            for dot_id in all_dot_ids
+        }
+        crossing_count = 0
+        for first_index, dot_a in enumerate(all_dot_ids):
+            for dot_b in all_dot_ids[first_index + 1 :]:
+                if dot_a not in selected_dot_ids and dot_b not in selected_dot_ids:
+                    continue
+                if polylines_cross(path_by_dot[dot_a], path_by_dot[dot_b]):
+                    crossing_count += 1
+        if crossing_count and entries:
+            midpoint = entries[len(entries) // 2]
+            midpoint.crossing_conflicts = crossing_count
+
+    return [entry for entry in entries if entry.total > 0]
 
 
 def auto_plan_paths(
@@ -293,6 +382,13 @@ def polylines_cross(
 ) -> bool:
     for first_index in range(len(first) - 1):
         for second_index in range(len(second) - 1):
+            if not segment_bounds_overlap(
+                first[first_index],
+                first[first_index + 1],
+                second[second_index],
+                second[second_index + 1],
+            ):
+                continue
             if segments_intersect(
                 first[first_index],
                 first[first_index + 1],
@@ -301,6 +397,21 @@ def polylines_cross(
             ):
                 return True
     return False
+
+
+def segment_bounds_overlap(
+    a: tuple[float, float],
+    b: tuple[float, float],
+    c: tuple[float, float],
+    d: tuple[float, float],
+    padding: float = 0.05,
+) -> bool:
+    return not (
+        max(a[0], b[0]) + padding < min(c[0], d[0])
+        or max(c[0], d[0]) + padding < min(a[0], b[0])
+        or max(a[1], b[1]) + padding < min(c[1], d[1])
+        or max(c[1], d[1]) + padding < min(a[1], b[1])
+    )
 
 
 def segments_intersect(

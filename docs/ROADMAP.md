@@ -8,7 +8,7 @@ Drill Pirate is an alpha application. It has a working editing/export foundation
 
 Current state:
 
-- Path analysis warns about close spacing, crossing paths, and high travel speed.
+- Path analysis warns about close spacing, crossing paths, high travel speed, and sampled conflict timeline counts.
 - Auto-plan selected paths can add basic route anchors.
 
 Production target:
@@ -23,7 +23,7 @@ Production target:
 
 Current state:
 
-- Tools try to preserve selected/local order.
+- Ordered formation tools preserve performer order and closed forms rotate/reverse targets to reduce travel.
 - Users can add anchors and Bezier handles.
 - Follow-leader conveyor supports ordered outline movement.
 
@@ -67,7 +67,7 @@ Production target:
 
 Current state:
 
-- Basic constraints and interval normalization exist.
+- Line, pivot, arc, and block constraints exist and apply during movement.
 
 Production target:
 

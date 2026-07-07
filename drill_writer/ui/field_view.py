@@ -556,6 +556,11 @@ class FieldView(QGraphicsView):
         self._active_preview_handle = clicked_item if isinstance(clicked_item, PreviewHandleItem) else None
         self._active_path_anchor = clicked_item if isinstance(clicked_item, PathAnchorItem) else None
         self._active_path_tangent = clicked_item if isinstance(clicked_item, PathTangentItem) else None
+        if event.button() == Qt.MouseButton.LeftButton and isinstance(clicked_item, PathCurveItem):
+            self.preserve_selection()
+            self.restore_preserved_selection()
+            event.accept()
+            return
         if event.button() == Qt.MouseButton.RightButton:
             if isinstance(clicked_item, PathCurveItem):
                 x, y = self.scene_to_field(self.mapToScene(event.position().toPoint()))
@@ -864,11 +869,14 @@ class FieldView(QGraphicsView):
         if isinstance(clicked_item, PathCurveItem):
             x, y = self.scene_to_field(self.mapToScene(event.pos()))
             self.path_anchor_added.emit(clicked_item.dot_id, x, y)
+            event.accept()
             return
         if self.active_tool == EditorTool.SHAPE_LINE and isinstance(clicked_item, DotItem):
             self.shape_anchor_toggled.emit(clicked_item.dot_id)
+            event.accept()
             return
         if self.active_tool != EditorTool.SELECT:
+            event.accept()
             return
         menu = QMenu(self)
         actions: list[tuple[str, QAction]] = []
@@ -894,3 +902,4 @@ class FieldView(QGraphicsView):
                 if action == selected:
                     self.context_action.emit(name)
                     break
+        event.accept()

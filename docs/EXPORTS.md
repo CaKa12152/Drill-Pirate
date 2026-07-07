@@ -51,6 +51,8 @@ It includes:
 - Metadata.
 - Show-level markers, timing events, constraints, and audio versions.
 
+It does not include the internal `.drill_pirate_backups` history folder, so normal project exports stay smaller.
+
 Use this when reporting bugs because it preserves the project state.
 
 ## Drill Sheet PDF

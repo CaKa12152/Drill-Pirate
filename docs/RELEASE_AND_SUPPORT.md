@@ -7,13 +7,13 @@ This page is for maintainers distributing public alpha builds and collecting use
 Current app version:
 
 ```text
-Alpha 2.2.1
+Alpha 2.3.0
 ```
 
 Git tags should use the `v` prefix:
 
 ```text
-v2.2.1
+v2.3.0
 ```
 
 The in-app updater compares GitHub release tags against the app's current version.
@@ -38,7 +38,8 @@ Before publishing a release:
 14. Confirm the splash screen version.
 15. Confirm plugin folder scanning works.
 16. Zip and upload the Windows build to GitHub Releases.
-17. Put real release notes in the GitHub release description.
+17. Optionally upload a matching `.sha256` checksum asset for the Windows ZIP.
+18. Put real release notes in the GitHub release description.
 
 The app uses the GitHub latest release description for the post-update release log.
 
@@ -51,7 +52,7 @@ The app uses the GitHub latest release description for the post-update release l
 Expected build artifact:
 
 ```text
-dist\Drill Pirate Alpha 2.2.1 Windows.zip
+dist\Drill Pirate Alpha 2.3.0 Windows.zip
 ```
 
 ## What to Upload
@@ -63,7 +64,7 @@ Do not upload only the raw `.exe` unless you have a separate installer that incl
 ## Release Description Template
 
 ```markdown
-## Drill Pirate Alpha 2.2.1
+## Drill Pirate Alpha 2.3.0
 
 ### Added
 - ...
@@ -88,7 +89,7 @@ Ask users for:
 
 ```markdown
 ## Version
-Alpha 2.2.1
+Alpha 2.3.0
 
 ## Windows Version
 Example: Windows 11 23H2
@@ -155,6 +156,15 @@ Buttons:
 | Ignore | Dismisses the prompt for now. |
 
 If the installed version is newer than the last recorded running version, Drill Pirate shows the release-log popup on first launch.
+
+The update system supports:
+
+- Stable and beta channels.
+- Download size checks.
+- Optional SHA-256 verification from checksum assets.
+- ZIP validation before install.
+- Rollback if the ZIP copy step fails.
+- A local pending-release-notes marker so release logs survive the app restart.
 
 ## Known Distribution Gaps
 

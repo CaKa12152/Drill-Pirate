@@ -2,7 +2,7 @@
 
 Drill Pirate is a desktop drill-writing application for marching band and DCI-style visual design. It combines a field editor, set-based animation, audio synchronization, formation tools, props, plugins, and production exports into one Windows-first creative workflow.
 
-> Current release: **Alpha 2.2.1**
+> Current release: **Alpha 2.3.0**
 
 ## Quick Links
 
@@ -30,6 +30,10 @@ Drill Pirate is a desktop drill-writing application for marching band and DCI-st
 - Provides formation tools for lines, curves, arcs, circles, rectangles, spirals, grids, SVG/imported shapes, scatter layouts, mirrors, scaling, centering, and follow-leader/conveyor motion.
 - Supports dockable/floating panels, workspace presets, command palette, shortcut editor, searchable marchers, batch editing, and plugin-created tools.
 - Exports MP4 video, project ZIP backups, drill-sheet PDFs, dot-book PDFs, staff packets, and coordinate CSV files.
+- Protects projects with schema migrations, atomic JSON saves, versioned backups, recovery prompts, and Restore Previous Save.
+- Logs unexpected crashes and can export a one-click bug report bundle with logs and project files.
+- Supports stable/beta update channels with size/checksum verification, ZIP validation, rollback on install-copy failure, and per-version release notes.
+- Improves drill correctness with deterministic form assignment, conflict timeline analysis, stronger constraints, and coordinate regression tests.
 
 ## Install for Testers
 
@@ -59,7 +63,7 @@ The build output is created at:
 
 ```text
 dist\Drill Pirate\Drill Pirate.exe
-dist\Drill Pirate Alpha 2.2.1 Windows.zip
+dist\Drill Pirate Alpha 2.3.0 Windows.zip
 ```
 
 ## Important Locations
@@ -71,6 +75,7 @@ dist\Drill Pirate Alpha 2.2.1 Windows.zip
 | Project `audio\` folder | Copied audio files for the project. |
 | Project `props\` folder | Imported prop images. |
 | Project JSON files | `metadata.json`, `dots.json`, `sets.json`, `props.json`, and `show.json`. |
+| Project `.drill_pirate_backups` folder | Versioned JSON backups used by project recovery and Restore Previous Save. |
 
 ## MP4 Export Requirement
 
@@ -91,6 +96,6 @@ Plugins are powerful and run as trusted code. Only install plugins from people y
 
 ## Alpha Status
 
-Drill Pirate is usable for alpha testing and real feedback, but it is not yet a finished commercial drill-writing package. The most important remaining production areas are deeper collision avoidance, true constraint solving, more advanced printed coordinate books, installer/signing polish, crash reporting, and broader test coverage.
+Drill Pirate is usable for alpha testing and real feedback, but it is not yet a finished commercial drill-writing package. The most important remaining production areas are deeper collision avoidance, true constraint solving, more advanced printed coordinate books, installer/signing polish, automated release QA, and broader test coverage.
 
 See [Roadmap](docs/ROADMAP.md) for the full production-readiness list.

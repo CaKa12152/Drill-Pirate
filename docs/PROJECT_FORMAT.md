@@ -168,7 +168,8 @@ Stores show-level data that does not belong to only one set.
 ```json
 {
   "title": "My Show",
-  "version": 1,
+  "version": 2,
+  "schema_version": 2,
   "markers": [
     {
       "count": 12.0,
@@ -199,6 +200,19 @@ Stores show-level data that does not belong to only one set.
 
 Timing event types include anchors, tempo changes, ritardandos, fermatas, and pickup-related timing data.
 
+## Schema Version
+
+Drill Pirate writes the current project schema into `show.json`.
+
+```json
+{
+  "version": 2,
+  "schema_version": 2
+}
+```
+
+When an older project opens, Drill Pirate migrates it before loading and creates a `migration` backup first. If a project was saved by a newer unsupported app version, Drill Pirate refuses to open it instead of silently damaging it.
+
 ## Coordinates
 
 Drill Pirate stores coordinates as yard-based field units:
@@ -221,6 +235,27 @@ The coordinate formatter converts these values into drill-sheet language:
 ## Autosave
 
 Project data is autosaved during editing and saved when returning home or closing a project window. Use `File > Save` before exporting or sharing a project ZIP.
+
+## Backups and Recovery
+
+Backups are stored inside each project:
+
+```text
+My_Show\
+  .drill_pirate_backups\
+    2026-07-06T20-30-15Z_autosave.zip
+    2026-07-06T20-31-02Z_manual.zip
+```
+
+Backups include the core JSON files:
+
+- `metadata.json`
+- `dots.json`
+- `props.json`
+- `sets.json`
+- `show.json`
+
+Use `File > Restore Previous Save` to restore a backup. Drill Pirate creates a `pre_restore` backup before overwriting current JSON files.
 
 ## Editing JSON Manually
 

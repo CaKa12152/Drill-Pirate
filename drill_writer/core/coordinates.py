@@ -21,7 +21,7 @@ def format_yardline_coordinate(x: float) -> str:
         if offset_steps < 0.05:
             return "On 50"
         side = "S1" if x < 0 else "S2"
-        return f"{format_steps(offset_steps)} steps {side} of 50"
+        return f"{format_steps(offset_steps)} {step_word(offset_steps)} {side} of 50"
 
     yard_number = 50 - abs(nearest_line)
     side = "S1" if nearest_line < 0 else "S2"
@@ -29,7 +29,7 @@ def format_yardline_coordinate(x: float) -> str:
         return f"On {yard_number} {side}"
 
     direction = "inside" if abs(x) < abs(nearest_line) else "outside"
-    return f"{format_steps(offset_steps)} steps {direction} {yard_number} {side}"
+    return f"{format_steps(offset_steps)} {step_word(offset_steps)} {direction} {yard_number} {side}"
 
 
 def format_hash_coordinate(y: float) -> str:
@@ -61,7 +61,7 @@ def format_hash_coordinate(y: float) -> str:
         direction = "in front of" if y < reference else "outside"
     else:
         direction = "in front of" if y < reference else "behind"
-    return f"{format_steps(offset_steps)} steps {direction} {name}"
+    return f"{format_steps(offset_steps)} {step_word(offset_steps)} {direction} {name}"
 
 
 def format_steps(value: float) -> str:
@@ -69,3 +69,7 @@ def format_steps(value: float) -> str:
     if abs(rounded - round(rounded)) < 0.001:
         return str(int(round(rounded)))
     return f"{rounded:g}"
+
+
+def step_word(value: float) -> str:
+    return "step" if abs((round(value * 4) / 4) - 1.0) < 0.001 else "steps"

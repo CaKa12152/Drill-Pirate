@@ -31,6 +31,19 @@ dots.json
 
 If a project is elsewhere, use its folder as the save location when creating/opening workflows allow it, or move/copy it into the project library.
 
+## A Project Says It Needs Recovery
+
+This means Drill Pirate detected missing files, invalid JSON, an unsupported schema, or another load problem.
+
+Try:
+
+1. Click the project recovery card.
+2. Choose `Restore Latest Backup` if available.
+3. If restore fails, choose `Export Bug Report`.
+4. Send the bug report ZIP with the issue.
+
+Inside an open project, use `File > Restore Previous Save` to choose a specific backup.
+
 ## UI Looks Crushed
 
 Try:
@@ -219,6 +232,17 @@ Try:
 - Confirm antivirus did not quarantine the downloaded update.
 
 Source/development runs cannot replace themselves; they open/download the release instead.
+
+## Update Log Does Not Appear
+
+Release notes are shown once per installed version. If they do not appear after an update:
+
+- Confirm the new app version actually launched.
+- Confirm the GitHub release has a description.
+- Check that `Dont Show Again` was not clicked for that exact version.
+- Manual/source runs may not have the same pending-update marker as packaged EXE installs.
+
+Newer builds also keep a pending release-note marker in local app data to make this more reliable.
 
 ## Performance Is Slow on Large Shows
 

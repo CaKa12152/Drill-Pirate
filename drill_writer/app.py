@@ -8,6 +8,7 @@ from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
+    QFileDialog,
     QHBoxLayout,
     QLabel,
     QMessageBox,
@@ -18,12 +19,23 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
+from drill_writer.core.diagnostics import (
+    clear_pending_release_notes_file,
+    export_bug_report_bundle,
+    install_exception_hook,
+    log_exception,
+    read_pending_release_notes,
+    write_pending_release_notes,
+)
+from drill_writer.core.project_io import ProjectLoadError, create_tutorial_project, project_library_dir
 from drill_writer.core.updater import (
     CURRENT_VERSION,
     UpdateInfo,
+    fetch_release_by_tag,
     fetch_latest_release,
     fetch_latest_update,
     install_update,
+    normalize_update_channel,
     version_tuple,
 )
 from drill_writer.core.plugin_manager import PluginManager
@@ -43,15 +55,23 @@ from drill_writer.ui.theme import theme_stylesheet
 class UpdateCheckThread(QThread):
     finished_check = Signal(object)
 
+    def __init__(self, channel: str, parent=None) -> None:
+        super().__init__(parent)
+        self.channel = normalize_update_channel(channel)
+
     def run(self) -> None:
-        self.finished_check.emit(fetch_latest_update())
+        self.finished_check.emit(fetch_latest_update(channel=self.channel))
 
 
 class ReleaseNotesThread(QThread):
     finished_notes = Signal(object)
 
+    def __init__(self, tag: str, parent=None) -> None:
+        super().__init__(parent)
+        self.tag = tag
+
     def run(self) -> None:
-        self.finished_notes.emit(fetch_latest_release())
+        self.finished_notes.emit(fetch_release_by_tag(self.tag) or fetch_latest_release())
 
 
 class DrillWriterApp(QStackedWidget):
@@ -76,12 +96,71 @@ class DrillWriterApp(QStackedWidget):
         QTimer.singleShot(1300, self.show_home)
         QTimer.singleShot(1650, self.check_pending_release_notes)
         QTimer.singleShot(2200, self.check_for_updates)
+        QTimer.singleShot(3200, self.show_onboarding_if_needed)
 
     def show_home(self) -> None:
         self.setCurrentWidget(self.startup)
 
+    def show_onboarding_if_needed(self) -> None:
+        if self.currentWidget() is not self.startup:
+            return
+        if self.settings.value("onboarding/workflow_v1_seen", False, type=bool):
+            return
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Welcome to Drill Pirate")
+        dialog.setModal(True)
+        dialog.resize(560, 430)
+        layout = QVBoxLayout(dialog)
+        title = QLabel("Drill Pirate Alpha")
+        title.setStyleSheet("font-size: 22px; font-weight: 800;")
+        intro = QTextBrowser()
+        intro.setOpenExternalLinks(True)
+        intro.setHtml(
+            """
+            <h3>Start with a safe workflow</h3>
+            <ul>
+              <li>Use <b>Workspaces</b> to switch between design, forms, rehearsal, and print views.</li>
+              <li>Right-click path lines to add editable anchors; drag handles to shape paths.</li>
+              <li>Use <b>Ctrl+Shift+P</b> for the command palette and <b>Ctrl+Alt+,</b> for shortcuts.</li>
+              <li>Autosave backups and Restore Previous Save are available from the File menu.</li>
+            </ul>
+            <p>The tutorial project creates a small line-to-circle move you can safely edit.</p>
+            """
+        )
+        button_row = QHBoxLayout()
+        tutorial_button = QPushButton("Create Tutorial Project")
+        close_button = QPushButton("Maybe Later")
+        dont_show_button = QPushButton("Don't Show Again")
+        tutorial_button.clicked.connect(dialog.accept)
+        close_button.clicked.connect(dialog.reject)
+        dont_show_button.clicked.connect(lambda: (self.settings.setValue("onboarding/workflow_v1_seen", True), dialog.done(2)))
+        button_row.addStretch()
+        button_row.addWidget(close_button)
+        button_row.addWidget(dont_show_button)
+        button_row.addWidget(tutorial_button)
+        layout.addWidget(title)
+        layout.addWidget(intro, 1)
+        layout.addLayout(button_row)
+        result = dialog.exec()
+        if result == QDialog.DialogCode.Accepted:
+            self.settings.setValue("onboarding/workflow_v1_seen", True)
+            self.settings.sync()
+            project_dir = create_tutorial_project(project_library_dir())
+            self.startup.refresh_projects()
+            self.open_project(project_dir)
+        elif result == 2:
+            self.settings.sync()
+
     def open_project(self, project_dir: Path) -> None:
-        window = MainWindow(project_dir)
+        try:
+            window = MainWindow(project_dir)
+        except ProjectLoadError as exc:
+            self.show_project_open_failed(project_dir, exc)
+            return
+        except Exception as exc:
+            log_exception(type(exc), exc, exc.__traceback__, context=f"Open project failed: {project_dir}")
+            self.show_unexpected_project_error(project_dir, exc)
+            return
         window.field.set_canvas_theme(self.theme_mode())
         window.return_home_requested.connect(lambda selected_window=window: self.return_home(selected_window))
         self.addWidget(window)
@@ -100,8 +179,20 @@ class DrillWriterApp(QStackedWidget):
             self.settings.value(AUDIO_OUTPUT_DEVICE_SETTING, DEFAULT_AUDIO_OUTPUT_DEVICE_ID)
         )
 
+    def tooltips_enabled(self) -> bool:
+        return self.settings.value("ui/tooltips_enabled", True, type=bool)
+
+    def update_channel(self) -> str:
+        return normalize_update_channel(self.settings.value("updates/channel", "stable"))
+
     def show_preferences(self) -> None:
-        dialog = PreferencesDialog(self.theme_mode(), self.audio_output_device_id(), self)
+        dialog = PreferencesDialog(
+            self.theme_mode(),
+            self.audio_output_device_id(),
+            self.update_channel(),
+            self.tooltips_enabled(),
+            self,
+        )
         dialog.exec()
 
     def apply_theme(self, mode: str) -> None:
@@ -136,6 +227,27 @@ class DrillWriterApp(QStackedWidget):
         if isinstance(current, MainWindow):
             current.statusBar().showMessage(f"Audio output: {audio_output_label_for_id(normalized)}", 3000)
 
+    def apply_update_channel(self, channel: str) -> None:
+        normalized = normalize_update_channel(channel)
+        self.settings.setValue("updates/channel", normalized)
+        self.settings.sync()
+        current = self.currentWidget()
+        if isinstance(current, MainWindow):
+            current.statusBar().showMessage(f"Update channel: {normalized.title()}", 3000)
+
+    def apply_tooltips_enabled(self, enabled: bool) -> None:
+        self.settings.setValue("ui/tooltips_enabled", bool(enabled))
+        self.settings.sync()
+        for index in range(self.count()):
+            widget = self.widget(index)
+            handler = getattr(widget, "apply_tooltips_enabled", None)
+            if callable(handler):
+                handler(bool(enabled))
+        current = self.currentWidget()
+        if isinstance(current, MainWindow):
+            state = "enabled" if enabled else "disabled"
+            current.statusBar().showMessage(f"Tooltips {state}", 2200)
+
     def return_home(self, window: MainWindow) -> None:
         self.startup.refresh_projects()
         self.plugin_manager.unregister_main_window(window)
@@ -156,43 +268,42 @@ class DrillWriterApp(QStackedWidget):
     def check_for_updates(self) -> None:
         if self.update_thread and self.update_thread.isRunning():
             return
-        self.update_thread = UpdateCheckThread(self)
+        self.update_thread = UpdateCheckThread(self.update_channel(), self)
         self.update_thread.finished_check.connect(self.handle_update_check)
         self.update_thread.start()
 
     def check_pending_release_notes(self) -> None:
-        if self.release_notes_disabled():
-            self.clear_pending_release_notes(sync=False)
-            self.record_running_version()
-            return
-
         target_tag = self.pending_release_notes_tag()
         seen_tag = str(self.settings.value("updates/release_notes_seen_tag", ""))
-        if not target_tag or version_tuple(target_tag) != version_tuple(CURRENT_VERSION):
+        if not target_tag:
             self.record_running_version()
             return
-        if version_tuple(seen_tag) == version_tuple(CURRENT_VERSION):
+        if version_tuple(target_tag) != version_tuple(CURRENT_VERSION):
+            if version_tuple(target_tag) < version_tuple(CURRENT_VERSION):
+                self.clear_pending_release_notes()
+            self.record_running_version()
+            return
+        if version_tuple(seen_tag) == version_tuple(target_tag):
             self.clear_pending_release_notes()
             self.record_running_version()
             return
         if self.release_notes_thread and self.release_notes_thread.isRunning():
             return
-        self.release_notes_thread = ReleaseNotesThread(self)
+        self.release_notes_thread = ReleaseNotesThread(target_tag, self)
         self.release_notes_thread.finished_notes.connect(self.handle_release_notes)
         self.release_notes_thread.start()
 
     def pending_release_notes_tag(self) -> str:
         pending_tag = str(self.settings.value("updates/pending_release_notes_tag", ""))
+        if not pending_tag:
+            pending_payload = read_pending_release_notes()
+            pending_tag = str(pending_payload.get("tag", ""))
         last_running_version = str(self.settings.value("updates/last_running_version", ""))
-        if pending_tag:
+        if pending_tag and version_tuple(pending_tag) == version_tuple(CURRENT_VERSION):
             return pending_tag
         if last_running_version and version_tuple(CURRENT_VERSION) > version_tuple(last_running_version):
             return CURRENT_VERSION
         return ""
-
-    def release_notes_disabled(self) -> bool:
-        value = self.settings.value("updates/release_notes_disabled", False)
-        return str(value).lower() in {"1", "true", "yes"}
 
     def record_running_version(self) -> None:
         self.settings.setValue("updates/last_running_version", CURRENT_VERSION)
@@ -217,6 +328,13 @@ class DrillWriterApp(QStackedWidget):
         fallback_body = str(self.settings.value("updates/pending_release_notes_body", ""))
         fallback_name = str(self.settings.value("updates/pending_release_notes_name", target_tag))
         fallback_url = str(self.settings.value("updates/pending_release_notes_url", ""))
+        pending_payload = read_pending_release_notes()
+        if not fallback_body:
+            fallback_body = str(pending_payload.get("body", ""))
+        if not fallback_name or fallback_name == target_tag:
+            fallback_name = str(pending_payload.get("name", fallback_name or target_tag))
+        if not fallback_url:
+            fallback_url = str(pending_payload.get("html_url", ""))
         if fallback_body or fallback_name:
             return UpdateInfo(
                 tag=target_tag,
@@ -225,7 +343,13 @@ class DrillWriterApp(QStackedWidget):
                 body=fallback_body,
                 asset=None,
             )
-        return None
+        return UpdateInfo(
+            tag=target_tag,
+            name=target_tag,
+            html_url="",
+            body="No release description was available from GitHub.",
+            asset=None,
+        )
 
     def show_release_notes_dialog(self, release: UpdateInfo) -> None:
         dialog = QDialog(self)
@@ -267,8 +391,6 @@ class DrillWriterApp(QStackedWidget):
         layout.addLayout(button_row)
         dialog.exec()
 
-        if result["dont_show"]:
-            self.settings.setValue("updates/release_notes_disabled", True)
         self.record_release_notes_seen(release.tag)
 
     def record_release_notes_seen(self, tag: str) -> None:
@@ -284,6 +406,7 @@ class DrillWriterApp(QStackedWidget):
             "updates/pending_release_notes_url",
         ):
             self.settings.remove(key)
+        clear_pending_release_notes_file()
         if sync:
             self.settings.sync()
 
@@ -296,11 +419,13 @@ class DrillWriterApp(QStackedWidget):
         message = QMessageBox(self)
         message.setWindowTitle("Drill Pirate Update Available")
         message.setIcon(QMessageBox.Icon.Information)
-        message.setText(f"Drill Pirate {update.tag} is available.")
+        channel_label = update.channel.title()
+        message.setText(f"Drill Pirate {update.tag} is available on the {channel_label} channel.")
         message.setInformativeText(
-            "Install downloads the latest release from GitHub without requiring Git.\n"
+            "Install downloads the selected GitHub release without requiring Git.\n"
             "Skip hides this version until a newer release is published.\n"
-            "Ignore closes this prompt for now."
+            "Ignore closes this prompt for now.\n\n"
+            "Downloaded ZIP updates are size-checked, optionally SHA-256 verified, and installed with rollback."
         )
         install_button = message.addButton("Install", QMessageBox.ButtonRole.AcceptRole)
         skip_button = message.addButton("Skip This Version", QMessageBox.ButtonRole.DestructiveRole)
@@ -358,10 +483,74 @@ class DrillWriterApp(QStackedWidget):
         self.settings.setValue("updates/pending_release_notes_name", update.name or update.tag)
         self.settings.setValue("updates/pending_release_notes_body", update.body)
         self.settings.setValue("updates/pending_release_notes_url", update.html_url)
+        write_pending_release_notes(
+            {
+                "tag": update.tag,
+                "name": update.name or update.tag,
+                "body": update.body,
+                "html_url": update.html_url,
+            }
+        )
         self.settings.sync()
+
+    def show_project_open_failed(self, project_dir: Path, exc: Exception) -> None:
+        from drill_writer.core.project_io import list_project_backups, restore_project_backup
+
+        backups = list_project_backups(project_dir)
+        message = QMessageBox(self)
+        message.setWindowTitle("Project Needs Recovery")
+        message.setIcon(QMessageBox.Icon.Warning)
+        message.setText(f"Drill Pirate could not open '{project_dir.name}'.")
+        message.setInformativeText(
+            f"{exc}\n\n"
+            "You can restore the newest automatic backup or export a bug report bundle."
+        )
+        restore_button = None
+        if backups:
+            restore_button = message.addButton("Restore Latest Backup", QMessageBox.ButtonRole.AcceptRole)
+        bug_button = message.addButton("Export Bug Report", QMessageBox.ButtonRole.ActionRole)
+        message.addButton("Cancel", QMessageBox.ButtonRole.RejectRole)
+        message.exec()
+        clicked = message.clickedButton()
+        if restore_button is not None and clicked == restore_button:
+            try:
+                restore_project_backup(project_dir, backups[0].path)
+            except Exception as restore_exc:
+                QMessageBox.warning(self, "Restore Failed", str(restore_exc))
+                return
+            self.open_project(project_dir)
+        elif clicked == bug_button:
+            path, _ = QFileDialog.getSaveFileName(
+                self,
+                "Export Bug Report Bundle",
+                str(Path.home() / f"{project_dir.name}_bug_report.zip"),
+                "Zip (*.zip)",
+            )
+            if path:
+                export_bug_report_bundle(Path(path), project_dir=project_dir, extra={"open_error": str(exc)})
+
+    def show_unexpected_project_error(self, project_dir: Path, exc: Exception) -> None:
+        message = QMessageBox(self)
+        message.setWindowTitle("Project Open Failed")
+        message.setIcon(QMessageBox.Icon.Critical)
+        message.setText(f"Drill Pirate hit an unexpected error while opening '{project_dir.name}'.")
+        message.setInformativeText(f"{exc}\n\nExport a bug report bundle if this keeps happening.")
+        bug_button = message.addButton("Export Bug Report", QMessageBox.ButtonRole.AcceptRole)
+        message.addButton("Close", QMessageBox.ButtonRole.RejectRole)
+        message.exec()
+        if message.clickedButton() == bug_button:
+            path, _ = QFileDialog.getSaveFileName(
+                self,
+                "Export Bug Report Bundle",
+                str(Path.home() / f"{project_dir.name}_bug_report.zip"),
+                "Zip (*.zip)",
+            )
+            if path:
+                export_bug_report_bundle(Path(path), project_dir=project_dir, extra={"open_error": str(exc)})
 
 
 def main() -> int:
+    install_exception_hook()
     app = QApplication(sys.argv)
     app.setWindowIcon(QIcon(str(app_icon_path())))
     settings = QSettings("OpenAI", "DrillWriter")

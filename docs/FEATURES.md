@@ -12,6 +12,7 @@ This page is a full reference of the major Drill Pirate features currently repre
 | Create-project card | Large plus-card opens the project creation dialog. |
 | Plugin tab | Lists plugin folders from `Documents\Drill Pirate Plugins` with activation toggles. |
 | Settings access | Opens preferences and audio device settings from the home flow. |
+| Recovery cards | Corrupt projects appear as recovery cards instead of disappearing from the gallery. |
 
 ## Project Creation
 
@@ -34,6 +35,7 @@ This page is a full reference of the major Drill Pirate features currently repre
 | Command palette | Search and run commands from the keyboard. |
 | Shortcut editor | Search commands and assign custom keyboard shortcuts. |
 | Dark/light themes | Switch themes in Settings while the field remains readable. |
+| Update channel | Choose Stable Releases or Beta / Pre-Releases from Settings. |
 | Less panel crowding | Workspaces and floating docks allow large-show layouts on smaller screens. |
 
 ## Field View
@@ -138,12 +140,23 @@ This page is a full reference of the major Drill Pirate features currently repre
 | Contextual controls | Only the active tool's settings are shown. |
 | On-field handles | Drag tool handles directly on the field when supported. |
 | Stable dot ordering | Tools try to preserve local selected order to avoid chaotic remapping. |
+| Deterministic assignment | Ordered form tools preserve performer order and rotate/reverse closed shapes to minimize travel. |
 | Center selected | Moves selected formation to the field center. |
 | Rotate selected | Rotates selected form as a group. |
 | Follow-leader conveyor | Builds ordered motion around an outline instead of direct cross-form travel. |
 | Fit to prop | Scales selected formation to a selected prop footprint. |
 | Snap align | Shows purple horizontal/vertical snap guides while dragging. |
 | Interval tools | Align and normalize spacing for selected marchers. |
+
+## Constraint System
+
+| Feature | Description |
+| --- | --- |
+| Line constraints | Keep selected marchers in a straight line at the target interval. |
+| Pivot constraints | Keep a group's relative offsets locked to the first selected marcher. |
+| Arc constraints | Preserve a selected arc relationship while keeping the arc centered on the edited group. |
+| Block constraints | Rebuild selected marchers into a consistent block/grid relationship. |
+| Constraint-on-move | Active constraints are applied during dot/form movement, not just by manual cleanup. |
 
 ## Path Editing and Safety
 
@@ -154,6 +167,8 @@ This page is a full reference of the major Drill Pirate features currently repre
 | Bezier handles | Drag cyan tangent handles for curved routes. |
 | Clear selected paths | Remove custom anchors/controls from selected marchers. |
 | Path analysis | Warns for close spacing, crossing paths, and high travel speed. |
+| Conflict timeline | Samples counts through each transition and summarizes conflict-heavy moments. |
+| Large-show crossings | Crossing checks run on shows up to the 400+ dot range with segment broad-phase filtering. |
 | Auto-plan paths | Adds basic anchors for selected paths; results should be reviewed. |
 
 ## Visibility and Large Shows
@@ -177,6 +192,26 @@ This page is a full reference of the major Drill Pirate features currently repre
 | Staff Packet PDF | Summary, warnings, and large set pages for staff review. |
 | Coordinate CSV | All performer coordinates for every set. |
 
+## Data Safety
+
+| Feature | Description |
+| --- | --- |
+| Atomic JSON saves | Project JSON files write through temporary files before replacing the previous version. |
+| Versioned backups | Saves create timestamped JSON backup ZIPs in `.drill_pirate_backups`. |
+| Autosave backups | Autosave creates retained backups with throttling to avoid uncontrolled growth. |
+| Restore Previous Save | File menu command restores a selected backup after creating a pre-restore backup. |
+| Corrupt-project detection | Project load validates required files, JSON structure, schema version, and set presence. |
+| Recovery prompt | Failed project opens offer restoring the newest backup or exporting a bug report bundle. |
+| Schema migrations | Older project files are migrated to the current schema with a migration backup first. |
+
+## Crash Handling
+
+| Feature | Description |
+| --- | --- |
+| Crash logs | Unhandled exceptions write logs to the local Drill Pirate app data folder. |
+| Error dialogs | Unexpected app errors show a user-facing dialog instead of failing silently. |
+| Bug report bundle | Help menu exports logs, diagnostics, and project files into a ZIP. |
+
 ## Plugin System
 
 | Feature | Description |
@@ -195,10 +230,13 @@ This page is a full reference of the major Drill Pirate features currently repre
 | Feature | Description |
 | --- | --- |
 | Latest release check | Checks GitHub latest release after startup. |
+| Stable/beta channels | Stable checks GitHub latest; beta checks recent releases including pre-releases. |
 | Install | Downloads and launches/replaces with the latest release asset. |
 | Skip | Hides one release until a newer version exists. |
 | Ignore | Dismisses the prompt for the current launch. |
 | Release-log popup | Shows the new release description after successful update. |
+| Integrity checks | Downloaded updates are size-checked, optional SHA-256 checked, and ZIP validated. |
+| Rollback copy | ZIP self-update script restores the old app folder if file copy fails. |
 
 ## Current Alpha Limits
 
