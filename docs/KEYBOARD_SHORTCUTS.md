@@ -55,6 +55,17 @@ Ctrl+Shift+P
 | Import Prop Image | `Ctrl+Alt+I` |
 | Add Set | `Ctrl+Alt+S` |
 | Remove Set | `Ctrl+Alt+Backspace` |
+| Copy Current Set | `Ctrl+Alt+C` |
+| Select Same Section | `Ctrl+Alt+Shift+A` |
+| Invert Selection | `Ctrl+Alt+Shift+I` |
+| Select Moving This Set | `Ctrl+Alt+Shift+M` |
+| Carry Selected Forward | `Ctrl+Alt+Shift+F` |
+| Start Selected Move Here | `Ctrl+Alt+H` |
+| Set Opening Positions From Current View | `Ctrl+Alt+Shift+H` |
+| Face Selected Front | `Ctrl+Alt+Up` |
+| Face Selected Back | `Ctrl+Alt+Down` |
+| Rotate Selected Facing Left 45 | `Ctrl+Alt+Left` |
+| Rotate Selected Facing Right 45 | `Ctrl+Alt+Right` |
 
 ## Tools
 
@@ -70,7 +81,14 @@ Ctrl+Shift+P
 | Circle Tool | `Alt+8` |
 | Rectangle Tool | `Alt+9` |
 | Lasso Tool | `Alt+0` |
+| Ellipse/Oval Tool | `Ctrl+Alt+O` |
+| Triangle Tool | `Ctrl+Alt+T` |
+| Diamond Tool | `Ctrl+Alt+J` |
+| Polygon Tool | `Ctrl+Alt+Y` |
+| Star Tool | `Ctrl+Alt+Shift+G` |
 | Scale Form Tool | `Ctrl+Alt+X` |
+| Warp Form Tool | `Ctrl+Alt+W` |
+| Rotate Form Tool | `Ctrl+Alt+Shift+O` |
 | Spiral Tool | `Ctrl+Alt+P` |
 | Block/Grid Tool | `Ctrl+Alt+B` |
 | SVG Shape Tool | `Ctrl+Alt+V` |

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from drill_writer.core.animation import distance, interpolate_project, sample_transition_path
+from drill_writer.core.animation import distance, interpolate_project, motion_window_for_dot, sample_transition_path
 from drill_writer.core.models import DrillProject
 
 
@@ -31,6 +31,18 @@ class ConflictTimelineEntry:
     @property
     def total(self) -> int:
         return self.spacing_conflicts + self.speed_conflicts + self.crossing_conflicts
+
+
+def transition_start_positions(project: DrillProject, set_index: int) -> dict[str, tuple[float, float]]:
+    if set_index > 0:
+        return dict(project.sets[set_index - 1].dot_positions)
+    return {dot.id: (dot.x, dot.y) for dot in project.dots}
+
+
+def transition_end_positions(project: DrillProject, set_index: int) -> dict[str, tuple[float, float]]:
+    if not 0 <= set_index < len(project.sets):
+        return {}
+    return dict(project.sets[set_index].dot_positions)
 
 
 def detect_path_warnings(
@@ -82,60 +94,61 @@ def detect_path_warnings(
                 if len(warnings) >= warning_limit:
                     return warnings
 
-    if set_index > 0:
-        previous = project.sets[set_index - 1]
-        path_by_dot = {
-            dot_id: sample_transition_path(
-                previous.dot_positions.get(dot_id, project.dot_by_id(dot_id) and (project.dot_by_id(dot_id).x, project.dot_by_id(dot_id).y) or (0, 0)),
-                drill_set.dot_positions.get(dot_id, project.dot_by_id(dot_id) and (project.dot_by_id(dot_id).x, project.dot_by_id(dot_id).y) or (0, 0)),
-                drill_set.path_anchors.get(dot_id, []),
-                drill_set.path_controls.get(dot_id, []),
-                samples=12,
-            )
-            for dot_id in all_dot_ids
-        }
+    previous_positions = transition_start_positions(project, set_index)
+    current_positions = transition_end_positions(project, set_index)
+    path_by_dot = {
+        dot_id: sample_transition_path(
+            previous_positions.get(dot_id, project.dot_by_id(dot_id) and (project.dot_by_id(dot_id).x, project.dot_by_id(dot_id).y) or (0, 0)),
+            current_positions.get(dot_id, project.dot_by_id(dot_id) and (project.dot_by_id(dot_id).x, project.dot_by_id(dot_id).y) or (0, 0)),
+            drill_set.path_anchors.get(dot_id, []),
+            drill_set.path_controls.get(dot_id, []),
+            samples=12,
+        )
+        for dot_id in all_dot_ids
+    }
 
-        check_crossings = len(all_dot_ids) <= 450 or dot_ids is not None
-        if check_crossings:
-            for first_index, dot_a in enumerate(all_dot_ids):
-                for dot_b in all_dot_ids[first_index + 1 :]:
-                    if dot_a not in selected_dot_ids and dot_b not in selected_dot_ids:
-                        continue
-                    if polylines_cross(path_by_dot[dot_a], path_by_dot[dot_b]):
-                        warnings.append(
-                            PathWarning(
-                                "crossing",
-                                set_index,
-                                drill_set.name,
-                                f"{dot_a} path crosses {dot_b}",
-                                dot_a,
-                                dot_b,
-                                drill_set.start_count,
-                            )
+    check_crossings = len(all_dot_ids) <= 450 or dot_ids is not None
+    if check_crossings:
+        for first_index, dot_a in enumerate(all_dot_ids):
+            for dot_b in all_dot_ids[first_index + 1 :]:
+                if dot_a not in selected_dot_ids and dot_b not in selected_dot_ids:
+                    continue
+                if polylines_cross(path_by_dot[dot_a], path_by_dot[dot_b]):
+                    warnings.append(
+                        PathWarning(
+                            "crossing",
+                            set_index,
+                            drill_set.name,
+                            f"{dot_a} path crosses {dot_b}",
+                            dot_a,
+                            dot_b,
+                            drill_set.start_count,
                         )
-                        if len(warnings) >= warning_limit:
-                            return warnings
-
-        for dot_id in all_dot_ids:
-            if dot_id not in selected_dot_ids:
-                continue
-            path = path_by_dot[dot_id]
-            length = sum(distance(path[index], path[index + 1]) for index in range(len(path) - 1))
-            yards_per_count = length / max(1, drill_set.duration_counts)
-            if yards_per_count > max_yards_per_count:
-                warnings.append(
-                    PathWarning(
-                        "speed",
-                        set_index,
-                        drill_set.name,
-                        f"{dot_id} travels {yards_per_count:.2f} yd/count (stride/speed risk)",
-                        dot_id,
-                        "",
-                        drill_set.start_count,
                     )
+                    if len(warnings) >= warning_limit:
+                        return warnings
+
+    for dot_id in all_dot_ids:
+        if dot_id not in selected_dot_ids:
+            continue
+        path = path_by_dot[dot_id]
+        length = sum(distance(path[index], path[index + 1]) for index in range(len(path) - 1))
+        move_start, move_end = motion_window_for_dot(drill_set, dot_id)
+        yards_per_count = length / max(0.0001, move_end - move_start)
+        if yards_per_count > max_yards_per_count:
+            warnings.append(
+                PathWarning(
+                    "speed",
+                    set_index,
+                    drill_set.name,
+                    f"{dot_id} travels {yards_per_count:.2f} yd/count during counts {move_start:g}-{move_end:g} (stride/speed risk)",
+                    dot_id,
+                    "",
+                    move_start,
                 )
-                if len(warnings) >= warning_limit:
-                    return warnings
+            )
+            if len(warnings) >= warning_limit:
+                return warnings
 
     return warnings
 
@@ -190,12 +203,13 @@ def build_conflict_timeline(
             if yards_per_count > max_yards_per_count:
                 entry.speed_conflicts += 1
 
-    if set_index > 0 and (len(all_dot_ids) <= 450 or dot_ids is not None):
-        previous = project.sets[set_index - 1]
+    if len(all_dot_ids) <= 450 or dot_ids is not None:
+        previous_positions = transition_start_positions(project, set_index)
+        current_positions = transition_end_positions(project, set_index)
         path_by_dot = {
             dot_id: sample_transition_path(
-                previous.dot_positions.get(dot_id, project.dot_by_id(dot_id) and (project.dot_by_id(dot_id).x, project.dot_by_id(dot_id).y) or (0, 0)),
-                drill_set.dot_positions.get(dot_id, project.dot_by_id(dot_id) and (project.dot_by_id(dot_id).x, project.dot_by_id(dot_id).y) or (0, 0)),
+                previous_positions.get(dot_id, project.dot_by_id(dot_id) and (project.dot_by_id(dot_id).x, project.dot_by_id(dot_id).y) or (0, 0)),
+                current_positions.get(dot_id, project.dot_by_id(dot_id) and (project.dot_by_id(dot_id).x, project.dot_by_id(dot_id).y) or (0, 0)),
                 drill_set.path_anchors.get(dot_id, []),
                 drill_set.path_controls.get(dot_id, []),
                 samples=max(12, samples),
@@ -222,11 +236,12 @@ def auto_plan_paths(
     dot_ids: list[str],
     min_spacing: float = 1.25,
 ) -> int:
-    if set_index <= 0 or not 0 <= set_index < len(project.sets):
+    if not 0 <= set_index < len(project.sets):
         return 0
     selected = set(dot_ids) if dot_ids else {dot.id for dot in project.dots}
     current = project.sets[set_index]
-    previous = project.sets[set_index - 1]
+    previous_positions = transition_start_positions(project, set_index)
+    current_positions = transition_end_positions(project, set_index)
     anchors_added = 0
     planned_dots: set[str] = set()
     planned_pairs: set[tuple[str, str]] = set()
@@ -261,15 +276,15 @@ def auto_plan_paths(
             warning.dot_b,
             selected,
             planned_dots,
-            previous.dot_positions,
-            current.dot_positions,
+            previous_positions,
+            current_positions,
         )
         if not route_dot:
             continue
         avoid_dot = warning.dot_a if route_dot == warning.dot_b else warning.dot_b
         if route_path_away_from_conflict(
-            previous.dot_positions,
-            current.dot_positions,
+            previous_positions,
+            current_positions,
             current.path_anchors,
             route_dot,
             avoid_dot,

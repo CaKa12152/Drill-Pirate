@@ -16,7 +16,7 @@ from PySide6.QtCore import QMarginsF, QRectF, QSize, Qt
 from PySide6.QtGui import QColor, QFont, QFontDatabase, QImage, QPageLayout, QPageSize, QPainter, QPdfWriter, QPen
 
 from drill_writer.core.analysis import detect_path_warnings
-from drill_writer.core.animation import interpolate_project, interpolate_props
+from drill_writer.core.animation import interpolate_dot_facings, interpolate_project, interpolate_props, motion_window_for_dot
 from drill_writer.core.coordinates import format_drill_coordinate
 from drill_writer.core.models import DrillProject
 from drill_writer.core.project_io import BACKUP_DIR_NAME, save_project
@@ -292,12 +292,38 @@ def movement_style_export_label(style: object) -> str:
     return labels.get(str(value), str(value).replace("_", " ").title())
 
 
+def move_instruction_export_label(drill_set, dot_id: str) -> str:
+    style = movement_style_export_label(drill_set.movement_styles.get(dot_id))
+    move_start, move_end = motion_window_for_dot(drill_set, dot_id)
+    if abs(move_start - float(drill_set.start_count)) < 0.0001 and abs(move_end - float(drill_set.end_count)) < 0.0001:
+        return style
+    timing = f"Move {move_start:g}-{move_end:g}"
+    return timing if style == "Normal" else f"{style}; {timing}"
+
+
 def filtered_dots(project: DrillProject, options: PrintTemplateOptions | None = None):
     options = options or PrintTemplateOptions()
     section_filter = (options.section_filter or "All").strip()
     if not section_filter or section_filter == "All":
         return list(project.dots)
     return [dot for dot in project.dots if dot.section == section_filter]
+
+
+def set_export_count(project: DrillProject, set_index: int) -> float:
+    drill_set = project.sets[set_index]
+    return float(drill_set.end_count)
+
+
+def set_export_positions(project: DrillProject, set_index: int) -> dict[str, tuple[float, float]]:
+    return interpolate_project(project, set_index, set_export_count(project, set_index))
+
+
+def set_export_facings(project: DrillProject, set_index: int) -> dict[str, float]:
+    return interpolate_dot_facings(project, set_index, set_export_count(project, set_index))
+
+
+def set_export_prop_states(project: DrillProject, set_index: int) -> dict[str, dict[str, float]]:
+    return interpolate_props(project, set_index, set_export_count(project, set_index))
 
 
 def field_scene_source(field_view: FieldView) -> QRectF:
@@ -367,8 +393,9 @@ def export_drill_sheet_pdf(
             if progress_callback:
                 progress_callback("Creating drill sheet PDF", index + 1, total)
 
-            sheet_field.set_positions(drill_set.dot_positions)
-            sheet_field.set_prop_states(drill_set.prop_positions)
+            sheet_field.set_positions(set_export_positions(project, index))
+            sheet_field.set_facings(set_export_facings(project, index))
+            sheet_field.set_prop_states(set_export_prop_states(project, index))
 
             def draw_page(painter: QPainter, page_rect: QRectF) -> None:
                 content_rect = draw_header(
@@ -431,6 +458,10 @@ def export_dot_book_pdf(
     pdf_painter = QPainter(writer)
     try:
         total = max(1, len(dots))
+        export_positions_by_set = [
+            set_export_positions(project, set_index)
+            for set_index in range(len(project.sets))
+        ]
         for dot_index, dot in enumerate(dots):
             if dot_index:
                 writer.newPage()
@@ -439,7 +470,7 @@ def export_dot_book_pdf(
 
             rows: list[list[str]] = []
             for set_index, drill_set in enumerate(project.sets):
-                x, y = drill_set.dot_positions.get(dot.id, (dot.x, dot.y))
+                x, y = export_positions_by_set[set_index].get(dot.id, (dot.x, dot.y))
                 yard_text, hash_text = format_drill_coordinate(x, y)
                 rows.append(
                     [
@@ -447,7 +478,7 @@ def export_dot_book_pdf(
                         f"{drill_set.start_count}-{drill_set.end_count}",
                         yard_text,
                         hash_text,
-                        movement_style_export_label(drill_set.movement_styles.get(dot.id)),
+                        move_instruction_export_label(drill_set, dot.id),
                         f"{project.active_tempo(set_index):g} BPM",
                     ]
                 )
@@ -624,8 +655,9 @@ def export_staff_packet_pdf(
             if progress_callback:
                 progress_callback("Creating staff packet", index + 1, total)
             writer.newPage()
-            sheet_field.set_positions(drill_set.dot_positions)
-            sheet_field.set_prop_states(drill_set.prop_positions)
+            sheet_field.set_positions(set_export_positions(project, index))
+            sheet_field.set_facings(set_export_facings(project, index))
+            sheet_field.set_prop_states(set_export_prop_states(project, index))
 
             def draw_set_page(painter: QPainter, page_rect: QRectF) -> None:
                 content_rect = draw_header(
@@ -649,6 +681,14 @@ def export_staff_packet_pdf(
 
 def export_coordinate_csv(output_path: Path, project: DrillProject) -> None:
     project.ensure_set_positions()
+    export_positions_by_set = [
+        set_export_positions(project, set_index)
+        for set_index in range(len(project.sets))
+    ]
+    export_facings_by_set = [
+        set_export_facings(project, set_index)
+        for set_index in range(len(project.sets))
+    ]
     with output_path.open("w", newline="", encoding="utf-8") as file:
         writer = csv.writer(file)
         writer.writerow(
@@ -668,14 +708,19 @@ def export_coordinate_csv(output_path: Path, project: DrillProject) -> None:
                 "y",
                 "yard_line_coordinate",
                 "hash_coordinate",
+                "facing_degrees",
                 "movement_style",
+                "move_start_count",
+                "move_end_count",
                 "transition",
             ]
         )
         for dot in project.dots:
             for set_index, drill_set in enumerate(project.sets):
-                x, y = drill_set.dot_positions.get(dot.id, (dot.x, dot.y))
+                x, y = export_positions_by_set[set_index].get(dot.id, (dot.x, dot.y))
                 yard_text, hash_text = format_drill_coordinate(x, y)
+                move_start, move_end = motion_window_for_dot(drill_set, dot.id)
+                facing = export_facings_by_set[set_index].get(dot.id, 0.0)
                 writer.writerow(
                     [
                         dot.id,
@@ -693,7 +738,10 @@ def export_coordinate_csv(output_path: Path, project: DrillProject) -> None:
                         f"{y:.3f}",
                         yard_text,
                         hash_text,
+                        f"{facing:g}",
                         movement_style_export_label(drill_set.movement_styles.get(dot.id)),
+                        f"{move_start:g}",
+                        f"{move_end:g}",
                         drill_set.transition.value,
                     ]
                 )
@@ -711,9 +759,13 @@ def export_coordinate_summary_pdf(
     dots = filtered_dots(project, options)
     section_label = "" if options.section_filter in ("", "All") else f" - {options.section_filter}"
     rows: list[list[str]] = []
+    export_positions_by_set = [
+        set_export_positions(project, set_index)
+        for set_index in range(len(project.sets))
+    ]
     for set_index, drill_set in enumerate(project.sets):
         for dot in dots:
-            x, y = drill_set.dot_positions.get(dot.id, (dot.x, dot.y))
+            x, y = export_positions_by_set[set_index].get(dot.id, (dot.x, dot.y))
             yard_text, hash_text = format_drill_coordinate(x, y)
             rows.append(
                 [
@@ -723,7 +775,7 @@ def export_coordinate_summary_pdf(
                     dot.section or "-",
                     yard_text,
                     hash_text,
-                    movement_style_export_label(drill_set.movement_styles.get(dot.id)),
+                    move_instruction_export_label(drill_set, dot.id),
                 ]
             )
 
@@ -1037,6 +1089,7 @@ def render_mp4_frames(
             progress = local_frame / max(1, frame_count - 1)
             count = drill_set.start_count + progress * (drill_set.end_count - drill_set.start_count)
             field_view.set_positions(interpolate_project(project, set_index, count))
+            field_view.set_facings(interpolate_dot_facings(project, set_index, count))
             field_view.set_prop_states(interpolate_props(project, set_index, count))
             title_text = project.metadata.show_title if frame_index < title_frames else ""
             image = render_mp4_frame(field_view, options.size, title_text)
@@ -1062,6 +1115,17 @@ def encode_mp4_frames(
     ffmpeg = ffmpeg_path or shutil.which("ffmpeg")
     if not ffmpeg:
         raise RuntimeError("ffmpeg was not found on PATH.")
+    if ffmpeg_path:
+        ffmpeg_candidate = Path(ffmpeg_path)
+        if ffmpeg_candidate.is_dir():
+            ffmpeg_candidate = ffmpeg_candidate / "ffmpeg.exe"
+            ffmpeg = str(ffmpeg_candidate)
+        if not ffmpeg_candidate.is_file():
+            raise RuntimeError(
+                "The selected ffmpeg path is not an executable file. "
+                "Choose the actual ffmpeg.exe inside the extracted bin folder."
+            )
+    output_path.parent.mkdir(parents=True, exist_ok=True)
 
     encode_steps = progress_total - render_steps
 
@@ -1161,6 +1225,11 @@ def encode_mp4_frames(
     )
     if process.returncode != 0:
         message = "\n".join(output_lines[-20:]).strip()
+        if "Unknown encoder" in message or "Encoder not found" in message:
+            message += (
+                "\n\nThis ffmpeg build does not include the selected video encoder. "
+                "Use Auto encoder or install a full ffmpeg build with libx264/mpeg4 support."
+            )
         raise RuntimeError(
             "ffmpeg failed while encoding the MP4.\n\n"
             + (message or "No ffmpeg output was captured. Check that the output folder is writable.")

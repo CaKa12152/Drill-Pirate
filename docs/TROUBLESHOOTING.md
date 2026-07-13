@@ -51,7 +51,7 @@ Try:
 - Maximize the window.
 - Use `View > Workspaces > Focus Field`.
 - Float panels to another monitor.
-- Close unused panels and restore them later from `View > Panels`.
+- Condense panels with Focus Field before closing panels manually from `View > Panels`.
 - Use the command palette instead of keeping every tool panel open.
 
 If the layout gets stuck after opening a project while already fullscreen, resize the window once or switch workspaces.
@@ -250,7 +250,7 @@ Try:
 
 - Hide labels.
 - Hide unused sections/layers.
-- Use Focus Field workspace.
+- Use Focus Field workspace to keep controls visible while expanding the field.
 - Avoid extremely large prop images.
 - Close extra floating panels.
 - Use path analysis on selected sections instead of everything when possible.

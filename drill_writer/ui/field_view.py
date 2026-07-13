@@ -28,21 +28,30 @@ from drill_writer.core.coordinates import (
 )
 from drill_writer.core.models import Dot, DrillProject, Prop, prop_default_state
 from drill_writer.ui.appearance import draw_dot_symbol, generated_prop_pixmap, normalize_dot_symbol, preferred_dot_symbol
+from drill_writer.ui.theme import normalize_field_mode
 
 
 class EditorTool(str, Enum):
     SELECT = "select"
     LINE = "line"
     CURVE = "curve"
+    FREE_CURVE = "free_curve"
     ARC = "arc"
     SCATTER = "scatter"
     MIRROR = "mirror"
     SHAPE_LINE = "shape_line"
     CIRCLE = "circle"
+    ELLIPSE = "ellipse"
     RECTANGLE = "rectangle"
+    TRIANGLE = "triangle"
+    DIAMOND = "diamond"
+    POLYGON = "polygon"
+    STAR = "star"
     SPIRAL = "spiral"
     BLOCK = "block"
     SCALE = "scale"
+    WARP = "warp"
+    ROTATE = "rotate"
     LASSO = "lasso"
     SVG_SHAPE = "svg_shape"
     PLUGIN_FORM = "plugin_form"
@@ -54,6 +63,7 @@ class DotItem(QGraphicsEllipseItem):
         super().__init__(-radius, -radius, radius * 2, radius * 2)
         self.dot_id = dot.id
         self.symbol = normalize_dot_symbol(symbol)
+        self.facing_degrees = 0.0
         self.scale_factor = scale
         self.setBrush(QColor(dot.color))
         self.setPen(QPen(QColor("#1d2128"), 0.08 * scale))
@@ -70,6 +80,10 @@ class DotItem(QGraphicsEllipseItem):
         self.symbol = normalize_dot_symbol(symbol)
         self.update()
 
+    def set_facing_degrees(self, facing_degrees: float) -> None:
+        self.facing_degrees = float(facing_degrees) % 360.0
+        self.update()
+
     def paint(self, painter: QPainter, option, widget=None) -> None:  # type: ignore[override]
         selected = bool(option.state & QStyle.StateFlag.State_Selected)
         draw_dot_symbol(
@@ -78,6 +92,7 @@ class DotItem(QGraphicsEllipseItem):
             self.rect().width() / 2,
             self.brush().color(),
             self.symbol,
+            rotation_degrees=self.facing_degrees,
             outline_color=self.pen().color(),
             outline_width=max(0.7, self.pen().widthF()),
             selected=selected,
@@ -213,6 +228,7 @@ class FieldView(QGraphicsView):
     prop_moved = Signal(str, dict)
     props_moved = Signal(dict)
     context_action = Signal(str)
+    dot_edit_requested = Signal(str)
     preview_handle_moved = Signal(str, float, float)
     path_anchor_added = Signal(str, float, float)
     path_anchor_moved = Signal(str, int, float, float)
@@ -248,7 +264,10 @@ class FieldView(QGraphicsView):
         self.snap_threshold = 0.85
         self.visible_section = "All"
         self.visible_layer = "All"
+        self.locked_sections: set[str] = set()
+        self.locked_layers: set[str] = set()
         self.dot_symbol = preferred_dot_symbol()
+        self.field_mode = "white"
         self._formation_callback: Callable[[EditorTool], None] | None = None
         self._pan_start: QPointF | None = None
         self._drag_start_positions: dict[str, tuple[float, float]] = {}
@@ -267,6 +286,97 @@ class FieldView(QGraphicsView):
     def set_canvas_theme(self, mode: str) -> None:
         self.setBackgroundBrush(QColor("#eef2f7" if mode == "light" else "#111318"))
 
+    def set_field_mode(self, mode: str) -> None:
+        normalized = normalize_field_mode(mode)
+        if normalized == self.field_mode and self.scene.items():
+            return
+        selected_dot_ids = self.selected_dot_ids()
+        selected_prop_ids = self.selected_prop_ids()
+        current_positions = {
+            dot_id: self.scene_to_field(item.pos())
+            for dot_id, item in self.dot_items.items()
+        }
+        current_prop_states = {
+            prop_id: item.current_state(self.scene_to_field)
+            for prop_id, item in self.prop_items.items()
+        }
+        self.field_mode = normalized
+        self.draw_field()
+        if self.project is not None:
+            self.rebuild_props()
+            self.rebuild_dots()
+            if current_positions:
+                self.set_positions(current_positions)
+            if current_prop_states:
+                self.set_prop_states(current_prop_states)
+            for dot_id in selected_dot_ids:
+                item = self.dot_items.get(dot_id)
+                if item:
+                    item.setSelected(True)
+            for prop_id in selected_prop_ids:
+                item = self.prop_items.get(prop_id)
+                if item:
+                    item.setSelected(True)
+        self.selection_changed.emit(self.selected_dot_ids())
+
+    def field_palette(self) -> dict[str, str]:
+        if self.field_mode == "inverted":
+            return {
+                "field_fill": "#050607",
+                "endzone_fill": "#101216",
+                "field_border": "#ffffff",
+                "perimeter": "#cfd6df",
+                "micro": "#2c3138",
+                "minor": "#444b55",
+                "yard": "#e7edf4",
+                "heavy": "#ffffff",
+                "hash": "#ffffff",
+                "tick": "#eef3f8",
+                "restraining": "#cfd6df",
+                "center": "#606a75",
+                "label": "#f7f9fc",
+                "label_muted": "#d8e0ea",
+                "label_heavy": "#ffffff",
+                "bench": "#eef3f8",
+            }
+        if self.field_mode == "grass":
+            return {
+                "field_fill": "#2f7d3b",
+                "endzone_fill": "#276b33",
+                "field_border": "#f4fff4",
+                "perimeter": "#d4ead3",
+                "micro": "#479455",
+                "minor": "#66a96e",
+                "yard": "#f1fff0",
+                "heavy": "#ffffff",
+                "hash": "#ffffff",
+                "tick": "#ffffff",
+                "restraining": "#e4f4e3",
+                "center": "#93c795",
+                "label": "#ffffff",
+                "label_muted": "#ecf8eb",
+                "label_heavy": "#ffffff",
+                "bench": "#f1fff0",
+            }
+        return {
+            "field_fill": "#f9fbf7",
+            "endzone_fill": "#edf3ef",
+            "field_border": "#89939a",
+            "perimeter": "#747e85",
+            "micro": "#e2e9e7",
+            "minor": "#d3dcda",
+            "yard": "#66717a",
+            "heavy": "#28313a",
+            "hash": "#20262d",
+            "tick": "#313a42",
+            "restraining": "#929aa0",
+            "center": "#bbc4c8",
+            "label": "#3f464c",
+            "label_muted": "#333a40",
+            "label_heavy": "#05070a",
+            "bench": "#565f66",
+        }
+
     def set_dot_symbol(self, symbol: str) -> None:
         normalized = normalize_dot_symbol(symbol)
         if normalized == self.dot_symbol:
@@ -276,10 +386,16 @@ class FieldView(QGraphicsView):
             dot_id: self.scene_to_field(item.pos())
             for dot_id, item in self.dot_items.items()
         }
+        current_facings = {
+            dot_id: item.facing_degrees
+            for dot_id, item in self.dot_items.items()
+        }
         self.dot_symbol = normalized
         self.rebuild_dots()
         if current_positions:
             self.set_positions(current_positions)
+        if current_facings:
+            self.set_facings(current_facings)
         for dot_id in selected_ids:
             item = self.dot_items.get(dot_id)
             if item:
@@ -301,7 +417,10 @@ class FieldView(QGraphicsView):
             else QGraphicsView.DragMode.NoDrag
         )
         for item in self.dot_items.values():
-            item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, tool == EditorTool.SELECT)
+            item.setFlag(
+                QGraphicsItem.GraphicsItemFlag.ItemIsMovable,
+                tool == EditorTool.SELECT and not self.dot_locked(item.dot_id),
+            )
         for item in self.prop_items.values():
             item.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, tool == EditorTool.SELECT)
 
@@ -309,6 +428,27 @@ class FieldView(QGraphicsView):
         self.snap_enabled = enabled
         if not enabled:
             self.clear_snap_guides()
+
+    def set_locked_filters(self, sections: set[str], layers: set[str]) -> None:
+        self.locked_sections = set(sections)
+        self.locked_layers = set(layers)
+        for item in self.dot_items.values():
+            locked = self.dot_locked(item.dot_id)
+            item.setFlag(
+                QGraphicsItem.GraphicsItemFlag.ItemIsMovable,
+                self.active_tool == EditorTool.SELECT and not locked,
+            )
+            item.setOpacity(0.45 if locked else 1.0)
+
+    def dot_locked(self, dot_id: str) -> bool:
+        if not self.project:
+            return False
+        dot = self.project.dot_by_id(dot_id)
+        if not dot:
+            return False
+        return bool(dot.section and dot.section in self.locked_sections) or bool(
+            dot.layer and dot.layer in self.locked_layers
+        )
 
     def set_visibility_filters(self, section: str, layer: str) -> None:
         self.visible_section = section
@@ -374,6 +514,12 @@ class FieldView(QGraphicsView):
             if item:
                 item.setPos(self.field_to_scene(*position))
 
+    def set_facings(self, facings: dict[str, float]) -> None:
+        for dot_id, facing in facings.items():
+            item = self.dot_items.get(dot_id)
+            if item:
+                item.set_facing_degrees(facing)
+
     def set_prop_states(self, states: dict[str, dict[str, float]]) -> None:
         for prop_id, state in states.items():
             item = self.prop_items.get(prop_id)
@@ -417,8 +563,10 @@ class FieldView(QGraphicsView):
             self.preview_items.append(target_item)
         for kind, position in (handles or {}).items():
             handle = PreviewHandleItem(kind, self.scale_factor)
+            self.style_preview_handle(handle)
             handle.setPos(self.field_to_scene(*position))
             self.scene.addItem(handle)
+            self.add_preview_handle_label(handle, self.preview_handle_label(kind))
             self.preview_items.append(handle)
 
     def show_shape_line_preview(
@@ -439,6 +587,7 @@ class FieldView(QGraphicsView):
             handle.setPen(QPen(QColor("#ffffff"), 0.14 * self.scale_factor))
             handle.setPos(self.field_to_scene(*anchor))
             self.scene.addItem(handle)
+            self.add_preview_handle_label(handle, "anchor")
             self.preview_items.append(handle)
         radius = 0.35 * self.scale_factor
         for target in targets.values():
@@ -453,10 +602,134 @@ class FieldView(QGraphicsView):
             self.scene.addItem(target_item)
             self.preview_items.append(target_item)
 
+    def show_curve_path_preview(
+        self,
+        path_points: list[tuple[float, float]],
+        starts: dict[str, tuple[float, float]],
+        targets: dict[str, tuple[float, float]],
+        handles: dict[str, tuple[float, float]],
+    ) -> None:
+        self.clear_preview()
+        if len(path_points) > 1:
+            painter_path = self.make_painter_path(path_points)
+            item = ShapeLineItem(painter_path, self.scale_factor)
+            self.scene.addItem(item)
+            self.preview_items.append(item)
+        preview_pen = QPen(QColor("#f7d154"), 0.12 * self.scale_factor, Qt.PenStyle.DashLine)
+        radius = 0.35 * self.scale_factor
+        for dot_id, target in targets.items():
+            start = starts.get(dot_id)
+            if start:
+                line = QGraphicsLineItem()
+                line.setLine(
+                    self.field_to_scene(*start).x(),
+                    self.field_to_scene(*start).y(),
+                    self.field_to_scene(*target).x(),
+                    self.field_to_scene(*target).y(),
+                )
+                line.setPen(preview_pen)
+                line.setZValue(15)
+                self.scene.addItem(line)
+                self.preview_items.append(line)
+            target_item = DotSymbolPreviewItem(
+                radius,
+                QColor(247, 209, 84, 135),
+                self.dot_symbol,
+                QColor("#fff2a6"),
+                0.1 * self.scale_factor,
+            )
+            target_item.setPos(self.field_to_scene(*target))
+            self.scene.addItem(target_item)
+            self.preview_items.append(target_item)
+        for kind, position in handles.items():
+            handle = PreviewHandleItem(kind, self.scale_factor)
+            self.style_preview_handle(handle)
+            handle.setPos(self.field_to_scene(*position))
+            self.scene.addItem(handle)
+            self.add_preview_handle_label(handle, self.preview_handle_label(kind))
+            self.preview_items.append(handle)
+
     def clear_preview(self) -> None:
         for item in self.preview_items:
             self.scene.removeItem(item)
         self.preview_items.clear()
+
+    def preview_handle_label(self, kind: str) -> str:
+        labels = {
+            "form_center": "move form",
+            "line_start": "start",
+            "line_end": "end",
+            "curve_bend": "bend",
+            "curve_start": "start",
+            "curve_control_1": "curve",
+            "curve_control_2": "curve",
+            "curve_end": "end",
+            "arc_radius": "radius",
+            "arc_width": "width",
+            "arc_height": "height",
+            "arc_start": "start",
+            "arc_end": "end",
+            "arc_sweep": "sweep",
+            "shape_radius": "radius",
+            "shape_width": "width",
+            "shape_height": "height",
+            "block_spacing": "spacing",
+            "scale_width": "width",
+            "scale_height": "height",
+            "rotate_angle": "rotate",
+            "scatter_radius": "spread",
+            "mirror_axis": "axis",
+        }
+        if kind.startswith("plugin_setting:"):
+            return kind.split(":", 1)[1].replace("_", " ")
+        if kind.startswith("shape_anchor:"):
+            return "anchor"
+        if kind.startswith("free_curve_anchor:"):
+            return "curve"
+        if kind.startswith("warp_anchor:"):
+            return "bend"
+        return labels.get(kind, kind.replace("_", " "))
+
+    def style_preview_handle(self, handle: PreviewHandleItem) -> None:
+        kind = handle.kind
+        if kind == "form_center":
+            handle.setBrush(QColor("#b057ff"))
+            handle.setPen(QPen(QColor("#ffffff"), 0.16 * self.scale_factor))
+        elif "width" in kind or "height" in kind or "radius" in kind or "spacing" in kind:
+            handle.setBrush(QColor("#f7d154"))
+            handle.setPen(QPen(QColor("#20242b"), 0.14 * self.scale_factor))
+        elif kind in {
+            "line_start",
+            "line_end",
+            "curve_bend",
+            "curve_start",
+            "curve_control_1",
+            "curve_control_2",
+            "curve_end",
+            "arc_sweep",
+            "arc_start",
+            "arc_end",
+            "rotate_angle",
+        }:
+            handle.setBrush(QColor("#66d9ef"))
+            handle.setPen(QPen(QColor("#0b1d24"), 0.14 * self.scale_factor))
+        elif kind.startswith("warp_anchor:"):
+            handle.setBrush(QColor("#b057ff"))
+            handle.setPen(QPen(QColor("#ffffff"), 0.14 * self.scale_factor))
+        elif kind.startswith("free_curve_anchor:"):
+            handle.setBrush(QColor("#e53935"))
+            handle.setPen(QPen(QColor("#ffffff"), 0.14 * self.scale_factor))
+
+    def add_preview_handle_label(self, handle: PreviewHandleItem, text: str) -> None:
+        if not text:
+            return
+        label = QGraphicsTextItem(text, handle)
+        label.setDefaultTextColor(QColor("#111318"))
+        label.setFont(QFont("Arial", 8, QFont.Weight.Bold))
+        label.setScale(0.085 * self.scale_factor)
+        label.setPos(0.8 * self.scale_factor, -1.6 * self.scale_factor)
+        label.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+        label.setZValue(1)
 
     def show_paths(
         self,
@@ -523,10 +796,12 @@ class FieldView(QGraphicsView):
             item = DotItem(dot, self.scale_factor, self.dot_symbol)
             item.setPos(self.field_to_scene(dot.x, dot.y))
             item.label.setVisible(self.show_labels)
+            locked = self.dot_locked(dot.id)
             item.setFlag(
                 QGraphicsItem.GraphicsItemFlag.ItemIsMovable,
-                self.active_tool == EditorTool.SELECT,
+                self.active_tool == EditorTool.SELECT and not locked,
             )
+            item.setOpacity(0.45 if locked else 1.0)
             self.scene.addItem(item)
             self.dot_items[dot.id] = item
         self.apply_visibility_filters()
@@ -564,7 +839,11 @@ class FieldView(QGraphicsView):
         self.scene.clear()
         self.dot_items.clear()
         self.prop_items.clear()
+        self.preview_items.clear()
+        self.path_items.clear()
+        self.snap_items.clear()
         scale = self.scale_factor
+        palette = self.field_palette()
         field_half_width = FIELD_HALF_WIDTH_YARDS
         field_half_height = FIELD_HALF_HEIGHT_YARDS
         width = field_half_width * 2 * scale
@@ -623,21 +902,21 @@ class FieldView(QGraphicsView):
             label.setZValue(z_value)
             return label
 
-        turf_pen = QPen(QColor("#89939a"), 0.16 * scale)
-        add_rect(-field_half_width, -field_half_height, field_half_width, field_half_height, turf_pen, QColor("#f9fbf7"), -24)
-        add_rect(-60, -field_half_height, -50, field_half_height, QPen(QColor("#b8c2c5"), 0.06 * scale), QColor("#edf3ef"), -23)
-        add_rect(50, -field_half_height, 60, field_half_height, QPen(QColor("#b8c2c5"), 0.06 * scale), QColor("#edf3ef"), -23)
+        turf_pen = QPen(QColor(palette["field_border"]), 0.16 * scale)
+        add_rect(-field_half_width, -field_half_height, field_half_width, field_half_height, turf_pen, QColor(palette["field_fill"]), -24)
+        add_rect(-60, -field_half_height, -50, field_half_height, QPen(QColor(palette["yard"]), 0.06 * scale), QColor(palette["endzone_fill"]), -23)
+        add_rect(50, -field_half_height, 60, field_half_height, QPen(QColor(palette["yard"]), 0.06 * scale), QColor(palette["endzone_fill"]), -23)
 
-        perimeter_pen = QPen(QColor("#747e85"), 0.08 * scale, Qt.PenStyle.DashLine)
+        perimeter_pen = QPen(QColor(palette["perimeter"]), 0.08 * scale, Qt.PenStyle.DashLine)
         add_rect(-65, -31.5, 65, 31.5, perimeter_pen, Qt.BrushStyle.NoBrush, -25)
 
-        micro_pen = QPen(QColor("#e2e9e7"), 0.018 * scale)
-        minor_pen = QPen(QColor("#d3dcda"), 0.034 * scale)
-        yard_pen = QPen(QColor("#66717a"), 0.08 * scale)
-        heavy_pen = QPen(QColor("#28313a"), 0.14 * scale)
-        hash_pen = QPen(QColor("#20262d"), 0.12 * scale)
-        sideline_tick_pen = QPen(QColor("#313a42"), 0.085 * scale)
-        restraining_pen = QPen(QColor("#929aa0"), 0.055 * scale, Qt.PenStyle.DashLine)
+        micro_pen = QPen(QColor(palette["micro"]), 0.018 * scale)
+        minor_pen = QPen(QColor(palette["minor"]), 0.034 * scale)
+        yard_pen = QPen(QColor(palette["yard"]), 0.08 * scale)
+        heavy_pen = QPen(QColor(palette["heavy"]), 0.14 * scale)
+        hash_pen = QPen(QColor(palette["hash"]), 0.12 * scale)
+        sideline_tick_pen = QPen(QColor(palette["tick"]), 0.085 * scale)
+        restraining_pen = QPen(QColor(palette["restraining"]), 0.055 * scale, Qt.PenStyle.DashLine)
 
         for yard in range(-59, 60):
             if yard % 5 == 0:
@@ -655,7 +934,7 @@ class FieldView(QGraphicsView):
 
         add_line(-60, -field_half_height, 60, -field_half_height, heavy_pen, -12)
         add_line(-60, field_half_height, 60, field_half_height, heavy_pen, -12)
-        add_line(-60, 0, 60, 0, QPen(QColor("#bbc4c8"), 0.045 * scale, Qt.PenStyle.DashLine), -18)
+        add_line(-60, 0, 60, 0, QPen(QColor(palette["center"]), 0.045 * scale, Qt.PenStyle.DashLine), -18)
 
         hash_half_length = 1 / 3
         sideline_tick_length = 0.9
@@ -668,8 +947,8 @@ class FieldView(QGraphicsView):
             add_line(yard, field_half_height, yard, field_half_height - sideline_tick_length, sideline_tick_pen, -10)
 
         for hash_y, label_text in ((BACK_HASH_YARDS, "BACK HASH"), (FRONT_HASH_YARDS, "FRONT HASH")):
-            add_line(-50, hash_y, 50, hash_y, QPen(QColor("#98a3a8"), 0.045 * scale, Qt.PenStyle.DashLine), -17)
-            add_label(label_text, 66.5, hash_y, 7, "#1d232b", 0, QFont.Weight.Bold, -6)
+            add_line(-50, hash_y, 50, hash_y, QPen(QColor(palette["restraining"]), 0.045 * scale, Qt.PenStyle.DashLine), -17)
+            add_label(label_text, 66.5, hash_y, 7, palette["label_muted"], 0, QFont.Weight.Bold, -6)
 
         for yard in range(-50, 51, 10):
             if abs(yard) == 50:
@@ -678,17 +957,17 @@ class FieldView(QGraphicsView):
                 label_text = "50"
             else:
                 label_text = str(50 - abs(yard))
-            add_label(label_text, yard, -21.4, 9, "#3f464c", 0, QFont.Weight.Bold, -6)
-            add_label(label_text, yard, 21.4, 9, "#3f464c", 180, QFont.Weight.Bold, -6)
+            add_label(label_text, yard, -21.4, 9, palette["label"], 0, QFont.Weight.Bold, -6)
+            add_label(label_text, yard, 21.4, 9, palette["label"], 180, QFont.Weight.Bold, -6)
 
-        add_label("END ZONE", -55, 0, 10, "#2f363c", -90, QFont.Weight.Bold, -6)
-        add_label("END ZONE", 55, 0, 10, "#2f363c", 90, QFont.Weight.Bold, -6)
-        add_label("FRONT", 0, -42.5, 14, "#05070a", 0, QFont.Weight.Black, -6)
-        add_label("BACK", 0, 42.5, 14, "#05070a", 0, QFont.Weight.Black, -6)
-        add_label("SIDE\nONE", -76, 0, 12, "#05070a", 0, QFont.Weight.Black, -6)
-        add_label("SIDE\nTWO", 76, 0, 12, "#05070a", 0, QFont.Weight.Black, -6)
-        add_label("BACK SIDELINE", 70.5, field_half_height, 7, "#11151a", 0, QFont.Weight.Bold, -6)
-        add_label("FRONT SIDELINE", 70.5, -field_half_height, 7, "#11151a", 0, QFont.Weight.Bold, -6)
+        add_label("END ZONE", -55, 0, 10, palette["label"], -90, QFont.Weight.Bold, -6)
+        add_label("END ZONE", 55, 0, 10, palette["label"], 90, QFont.Weight.Bold, -6)
+        add_label("FRONT", 0, -42.5, 14, palette["label_heavy"], 0, QFont.Weight.Black, -6)
+        add_label("BACK", 0, 42.5, 14, palette["label_heavy"], 0, QFont.Weight.Black, -6)
+        add_label("SIDE\nONE", -76, 0, 12, palette["label_heavy"], 0, QFont.Weight.Black, -6)
+        add_label("SIDE\nTWO", 76, 0, 12, palette["label_heavy"], 0, QFont.Weight.Black, -6)
+        add_label("BACK SIDELINE", 70.5, field_half_height, 7, palette["label_heavy"], 0, QFont.Weight.Bold, -6)
+        add_label("FRONT SIDELINE", 70.5, -field_half_height, 7, palette["label_heavy"], 0, QFont.Weight.Bold, -6)
 
         for side, y_start, y_end, label_y, label_rotation in (
             ("BACK", field_half_height + 3, field_half_height + 7.5, field_half_height + 5.2, 0),
@@ -698,12 +977,12 @@ class FieldView(QGraphicsView):
             add_line(-50, y_end, 50, y_end, restraining_pen, -15)
             add_line(-50, y_start, -50, y_end, restraining_pen, -15)
             add_line(50, y_start, 50, y_end, restraining_pen, -15)
-            add_label("COACHES AREA", 0, label_y, 7, "#333a40", label_rotation, QFont.Weight.Bold, -6)
+            add_label("COACHES AREA", 0, label_y, 7, palette["label_muted"], label_rotation, QFont.Weight.Bold, -6)
             bench_y1 = field_half_height + 8.2 if side == "BACK" else -field_half_height - 11.8
             bench_y2 = field_half_height + 11.8 if side == "BACK" else -field_half_height - 8.2
-            add_rect(-30, bench_y1, 30, bench_y2, QPen(QColor("#565f66"), 0.08 * scale), Qt.BrushStyle.NoBrush, -15)
-            add_label("BENCH", 0, (bench_y1 + bench_y2) / 2, 7, "#333a40", 0, QFont.Weight.Bold, -6)
-            add_label("TEAM\nBOX", 34, (bench_y1 + bench_y2) / 2, 6, "#333a40", 0, QFont.Weight.Bold, -6)
+            add_rect(-30, bench_y1, 30, bench_y2, QPen(QColor(palette["bench"]), 0.08 * scale), Qt.BrushStyle.NoBrush, -15)
+            add_label("BENCH", 0, (bench_y1 + bench_y2) / 2, 7, palette["label_muted"], 0, QFont.Weight.Bold, -6)
+            add_label("TEAM\nBOX", 34, (bench_y1 + bench_y2) / 2, 6, palette["label_muted"], 0, QFont.Weight.Bold, -6)
 
         self.scene.setSceneRect(QRectF(-width / 2 - 300, -height / 2 - 210, width + 600, height + 420))
 
@@ -810,6 +1089,14 @@ class FieldView(QGraphicsView):
                         item.prop_id,
                         item.current_state(self.scene_to_field),
                     )
+
+    def mouseDoubleClickEvent(self, event) -> None:  # type: ignore[override]
+        clicked_item = self.normalized_item(self.itemAt(event.position().toPoint()))
+        if self.active_tool == EditorTool.SELECT and isinstance(clicked_item, DotItem):
+            self.dot_edit_requested.emit(clicked_item.dot_id)
+            event.accept()
+            return
+        super().mouseDoubleClickEvent(event)
 
     def mouseMoveEvent(self, event) -> None:  # type: ignore[override]
         if self._manual_drag_item is not None:
@@ -1048,25 +1335,73 @@ class FieldView(QGraphicsView):
             self.shape_anchor_toggled.emit(clicked_item.dot_id)
             event.accept()
             return
-        if self.active_tool != EditorTool.SELECT:
-            event.accept()
-            return
         menu = QMenu(self)
         actions: list[tuple[str, QAction]] = []
+        if self.active_tool != EditorTool.SELECT:
+            for name in ("Apply Preview", "Clear Preview", "Radial Tool Menu", "Focus Field", "Select Tool"):
+                action = menu.addAction(name)
+                actions.append((name, action))
+            selected = menu.exec(event.globalPos())
+            if selected:
+                for name, action in actions:
+                    if action == selected:
+                        self.context_action.emit(name)
+                        break
+            event.accept()
+            return
+        selected_dot_count = len(self.selected_dot_ids())
+        selected_prop_count = len(self.selected_prop_ids())
+        if isinstance(clicked_item, DotItem):
+            action = menu.addAction("Select Same Section")
+            actions.append(("Select Same Section", action))
+        if selected_dot_count:
+            for name in (
+                "Save Selection Set",
+                "Save Formation Preset",
+                "Carry Selected Forward",
+                "Start Selected Move Here",
+                "Set Opening Positions From Current View",
+                "Face Front",
+                "Face Back",
+                "Rotate Facing -45",
+                "Rotate Facing +45",
+                "Lock Selected Sections",
+                "Unlock Selected Sections",
+            ):
+                action = menu.addAction(name)
+                actions.append((name, action))
+            if selected_prop_count:
+                action = menu.addAction("Fit Form to Selected Prop")
+                actions.append(("Fit Form to Selected Prop", action))
+            menu.addSeparator()
+        action = menu.addAction("Radial Tool Menu")
+        actions.append(("Radial Tool Menu", action))
+        menu.addSeparator()
         for name in (
             "Preview Line",
             "Preview Curve",
             "Preview Arc",
             "Preview Circle",
+            "Preview Oval",
             "Preview Rectangle",
+            "Preview Triangle",
+            "Preview Diamond",
+            "Preview Polygon",
+            "Preview Star",
             "Preview Spiral",
             "Preview Block",
             "Preview Scale Form",
+            "Preview Warp Form",
+            "Preview Rotate",
             "Preview SVG Shape",
             "Preview Scatter",
             "Preview Mirror",
             "Preview Shape Line",
         ):
+            action = menu.addAction(name)
+            actions.append((name, action))
+        menu.addSeparator()
+        for name in ("Focus Field", "Apply Preview", "Clear Preview"):
             action = menu.addAction(name)
             actions.append((name, action))
         selected = menu.exec(event.globalPos())

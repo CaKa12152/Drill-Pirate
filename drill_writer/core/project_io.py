@@ -269,6 +269,7 @@ def load_project(project_dir: Path) -> DrillProject:
             constraints=constraints,
             audio_versions=audio_versions,
             timing_events=timing_events,
+            workflow=dict(show.get("workflow", {})) if isinstance(show.get("workflow", {}), dict) else {},
         )
         project.ensure_set_positions()
         return project
@@ -276,6 +277,21 @@ def load_project(project_dir: Path) -> DrillProject:
         raise
     except Exception as exc:
         raise ProjectLoadError(project_dir, f"Could not load project '{project_dir.name}': {exc}", exc) from exc
+
+
+def load_project_preview(project_dir: Path) -> DrillProject:
+    try:
+        metadata = ProjectMetadata.from_json(read_json(project_dir / "metadata.json"))
+        dots = [Dot.from_json(item) for item in read_json(project_dir / "dots.json").get("dots", [])]
+        props = [Prop.from_json(item) for item in read_json(project_dir / "props.json").get("props", [])]
+        raw_sets = read_json(project_dir / "sets.json").get("sets", [])
+        first_set = DrillSet.from_json(raw_sets[0]) if raw_sets else DrillSet("Set 1", 1, 1)
+        project = DrillProject(metadata=metadata, dots=dots, props=props, sets=[first_set])
+        project.workflow["preview_set_count"] = len(raw_sets)
+        project.ensure_set_positions()
+        return project
+    except Exception as exc:
+        raise ProjectLoadError(project_dir, f"Could not preview project '{project_dir.name}': {exc}", exc) from exc
 
 
 def save_project(
@@ -309,6 +325,7 @@ def save_project(
             "constraints": [constraint.to_json() for constraint in project.constraints],
             "audio_versions": [audio.to_json() for audio in project.audio_versions],
             "timing_events": [event.to_json() for event in project.timing_events],
+            "workflow": dict(project.workflow),
         },
     )
 
@@ -329,7 +346,10 @@ def migrate_project_files(project_dir: Path) -> None:
     except Exception as exc:
         raise ProjectLoadError(project_dir, f"Project file is corrupt or unreadable: {exc}", exc) from exc
 
-    schema_version = int(show.get("schema_version", show.get("version", 1)) or 1)
+    try:
+        schema_version = int(show.get("schema_version", show.get("version", 1)) or 1)
+    except (TypeError, ValueError) as exc:
+        raise ProjectLoadError(project_dir, "Project schema version is invalid.", exc) from exc
     if schema_version > PROJECT_SCHEMA_VERSION:
         raise ProjectLoadError(
             project_dir,
@@ -337,7 +357,16 @@ def migrate_project_files(project_dir: Path) -> None:
         )
 
     changed = False
-    if not isinstance(metadata, dict) or not isinstance(dots.get("dots", []), list) or not isinstance(sets.get("sets", []), list):
+    if (
+        not isinstance(metadata, dict)
+        or not isinstance(dots, dict)
+        or not isinstance(props, dict)
+        or not isinstance(sets, dict)
+        or not isinstance(show, dict)
+        or not isinstance(dots.get("dots", []), list)
+        or not isinstance(props.get("props", []), list)
+        or not isinstance(sets.get("sets", []), list)
+    ):
         raise ProjectLoadError(project_dir, "Project JSON structure is invalid.")
 
     if not show_path.exists():
@@ -367,10 +396,12 @@ def migrate_project_files(project_dir: Path) -> None:
         if not isinstance(drill_set, dict):
             raise ProjectLoadError(project_dir, "Project sets file contains an invalid set entry.")
         for key, default in (
+            ("dot_facings", {}),
             ("prop_positions", {}),
             ("path_anchors", {}),
             ("path_controls", {}),
             ("count_positions", {}),
+            ("move_timings", {}),
             ("movement_styles", {}),
         ):
             if key not in drill_set:
@@ -450,16 +481,51 @@ def restore_project_backup(project_dir: Path, backup_path: Path) -> None:
     if not backup_path.exists():
         raise ProjectLoadError(project_dir, "Selected backup file does not exist.")
     create_project_backup(project_dir, reason="pre_restore", min_interval_seconds=0)
+    current_files = {
+        file_name: (
+            (project_dir / file_name).exists(),
+            (project_dir / file_name).read_bytes() if (project_dir / file_name).exists() else b"",
+        )
+        for file_name in PROJECT_JSON_FILES
+    }
+    restored_files: dict[str, bytes] = {}
     try:
         with zipfile.ZipFile(backup_path) as archive:
             names = set(archive.namelist())
+            missing = [file_name for file_name in REQUIRED_PROJECT_FILES if file_name not in names]
+            if missing:
+                raise ProjectLoadError(
+                    project_dir,
+                    f"Selected backup is missing required file(s): {', '.join(missing)}",
+                )
             for file_name in PROJECT_JSON_FILES:
                 if file_name in names:
-                    destination = project_dir / file_name
-                    destination.write_bytes(archive.read(file_name))
+                    data = archive.read(file_name)
+                    validate_backup_json(project_dir, file_name, data)
+                    restored_files[file_name] = data
+        for file_name, data in restored_files.items():
+            write_bytes_atomic(project_dir / file_name, data)
+        migrate_project_files(project_dir)
     except Exception as exc:
+        for file_name, (existed, data) in current_files.items():
+            destination = project_dir / file_name
+            try:
+                if existed:
+                    write_bytes_atomic(destination, data)
+                elif destination.exists():
+                    destination.unlink()
+            except OSError:
+                pass
         raise ProjectLoadError(project_dir, f"Could not restore backup: {exc}", exc) from exc
-    migrate_project_files(project_dir)
+
+
+def validate_backup_json(project_dir: Path, file_name: str, data: bytes) -> None:
+    try:
+        payload = json.loads(data.decode("utf-8"))
+    except Exception as exc:
+        raise ProjectLoadError(project_dir, f"Backup file '{file_name}' contains invalid JSON.", exc) from exc
+    if not isinstance(payload, dict):
+        raise ProjectLoadError(project_dir, f"Backup file '{file_name}' must contain a JSON object.")
 
 
 def project_backup_dir(project_dir: Path) -> Path:
@@ -500,6 +566,13 @@ def write_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temp_path = path.with_name(f".{path.name}.tmp")
     temp_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    temp_path.replace(path)
+
+
+def write_bytes_atomic(path: Path, data: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = path.with_name(f".{path.name}.tmp")
+    temp_path.write_bytes(data)
     temp_path.replace(path)
 
 

@@ -110,10 +110,12 @@ class DrillSet:
     end_count: int
     tempo: float | None = None
     dot_positions: dict[str, tuple[float, float]] = field(default_factory=dict)
+    dot_facings: dict[str, float] = field(default_factory=dict)
     prop_positions: dict[str, dict[str, float]] = field(default_factory=dict)
     path_anchors: dict[str, list[tuple[float, float]]] = field(default_factory=dict)
     path_controls: dict[str, list[dict[str, tuple[float, float]]]] = field(default_factory=dict)
     count_positions: dict[str, dict[float, tuple[float, float]]] = field(default_factory=dict)
+    move_timings: dict[str, dict[str, float]] = field(default_factory=dict)
     movement_styles: dict[str, MovementStyle] = field(default_factory=dict)
     transition: Transition = Transition.LINEAR
 
@@ -130,6 +132,10 @@ class DrillSet:
             "dot_positions": {
                 dot_id: {"x": position[0], "y": position[1]}
                 for dot_id, position in self.dot_positions.items()
+            },
+            "dot_facings": {
+                dot_id: float(facing)
+                for dot_id, facing in self.dot_facings.items()
             },
             "prop_positions": {
                 prop_id: {
@@ -164,6 +170,14 @@ class DrillSet:
                 for dot_id, keyframes in self.count_positions.items()
                 if keyframes
             },
+            "move_timings": {
+                dot_id: {
+                    "start": float(timing.get("start", self.start_count)),
+                    "end": float(timing.get("end", self.end_count)),
+                }
+                for dot_id, timing in self.move_timings.items()
+                if timing
+            },
             "movement_styles": {
                 dot_id: style.value
                 for dot_id, style in self.movement_styles.items()
@@ -182,6 +196,10 @@ class DrillSet:
             dot_positions={
                 str(dot_id): (float(pos.get("x", 0)), float(pos.get("y", 0)))
                 for dot_id, pos in payload.get("dot_positions", {}).items()
+            },
+            dot_facings={
+                str(dot_id): float(facing)
+                for dot_id, facing in payload.get("dot_facings", {}).items()
             },
             prop_positions={
                 str(prop_id): {
@@ -222,6 +240,14 @@ class DrillSet:
                     for count, pos in keyframes.items()
                 }
                 for dot_id, keyframes in payload.get("count_positions", {}).items()
+            },
+            move_timings={
+                str(dot_id): {
+                    "start": float(timing.get("start", payload.get("start_count", 1))),
+                    "end": float(timing.get("end", payload.get("end_count", 16))),
+                }
+                for dot_id, timing in payload.get("move_timings", {}).items()
+                if isinstance(timing, dict)
             },
             movement_styles={
                 str(dot_id): MovementStyle(str(style))
@@ -367,6 +393,7 @@ class DrillProject:
     constraints: list[DotConstraint] = field(default_factory=list)
     audio_versions: list[AudioVersion] = field(default_factory=list)
     timing_events: list[TimingEvent] = field(default_factory=list)
+    workflow: dict[str, Any] = field(default_factory=dict)
 
     def dot_by_id(self, dot_id: str) -> Dot | None:
         return next((dot for dot in self.dots if dot.id == dot_id), None)
@@ -395,12 +422,29 @@ class DrillProject:
             for dot_id in list(drill_set.dot_positions):
                 if dot_id not in valid_dot_ids:
                     drill_set.dot_positions.pop(dot_id, None)
+                    drill_set.dot_facings.pop(dot_id, None)
                     drill_set.path_anchors.pop(dot_id, None)
                     drill_set.path_controls.pop(dot_id, None)
                     drill_set.count_positions.pop(dot_id, None)
+            for dot_id in list(drill_set.dot_facings):
+                if dot_id not in valid_dot_ids:
+                    drill_set.dot_facings.pop(dot_id, None)
+                else:
+                    drill_set.dot_facings[dot_id] = float(drill_set.dot_facings[dot_id]) % 360.0
             for dot_id in list(drill_set.count_positions):
                 if dot_id not in valid_dot_ids:
                     drill_set.count_positions.pop(dot_id, None)
+            for dot_id in list(drill_set.move_timings):
+                if dot_id not in valid_dot_ids:
+                    drill_set.move_timings.pop(dot_id, None)
+                    continue
+                timing = drill_set.move_timings[dot_id]
+                start = max(float(drill_set.start_count), min(float(timing.get("start", drill_set.start_count)), float(drill_set.end_count)))
+                end = max(start, min(float(timing.get("end", drill_set.end_count)), float(drill_set.end_count)))
+                if abs(start - float(drill_set.start_count)) < 0.0001 and abs(end - float(drill_set.end_count)) < 0.0001:
+                    drill_set.move_timings.pop(dot_id, None)
+                else:
+                    drill_set.move_timings[dot_id] = {"start": start, "end": end}
             for dot_id in list(drill_set.path_controls):
                 if dot_id not in valid_dot_ids:
                     drill_set.path_controls.pop(dot_id, None)

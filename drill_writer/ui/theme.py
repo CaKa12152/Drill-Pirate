@@ -1,5 +1,263 @@
 from __future__ import annotations
 
+from PySide6.QtCore import QSettings
+
+
+FIELD_MODE_OPTIONS = (
+    ("white", "White Field"),
+    ("inverted", "Inverted Field"),
+    ("grass", "Grass Field"),
+)
+
+CUSTOM_COLOR_KEYS = (
+    "background_color",
+    "panel_color",
+    "surface_color",
+    "input_color",
+    "button_color",
+    "text_color",
+    "muted_text_color",
+    "border_color",
+    "accent_color",
+    "selection_color",
+)
+
+DEFAULT_THEME_TOKENS = {
+    "dark": {
+        "background_color": "#121419",
+        "panel_color": "#171b23",
+        "surface_color": "#1d222b",
+        "input_color": "#20242d",
+        "button_color": "#242832",
+        "text_color": "#f2f4f8",
+        "muted_text_color": "#aeb7c8",
+        "border_color": "#303642",
+        "accent_color": "#f7c94a",
+        "selection_color": "#2f6fed",
+        "font_size": "8.8",
+    },
+    "light": {
+        "background_color": "#f4f6fa",
+        "panel_color": "#ffffff",
+        "surface_color": "#f8fbff",
+        "input_color": "#ffffff",
+        "button_color": "#ffffff",
+        "text_color": "#18202b",
+        "muted_text_color": "#5c6676",
+        "border_color": "#c8d0dc",
+        "accent_color": "#2f6fed",
+        "selection_color": "#2f6fed",
+        "font_size": "8.8",
+    },
+}
+
+
+def normalize_theme(mode: str | None) -> str:
+    return "light" if mode == "light" else "dark"
+
+
+def normalize_field_mode(mode: str | None) -> str:
+    return mode if mode in {value for value, _label in FIELD_MODE_OPTIONS} else "white"
+
+
+def valid_color(value: object) -> bool:
+    if not isinstance(value, str):
+        return False
+    if len(value) not in (4, 7):
+        return False
+    if not value.startswith("#"):
+        return False
+    try:
+        int(value[1:], 16)
+    except ValueError:
+        return False
+    return True
+
+
+def theme_tokens(mode: str, settings: QSettings | None = None) -> dict[str, str]:
+    normalized = normalize_theme(mode)
+    tokens = dict(DEFAULT_THEME_TOKENS[normalized])
+    if settings is None:
+        return tokens
+    for key in CUSTOM_COLOR_KEYS:
+        value = settings.value(f"appearance/{key}", "")
+        if valid_color(value):
+            tokens[key] = str(value)
+    font_size = settings.value("appearance/font_size", tokens["font_size"])
+    try:
+        tokens["font_size"] = f"{max(7.0, min(14.0, float(font_size))):.1f}"
+    except (TypeError, ValueError):
+        pass
+    return tokens
+
+
+def reset_custom_appearance(settings: QSettings) -> None:
+    for key in CUSTOM_COLOR_KEYS:
+        settings.remove(f"appearance/{key}")
+    settings.remove("appearance/font_size")
+
+
+def custom_override_stylesheet(tokens: dict[str, str]) -> str:
+    background = tokens["background_color"]
+    panel = tokens["panel_color"]
+    surface = tokens["surface_color"]
+    input_color = tokens["input_color"]
+    button = tokens["button_color"]
+    text = tokens["text_color"]
+    muted = tokens["muted_text_color"]
+    border = tokens["border_color"]
+    accent = tokens["accent_color"]
+    selection = tokens["selection_color"]
+    font_size = tokens["font_size"]
+    return f"""
+QMainWindow, QDialog, QWidget {{
+    background: {background};
+    color: {text};
+    font-family: "Segoe UI", Arial, sans-serif;
+    font-size: {font_size}pt;
+}}
+QLabel, QCheckBox, QRadioButton {{
+    color: {text};
+    background: transparent;
+}}
+QFrame, QStackedWidget, QScrollArea, QAbstractScrollArea, QTabWidget::pane {{
+    background: {background};
+    color: {text};
+    border-color: {border};
+}}
+QGroupBox, QDockWidget {{
+    background: {panel};
+    color: {text};
+    border-color: {border};
+}}
+QGroupBox::title, QDockWidget::title {{
+    color: {muted};
+    background: {panel};
+}}
+QMenuBar, QMenu, QToolBar, QStatusBar {{
+    background: {panel};
+    color: {text};
+    border-color: {border};
+}}
+QMenu::item:selected, QComboBox QAbstractItemView::item:selected {{
+    background: {selection};
+    color: white;
+}}
+QPushButton, QToolButton {{
+    background: {button};
+    color: {text};
+    border: 1px solid {border};
+    border-radius: 5px;
+    padding: 3px 6px;
+}}
+QPushButton:hover, QToolButton:hover {{
+    background: {surface};
+    border-color: {accent};
+}}
+QPushButton:checked, QToolButton:checked {{
+    background: {selection};
+    color: white;
+    border-color: {selection};
+}}
+QLineEdit, QTextEdit, QPlainTextEdit, QTextBrowser,
+QSpinBox, QDoubleSpinBox, QComboBox,
+QListWidget, QListView, QTreeWidget, QTreeView,
+QTableWidget, QTableView {{
+    background: {input_color};
+    color: {text};
+    border: 1px solid {border};
+    border-radius: 4px;
+    selection-background-color: {selection};
+    selection-color: white;
+}}
+QLineEdit:disabled, QTextEdit:disabled, QPlainTextEdit:disabled,
+QSpinBox:disabled, QDoubleSpinBox:disabled, QComboBox:disabled,
+QListWidget:disabled, QTreeWidget:disabled, QTableWidget:disabled,
+QPushButton:disabled, QToolButton:disabled {{
+    background: {surface};
+    color: {muted};
+    border-color: {border};
+}}
+QComboBox QAbstractItemView {{
+    background: {input_color};
+    color: {text};
+    border: 1px solid {border};
+}}
+QHeaderView::section {{
+    background: {surface};
+    color: {text};
+    border: 1px solid {border};
+}}
+QTableWidget, QTableView {{
+    gridline-color: {border};
+    alternate-background-color: {surface};
+}}
+QTabBar::tab {{
+    background: {surface};
+    color: {text};
+    border: 1px solid {border};
+    border-radius: 7px;
+    padding: 4px 8px;
+}}
+QTabBar::tab:selected {{
+    background: {selection};
+    color: white;
+    border-color: {selection};
+}}
+QSplitter::handle, QScrollBar::handle {{
+    background: {border};
+}}
+QScrollBar {{
+    background: {surface};
+    border: 0;
+}}
+QToolTip {{
+    background: {panel};
+    color: {text};
+    border: 1px solid {accent};
+    border-radius: 5px;
+    padding: 6px 8px;
+}}
+#SideTabs QTabBar::tab, #HomeTabs QTabBar::tab {{
+    background: {surface};
+    color: {text};
+    border-color: {border};
+}}
+#SideTabs QTabBar::tab:selected, #HomeTabs QTabBar::tab:selected {{
+    background: {selection};
+    color: white;
+    border-color: {selection};
+}}
+#FieldView {{
+    border: 1px solid {border};
+}}
+#CoordinateReadout, #ColorSwatch {{
+    background: {surface};
+    border: 1px solid {border};
+    color: {accent};
+}}
+#ToolHintLabel {{
+    color: {muted};
+}}
+#ProjectCard, #PluginCard {{
+    background: {surface};
+    color: {text};
+    border: 1px solid {border};
+}}
+#ProjectCard:hover, #PluginCard:hover {{
+    border-color: {accent};
+}}
+#HomePage {{
+    background: {background};
+}}
+#HomeTitle {{
+    color: {accent};
+}}
+#PluginStatusInactive {{
+    background: {surface};
+    color: {muted};
+}}
+"""
 
 DARK_STYLESHEET = """
 QMainWindow, QWidget {
@@ -366,8 +624,10 @@ QSplitter::handle {
 """
 
 
-def theme_stylesheet(mode: str) -> str:
-    return LIGHT_STYLESHEET if mode == "light" else DARK_STYLESHEET
+def theme_stylesheet(mode: str, settings: QSettings | None = None) -> str:
+    normalized = normalize_theme(mode)
+    base = LIGHT_STYLESHEET if normalized == "light" else DARK_STYLESHEET
+    return base + "\n" + custom_override_stylesheet(theme_tokens(normalized, settings))
 
 
 APP_STYLESHEET = DARK_STYLESHEET

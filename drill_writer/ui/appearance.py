@@ -41,6 +41,7 @@ def draw_dot_symbol(
     color: QColor | str,
     symbol: object,
     *,
+    rotation_degrees: float = 0.0,
     outline_color: QColor | str = "#1d2128",
     outline_width: float = 1.0,
     selected: bool = False,
@@ -98,6 +99,9 @@ def draw_dot_symbol(
         painter.setBrush(fill)
         painter.drawPath(path)
     elif normalized == "triangle":
+        painter.translate(center)
+        painter.rotate(float(rotation_degrees))
+        painter.translate(-center)
         path = QPainterPath()
         path.moveTo(center.x(), rect.bottom())
         path.lineTo(rect.right(), rect.top())

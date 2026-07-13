@@ -56,9 +56,9 @@ def load_svg_contours(path: Path) -> list[list[tuple[float, float]]]:
             ]
             contours.append(circle)
         elif tag == "path" and element.get("d"):
-            path_points = parse_path(element.get("d", ""))
-            if len(path_points) > 1:
-                contours.append(path_points)
+            for path_points in parse_path_contours(element.get("d", "")):
+                if len(path_points) > 1:
+                    contours.append(path_points)
 
     normalized = normalize_contours(contours)
     if not normalized:
@@ -72,20 +72,38 @@ def parse_points(value: str) -> list[tuple[float, float]]:
 
 
 def parse_path(value: str) -> list[tuple[float, float]]:
+    return [
+        point
+        for contour in parse_path_contours(value)
+        for point in contour
+    ]
+
+
+def parse_path_contours(value: str) -> list[list[tuple[float, float]]]:
     tokens = re.findall(TOKEN_PATTERN, value.replace(",", " "))
-    points: list[tuple[float, float]] = []
+    contours: list[list[tuple[float, float]]] = []
+    current_contour: list[tuple[float, float]] = []
     cursor = (0.0, 0.0)
     start = (0.0, 0.0)
     previous_control = cursor
     index = 0
     command = ""
+
+    def finish_contour(close: bool = False) -> None:
+        nonlocal current_contour, cursor
+        if close and current_contour and cursor != start:
+            current_contour.extend(line_positions(12, cursor, start)[1:])
+            cursor = start
+        if len(current_contour) > 1:
+            contours.append(current_contour)
+        current_contour = []
+
     while index < len(tokens):
         if re.match(r"[A-Za-z]", tokens[index]):
             command = tokens[index]
             index += 1
             if command.upper() == "Z":
-                points.extend(line_positions(12, cursor, start)[1:])
-                cursor = start
+                finish_contour(close=True)
                 command = ""
                 continue
         if not command:
@@ -98,33 +116,35 @@ def parse_path(value: str) -> list[tuple[float, float]]:
         remaining = len(tokens) - index
         try:
             if cmd == "M" and remaining >= 2:
+                finish_contour()
                 cursor = read_point(tokens, index, cursor, absolute)
                 start = cursor
-                points.append(cursor)
+                previous_control = cursor
+                current_contour = [cursor]
                 index += 2
                 command = "L" if absolute else "l"
             elif cmd == "L" and remaining >= 2:
                 next_point = read_point(tokens, index, cursor, absolute)
-                points.extend(line_positions(12, cursor, next_point)[1:])
+                current_contour.extend(line_positions(12, cursor, next_point)[1:])
                 cursor = next_point
                 index += 2
             elif cmd == "H" and remaining >= 1:
                 x = float(tokens[index]) + (0 if absolute else cursor[0])
                 next_point = (x, cursor[1])
-                points.extend(line_positions(12, cursor, next_point)[1:])
+                current_contour.extend(line_positions(12, cursor, next_point)[1:])
                 cursor = next_point
                 index += 1
             elif cmd == "V" and remaining >= 1:
                 y = float(tokens[index]) + (0 if absolute else cursor[1])
                 next_point = (cursor[0], y)
-                points.extend(line_positions(12, cursor, next_point)[1:])
+                current_contour.extend(line_positions(12, cursor, next_point)[1:])
                 cursor = next_point
                 index += 1
             elif cmd == "C" and remaining >= 6:
                 p1 = read_point(tokens, index, cursor, absolute)
                 p2 = read_point(tokens, index + 2, cursor, absolute)
                 end = read_point(tokens, index + 4, cursor, absolute)
-                points.extend(sample_cubic(cursor, p1, p2, end, 20)[1:])
+                current_contour.extend(sample_cubic(cursor, p1, p2, end, 20)[1:])
                 previous_control = p2
                 cursor = end
                 index += 6
@@ -132,39 +152,39 @@ def parse_path(value: str) -> list[tuple[float, float]]:
                 p1 = (cursor[0] * 2 - previous_control[0], cursor[1] * 2 - previous_control[1])
                 p2 = read_point(tokens, index, cursor, absolute)
                 end = read_point(tokens, index + 2, cursor, absolute)
-                points.extend(sample_cubic(cursor, p1, p2, end, 20)[1:])
+                current_contour.extend(sample_cubic(cursor, p1, p2, end, 20)[1:])
                 previous_control = p2
                 cursor = end
                 index += 4
             elif cmd == "Q" and remaining >= 4:
                 p1 = read_point(tokens, index, cursor, absolute)
                 end = read_point(tokens, index + 2, cursor, absolute)
-                points.extend(sample_quadratic(cursor, p1, end, 20)[1:])
+                current_contour.extend(sample_quadratic(cursor, p1, end, 20)[1:])
                 previous_control = p1
                 cursor = end
                 index += 4
             elif cmd == "T" and remaining >= 2:
                 p1 = (cursor[0] * 2 - previous_control[0], cursor[1] * 2 - previous_control[1])
                 end = read_point(tokens, index, cursor, absolute)
-                points.extend(sample_quadratic(cursor, p1, end, 20)[1:])
+                current_contour.extend(sample_quadratic(cursor, p1, end, 20)[1:])
                 previous_control = p1
                 cursor = end
                 index += 2
             elif cmd == "A" and remaining >= 7:
                 end = read_point(tokens, index + 5, cursor, absolute)
-                points.extend(line_positions(16, cursor, end)[1:])
+                current_contour.extend(line_positions(16, cursor, end)[1:])
                 cursor = end
                 index += 7
             elif cmd == "Z":
-                points.extend(line_positions(12, cursor, start)[1:])
-                cursor = start
+                finish_contour(close=True)
                 index += 1
                 command = ""
             else:
                 index += max(1, command_parameter_count(cmd))
         except (ValueError, IndexError):
             index += 1
-    return points
+    finish_contour()
+    return contours
 
 
 def command_parameter_count(command: str) -> int:

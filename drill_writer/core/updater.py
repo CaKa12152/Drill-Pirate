@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Callable
 
 
-CURRENT_VERSION = "v2.4.0"
+CURRENT_VERSION = "v2.5.0"
 GITHUB_LATEST_RELEASE_API = "https://api.github.com/repos/CaKa12152/Drill-Pirate/releases/latest"
 GITHUB_RELEASES_API = "https://api.github.com/repos/CaKa12152/Drill-Pirate/releases?per_page=20"
 GITHUB_RELEASES_URL = "https://github.com/CaKa12152/Drill-Pirate/releases/"

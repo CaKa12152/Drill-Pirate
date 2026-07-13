@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from math import cos, pi
 
-from drill_writer.core.models import DrillProject, Prop, Transition, prop_default_state
+from drill_writer.core.models import DrillProject, DrillSet, Prop, Transition, prop_default_state
 
 
 @dataclass(slots=True)
@@ -20,6 +20,58 @@ def ease(progress: float, transition: Transition) -> float:
     if transition == Transition.CURVED:
         return progress * progress * (3 - 2 * progress)
     return progress
+
+
+def motion_window_for_dot(drill_set: DrillSet, dot_id: str) -> tuple[float, float]:
+    set_start = float(drill_set.start_count)
+    set_end = float(drill_set.end_count)
+    timing = drill_set.move_timings.get(dot_id, {})
+    move_start = float(timing.get("start", set_start))
+    move_end = float(timing.get("end", set_end))
+    move_start = max(set_start, min(move_start, set_end))
+    move_end = max(move_start, min(move_end, set_end))
+    return move_start, move_end
+
+
+def normalize_facing_degrees(value: float) -> float:
+    return float(value) % 360.0
+
+
+def shortest_angle_delta(start: float, end: float) -> float:
+    return ((normalize_facing_degrees(end) - normalize_facing_degrees(start) + 180.0) % 360.0) - 180.0
+
+
+def dot_facing_at_set(project: DrillProject, set_index: int, dot_id: str) -> float:
+    if not project.sets:
+        return 0.0
+    bounded_index = max(0, min(set_index, len(project.sets) - 1))
+    for index in range(bounded_index, -1, -1):
+        if dot_id in project.sets[index].dot_facings:
+            return normalize_facing_degrees(project.sets[index].dot_facings[dot_id])
+    return 0.0
+
+
+def interpolate_dot_facings(project: DrillProject, set_index: int, count: float) -> dict[str, float]:
+    if not project.sets:
+        return {dot.id: 0.0 for dot in project.dots}
+
+    current_index = max(0, min(set_index, len(project.sets) - 1))
+    current = project.sets[current_index]
+    previous_index = max(0, current_index - 1)
+    facings: dict[str, float] = {}
+    for dot in project.dots:
+        start = dot_facing_at_set(project, previous_index, dot.id) if current_index > 0 else 0.0
+        end = dot_facing_at_set(project, current_index, dot.id)
+        motion_start_count, motion_end_count = motion_window_for_dot(current, dot.id)
+        if count <= motion_start_count:
+            facings[dot.id] = start
+            continue
+        if count >= motion_end_count:
+            facings[dot.id] = end
+            continue
+        progress = ease((count - motion_start_count) / max(0.0001, motion_end_count - motion_start_count), current.transition)
+        facings[dot.id] = normalize_facing_degrees(start + shortest_angle_delta(start, end) * progress)
+    return facings
 
 
 def distance(a: tuple[float, float], b: tuple[float, float]) -> float:
@@ -237,16 +289,22 @@ def interpolate_project(project: DrillProject, set_index: int, count: float) -> 
 
     current_index = max(0, min(set_index, len(project.sets) - 1))
     current = project.sets[current_index]
-    previous = project.sets[current_index - 1] if current_index > 0 else current
-    motion_start_count = current.start_count
-    movement_counts = max(1, current.end_count - motion_start_count)
-    progress = (count - motion_start_count) / movement_counts
-    eased = ease(progress, current.transition)
+    previous = project.sets[current_index - 1] if current_index > 0 else None
 
     positions: dict[str, tuple[float, float]] = {}
     for dot in project.dots:
-        start = previous.dot_positions.get(dot.id, (dot.x, dot.y))
+        start = previous.dot_positions.get(dot.id, (dot.x, dot.y)) if previous else (dot.x, dot.y)
         end = current.dot_positions.get(dot.id, (dot.x, dot.y))
+        motion_start_count, motion_end_count = motion_window_for_dot(current, dot.id)
+        if count <= motion_start_count:
+            positions[dot.id] = start
+            continue
+        if count >= motion_end_count:
+            positions[dot.id] = end
+            continue
+        movement_counts = max(0.0001, motion_end_count - motion_start_count)
+        progress = (count - motion_start_count) / movement_counts
+        eased = ease(progress, current.transition)
         keyframes = current.count_positions.get(dot.id, {})
         if keyframes:
             positions[dot.id] = keyframed_transition_position(
@@ -255,7 +313,7 @@ def interpolate_project(project: DrillProject, set_index: int, count: float) -> 
                 keyframes,
                 count,
                 motion_start_count,
-                current.end_count,
+                motion_end_count,
                 current.transition,
             )
         else:
@@ -280,14 +338,14 @@ def interpolate_props(project: DrillProject, set_index: int, count: float) -> di
 
     current_index = max(0, min(set_index, len(project.sets) - 1))
     current = project.sets[current_index]
-    previous = project.sets[current_index - 1] if current_index > 0 else current
+    previous = project.sets[current_index - 1] if current_index > 0 else None
     motion_start_count = current.start_count
     movement_counts = max(1, current.end_count - motion_start_count)
     progress = ease((count - motion_start_count) / movement_counts, current.transition)
 
     states: dict[str, dict[str, float]] = {}
     for prop in project.props:
-        start = previous.prop_positions.get(prop.id, prop_default_state(prop))
+        start = previous.prop_positions.get(prop.id, prop_default_state(prop)) if previous else prop_default_state(prop)
         end = current.prop_positions.get(prop.id, prop_default_state(prop))
         states[prop.id] = interpolate_prop_state(prop, start, end, progress)
     return states

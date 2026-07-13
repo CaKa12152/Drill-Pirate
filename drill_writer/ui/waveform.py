@@ -12,6 +12,7 @@ from PySide6.QtWidgets import QWidget
 
 from drill_writer.core.models import DrillProject
 from drill_writer.core.timing import count_to_audio_ms
+from drill_writer.ui.theme import DEFAULT_THEME_TOKENS
 
 
 class WaveformWidget(QWidget):
@@ -26,7 +27,12 @@ class WaveformWidget(QWidget):
         self.position_ms = 0
         self.load_error = ""
         self.project: DrillProject | None = None
+        self.theme_tokens = dict(DEFAULT_THEME_TOKENS["dark"])
         self.setCursor(Qt.CursorShape.PointingHandCursor)
+
+    def set_theme_tokens(self, tokens: dict[str, str]) -> None:
+        self.theme_tokens = dict(tokens)
+        self.update()
 
     def set_project(self, project: DrillProject) -> None:
         self.project = project
@@ -143,26 +149,32 @@ class WaveformWidget(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         rect = self.rect().adjusted(8, 6, -8, -6)
-        painter.fillRect(self.rect(), QColor("#111318"))
-        painter.setPen(QPen(QColor("#303744"), 1))
-        painter.setBrush(QColor("#171b23"))
+        background = QColor(self.theme_tokens.get("background_color", "#111318"))
+        surface = QColor(self.theme_tokens.get("surface_color", "#171b23"))
+        border = QColor(self.theme_tokens.get("border_color", "#303744"))
+        text = QColor(self.theme_tokens.get("muted_text_color", "#647084"))
+        accent = QColor(self.theme_tokens.get("accent_color", "#f7d154"))
+        selection = QColor(self.theme_tokens.get("selection_color", "#2f6fed"))
+        painter.fillRect(self.rect(), background)
+        painter.setPen(QPen(border, 1))
+        painter.setBrush(surface)
         painter.drawRoundedRect(rect, 5, 5)
 
         center_y = rect.center().y()
         if self.samples:
             bar_width = max(1, rect.width() / max(1, len(self.samples)))
-            painter.setPen(QPen(QColor("#2c4e6a"), 1))
+            painter.setPen(QPen(selection.darker(135), 1))
             for index, sample in enumerate(self.samples):
                 x = rect.left() + index * bar_width
                 height = sample * rect.height() * 0.42
                 painter.drawLine(int(x), int(center_y - height), int(x), int(center_y + height))
-            painter.setPen(QPen(QColor("#7ee7ff"), 2))
+            painter.setPen(QPen(selection.lighter(145), 2))
             for index, sample in enumerate(self.rms_samples or self.samples):
                 x = rect.left() + index * bar_width
                 height = sample * rect.height() * 0.42
                 painter.drawLine(int(x), int(center_y - height), int(x), int(center_y + height))
         else:
-            painter.setPen(QPen(QColor("#647084"), 1))
+            painter.setPen(QPen(text, 1))
             painter.drawLine(rect.left(), center_y, rect.right(), center_y)
             message = "Load audio to show waveform"
             if self.load_error:
@@ -172,13 +184,13 @@ class WaveformWidget(QWidget):
             painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, message)
 
         if self.project and self.duration_ms > 0:
-            painter.setPen(QPen(QColor("#f7d154"), 1, Qt.PenStyle.DashLine))
+            painter.setPen(QPen(accent, 1, Qt.PenStyle.DashLine))
             for event in self.project.timing_events:
                 if event.event_type != "anchor":
                     continue
                 x = rect.left() + (event.milliseconds / self.duration_ms) * rect.width()
                 painter.drawLine(int(x), rect.top(), int(x), rect.bottom())
-            painter.setPen(QPen(QColor("#b057ff"), 1, Qt.PenStyle.DotLine))
+            painter.setPen(QPen(selection.lighter(120), 1, Qt.PenStyle.DotLine))
             for marker in self.project.markers:
                 marker_ms = count_to_audio_ms(self.project, marker.count)
                 x = rect.left() + (marker_ms / self.duration_ms) * rect.width()

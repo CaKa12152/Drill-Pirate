@@ -34,10 +34,11 @@ This page is a full reference of the major Drill Pirate features currently repre
 | Feature | Description |
 | --- | --- |
 | Dockable panels | Tools, inspector, list, and timeline panels can dock, float, close, and reattach. |
-| Workspace presets | Design, Forms, Rehearse, Print, and Focus Field layouts. |
+| Workspace presets | Design, Forms, Rehearse, Print, and Focus Field layouts, with Focus Field keeping condensed panels visible. |
 | Command palette | Search and run commands from the keyboard. |
 | Shortcut editor | Search commands and assign custom keyboard shortcuts. |
-| Dark/light themes | Switch themes in Settings while the field remains readable. |
+| Dark/light/custom themes | Switch themes and customize app background, panels, inputs, buttons, text, borders, accent, selection, and font size. |
+| Field modes | Choose White Field, Inverted Field, or Grass Field rendering. |
 | Marcher symbols | Switch performer rendering between filled circles, hollow circles, X marks, plus marks, squares, diamonds, and triangles. |
 | Update channel | Choose Stable Releases or Beta / Pre-Releases from Settings. |
 | Less panel crowding | Workspaces and floating docks allow large-show layouts on smaller screens. |
@@ -46,7 +47,7 @@ This page is a full reference of the major Drill Pirate features currently repre
 
 | Feature | Description |
 | --- | --- |
-| Natural field rendering | Light field/grid presentation designed for drill readability. |
+| Field rendering modes | White, inverted black/white, and grass-style field presentations designed for drill readability. |
 | Zoom and pan | Navigate the field without changing drill coordinates. |
 | Yard/grid system | 5-yard references and smaller grid subdivisions. |
 | Drill coordinates | Converts internal coordinates to performer-readable drill sheet language. |
@@ -63,7 +64,11 @@ This page is a full reference of the major Drill Pirate features currently repre
 | Searchable list | Search marchers by identifying metadata. |
 | Batch editing | Apply shared metadata to selected performers. |
 | Set positions | Every set stores positions for every marcher. |
+| Set 1 movement | Set 1 can animate from captured opening positions into Set 1 positions. |
+| Opening-position editing | Dragging marchers at Count 1 of Set 1 edits the opening picture; later counts edit the destination. |
 | Count keyframes | Optional per-count position overrides within a set. |
+| Move windows | Selected marchers can hold, start moving mid-set, or finish early inside the same set. |
+| Facing direction | Selected marchers can store per-set facing angles for triangle-symbol visual turns. |
 | Movement styles | Normal, half time, double time, jazz run, halt, and visual. |
 
 ## Props
@@ -129,12 +134,15 @@ This page is a full reference of the major Drill Pirate features currently repre
 | Scatter | Creates organized circle, square, or rectangle scatter layouts with spacing. |
 | Mirror | Mirrors selected marchers across an axis. |
 | Shape Line | Uses selected performers as anchors for mixed straight/curved line segments. |
-| Circle | Places selected marchers around a circle. |
-| Rectangle | Places selected marchers around a rectangle. |
+| Circle / Oval | Places selected marchers around or inside round shapes. |
+| Rectangle / Triangle / Diamond | Places selected marchers around or inside common polygon shapes. |
+| Polygon / Star | Builds configurable hollow or solid regular polygons and stars. |
 | Scale Form | Expands/contracts selected form spacing while preserving the form shape. |
+| Warp/Bend | Bends an existing selected form with multiple draggable wave handles. |
+| Rotate | Rotates a selected form with live preview and a draggable angle handle. |
 | Spiral | Places selected marchers on a spiral. |
 | Block/Grid | Generates block or grid formations. |
-| SVG Shape | Imports SVG paths and distributes performers along them. |
+| SVG Shape | Imports SVG paths and distributes performers along the outline or inside closed paths. |
 | Plugin Form | Runs custom form tools supplied by enabled plugins. |
 
 ## Advanced Editing
@@ -146,10 +154,13 @@ This page is a full reference of the major Drill Pirate features currently repre
 | On-field handles | Drag tool handles directly on the field when supported. |
 | Stable dot ordering | Tools try to preserve local selected order to avoid chaotic remapping. |
 | Deterministic assignment | Ordered form tools preserve performer order and rotate/reverse closed shapes to minimize travel. |
+| Global SVG assignment | SVG imports use global minimum-distance matching so one nearby dot does not steal another dot's best target. |
 | Center selected | Moves selected formation to the field center. |
 | Rotate selected | Rotates selected form as a group. |
 | Follow-leader conveyor | Builds ordered motion around an outline instead of direct cross-form travel. |
 | Fit to prop | Scales selected formation to a selected prop footprint. |
+| Opening positions | Capture the current field view as the Set 1 starting form without changing Set 1 endpoints. |
+| Quick workflow | Select same section, invert selection, select moving marchers, copy sets, and carry selected dots forward. |
 | Snap align | Shows purple horizontal/vertical snap guides while dragging. |
 | Interval tools | Align and normalize spacing for selected marchers. |
 
@@ -204,7 +215,7 @@ This page is a full reference of the major Drill Pirate features currently repre
 | Atomic JSON saves | Project JSON files write through temporary files before replacing the previous version. |
 | Versioned backups | Saves create timestamped JSON backup ZIPs in `.drill_pirate_backups`. |
 | Autosave backups | Autosave creates retained backups with throttling to avoid uncontrolled growth. |
-| Restore Previous Save | File menu command restores a selected backup after creating a pre-restore backup. |
+| Restore Previous Save | File menu command validates a selected backup, restores it atomically, and rolls current files back if restore fails. |
 | Corrupt-project detection | Project load validates required files, JSON structure, schema version, and set presence. |
 | Recovery prompt | Failed project opens offer restoring the newest backup or exporting a bug report bundle. |
 | Schema migrations | Older project files are migrated to the current schema with a migration backup first. |
@@ -215,7 +226,7 @@ This page is a full reference of the major Drill Pirate features currently repre
 | --- | --- |
 | Crash logs | Unhandled exceptions write logs to the local Drill Pirate app data folder. |
 | Error dialogs | Unexpected app errors show a user-facing dialog instead of failing silently. |
-| Bug report bundle | Help menu exports logs, diagnostics, and project files into a ZIP. |
+| Bug report bundle | Help menu exports logs, diagnostics, settings, plugin manifests/state, and project files into a ZIP. |
 
 ## Plugin System
 
@@ -228,6 +239,12 @@ This page is a full reference of the major Drill Pirate features currently repre
 | Main-window hooks | Plugins can affect project windows. |
 | Custom form tools | Plugins can create tool buttons, menu actions, settings, and previews. |
 | Stylesheet control | Plugins can change the UI color scheme and appearance. |
+| Versioned API | Plugins declare `api_version` and compatibility warnings are shown when needed. |
+| Compatibility gating | Plugins requiring a newer major API or newer app version are skipped instead of loaded unsafely. |
+| Trust prompt | Plugin activation shows declared permissions before the plugin is trusted. |
+| Crash isolation | Plugin load, hook, action, panel, and form-tool errors are caught and logged. |
+| Diagnostics console | The Plugins tab includes an error console backed by `plugin_errors.log`. |
+| Example plugins | Bundled examples cover form tools, themes, export helpers, rehearsal helpers, and panel extensions. |
 | Trusted execution | Plugins run with normal Python access and should be installed only from trusted sources. |
 
 ## Update System
@@ -242,6 +259,7 @@ This page is a full reference of the major Drill Pirate features currently repre
 | Release-log popup | Shows the new release description after successful update. |
 | Integrity checks | Downloaded updates are size-checked, optional SHA-256 checked, and ZIP validated. |
 | Rollback copy | ZIP self-update script restores the old app folder if file copy fails. |
+| Release-note state | First launch after an update records whether the user dismissed or suppressed the release notes. |
 
 ## Current Alpha Limits
 

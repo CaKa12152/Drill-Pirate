@@ -37,7 +37,7 @@ Limited:
 
 Plugins are trusted Python code. They can modify the UI, projects, files, colors, menus, tools, and app behavior.
 
-Only install plugins from people you trust.
+Drill Pirate shows a trust prompt the first time a plugin/version/API combination is enabled. The prompt lists declared permissions and compatibility warnings. Only install plugins from people you trust.
 
 ## Folder Layout
 
@@ -66,7 +66,10 @@ from geometry_helpers import make_shape_points
   "version": "1.0.0",
   "author": "Your Name",
   "description": "What the plugin does.",
-  "entry": "plugin.py"
+  "entry": "plugin.py",
+  "api_version": "1.0",
+  "min_app_version": "v2.5.0",
+  "permissions": ["ui", "project_read"]
 }
 ```
 
@@ -80,6 +83,30 @@ Manifest fields:
 | `author` | Recommended | Plugin author. |
 | `description` | Recommended | Short explanation. |
 | `entry` | Yes | Python file to load, usually `plugin.py`. |
+| `api_version` | Recommended | Plugin API version. Current supported API is `1.0`. |
+| `min_app_version` | Recommended | Minimum Drill Pirate version, such as `v2.5.0`. |
+| `permissions` | Recommended | Declared access needs shown in the trust prompt. |
+
+## API Compatibility
+
+The current stable plugin API is `1.0`.
+
+If a plugin declares a newer major API version than the app supports, Drill Pirate shows a compatibility warning before activation and records it in the plugin diagnostics log. Older API versions are still loaded when possible, but also show a warning so developers know the plugin may need updates.
+
+## Permissions
+
+Permissions are declared by the plugin author and shown to the user before activation. They are not a hard sandbox; they are a trust and review system.
+
+| Permission | Meaning |
+| --- | --- |
+| `ui` | Adds or changes UI. |
+| `theme` | Changes app styling. |
+| `project_read` | Reads project data. |
+| `project_write` | Modifies project data. |
+| `file_read` | Reads files from disk. |
+| `file_write` | Writes files to disk. |
+| `network` | Uses network access. |
+| `audio` | Controls audio/playback behavior. |
 
 ## Hook Functions
 
@@ -119,6 +146,9 @@ Common properties:
 | `context.main_window` | Current project window when available. |
 | `context.plugin_dir` | Plugin folder path. |
 | `context.manifest` | Parsed plugin metadata. |
+| `context.api_version` | Current app plugin API version. |
+| `context.app_version` | Current Drill Pirate version tag. |
+| `context.permissions` | Declared permissions from the manifest. |
 
 Common helper methods:
 
@@ -128,6 +158,19 @@ Common helper methods:
 | `context.register_form_tool(...)` | Adds a custom formation tool with preview/settings support. |
 | `context.add_menu_action(...)` | Adds a menu action without manually wiring Qt menus. |
 | `context.add_panel_button(...)` | Adds a button to the plugin actions panel. |
+| `context.log_info(...)` | Adds an info message to the plugin diagnostics console. |
+| `context.log_warning(...)` | Adds a warning to the plugin diagnostics console. |
+| `context.log_error(...)` | Adds an error to the plugin diagnostics console. |
+
+## Isolation and Diagnostics
+
+Plugin load errors, hook errors, menu action errors, panel button errors, and form tool callback errors are caught by Drill Pirate. A broken plugin should not crash the whole app.
+
+Open the home screen `Plugins` tab and click `Error Console` to view plugin diagnostics. Diagnostics are also written to:
+
+```text
+Documents\Drill Pirate Plugins\plugin_errors.log
+```
 
 ## Custom Form Tools
 
@@ -318,6 +361,9 @@ Drill Pirate creates default plugins the first time the plugin folder is scanned
 | --- | --- |
 | `pirate_gold_theme` | Demonstrates stylesheet customization. |
 | `starter_form_tools` | Demonstrates `context.register_form_tool(...)` with an adjustable Diamond form. |
+| `export_helper_example` | Demonstrates plugin-added export commands. |
+| `rehearsal_helper_example` | Demonstrates rehearsal workflow panel buttons. |
+| `panel_extension_example` | Demonstrates plugin-added panel actions. |
 
 ## Starter Diamond Plugin Behavior
 
@@ -351,4 +397,4 @@ If a plugin breaks the app:
 2. If the app cannot open, move the plugin folder out of `Documents\Drill Pirate Plugins`.
 3. Restart Drill Pirate.
 
-During development, start Drill Pirate from a terminal so Python exceptions are visible.
+During development, use the home-screen `Plugins` tab `Error Console` first. If the app cannot start, inspect `Documents\Drill Pirate Plugins\plugin_errors.log` or temporarily move the plugin folder out of the plugins directory.

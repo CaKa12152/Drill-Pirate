@@ -4,6 +4,93 @@ from drill_writer.core.animation import distance
 from drill_writer.core.analysis import segments_intersect
 
 
+def minimum_cost_target_assignment(
+    starts: list[tuple[float, float]],
+    targets: list[tuple[float, float]],
+) -> list[int]:
+    if len(starts) != len(targets):
+        raise ValueError("minimum_cost_target_assignment requires the same number of starts and targets.")
+    count = len(starts)
+    if count == 0:
+        return []
+    if count == 1:
+        return [0]
+
+    costs = [
+        [assignment_distance_cost(start, target) for target in targets]
+        for start in starts
+    ]
+    return hungarian_minimum_assignment(costs)
+
+
+def assignment_distance_cost(start: tuple[float, float], target: tuple[float, float]) -> float:
+    move_distance = distance(start, target)
+    return move_distance * move_distance + move_distance * 0.05
+
+
+def hungarian_minimum_assignment(costs: list[list[float]]) -> list[int]:
+    rows = len(costs)
+    columns = len(costs[0]) if costs else 0
+    if rows == 0:
+        return []
+    if any(len(row) != columns for row in costs):
+        raise ValueError("Cost matrix rows must have the same length.")
+    if rows > columns:
+        raise ValueError("Hungarian assignment requires rows <= columns.")
+
+    potentials_rows = [0.0] * (rows + 1)
+    potentials_columns = [0.0] * (columns + 1)
+    matching = [0] * (columns + 1)
+    previous_column = [0] * (columns + 1)
+
+    for row in range(1, rows + 1):
+        matching[0] = row
+        column = 0
+        min_values = [float("inf")] * (columns + 1)
+        used = [False] * (columns + 1)
+        while True:
+            used[column] = True
+            matched_row = matching[column]
+            delta = float("inf")
+            next_column = 0
+            for candidate_column in range(1, columns + 1):
+                if used[candidate_column]:
+                    continue
+                current = (
+                    costs[matched_row - 1][candidate_column - 1]
+                    - potentials_rows[matched_row]
+                    - potentials_columns[candidate_column]
+                )
+                if current < min_values[candidate_column]:
+                    min_values[candidate_column] = current
+                    previous_column[candidate_column] = column
+                if min_values[candidate_column] < delta:
+                    delta = min_values[candidate_column]
+                    next_column = candidate_column
+            for candidate_column in range(columns + 1):
+                if used[candidate_column]:
+                    potentials_rows[matching[candidate_column]] += delta
+                    potentials_columns[candidate_column] -= delta
+                else:
+                    min_values[candidate_column] -= delta
+            column = next_column
+            if matching[column] == 0:
+                break
+        while True:
+            next_column = previous_column[column]
+            matching[column] = matching[next_column]
+            column = next_column
+            if column == 0:
+                break
+
+    assignment = [-1] * rows
+    for column in range(1, columns + 1):
+        row = matching[column]
+        if row:
+            assignment[row - 1] = column - 1
+    return assignment
+
+
 def ordered_targets(
     starts: list[tuple[float, float]],
     targets: list[tuple[float, float]],

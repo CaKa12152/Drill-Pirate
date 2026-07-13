@@ -50,7 +50,7 @@ from drill_writer.ui.appearance import DOT_SYMBOL_SETTING, dot_symbol_label, pre
 from drill_writer.ui.main_window import MainWindow
 from drill_writer.ui.preferences import PreferencesDialog
 from drill_writer.ui.startup import SplashPage, StartupPage
-from drill_writer.ui.theme import theme_stylesheet
+from drill_writer.ui.theme import CUSTOM_COLOR_KEYS, normalize_field_mode, normalize_theme, theme_stylesheet, theme_tokens
 
 
 class UpdateCheckThread(QThread):
@@ -81,7 +81,7 @@ class DrillWriterApp(QStackedWidget):
         self.settings = QSettings("OpenAI", "DrillWriter")
         self.update_thread: UpdateCheckThread | None = None
         self.release_notes_thread: ReleaseNotesThread | None = None
-        self.plugin_manager = PluginManager(theme_stylesheet(self.theme_mode()))
+        self.plugin_manager = PluginManager(theme_stylesheet(self.theme_mode(), self.settings))
         self.splash = SplashPage()
         self.startup = StartupPage(self.plugin_manager)
         self.startup.project_ready.connect(self.open_project)
@@ -163,6 +163,7 @@ class DrillWriterApp(QStackedWidget):
             self.show_unexpected_project_error(project_dir, exc)
             return
         window.field.set_canvas_theme(self.theme_mode())
+        window.field.set_field_mode(self.field_mode())
         window.return_home_requested.connect(lambda selected_window=window: self.return_home(selected_window))
         self.addWidget(window)
         self.plugin_manager.register_main_window(window)
@@ -173,7 +174,13 @@ class DrillWriterApp(QStackedWidget):
 
     def theme_mode(self) -> str:
         value = self.settings.value("appearance/theme", "dark")
-        return "light" if value == "light" else "dark"
+        return normalize_theme(str(value))
+
+    def field_mode(self) -> str:
+        return normalize_field_mode(str(self.settings.value("appearance/field_mode", "white")))
+
+    def appearance_tokens(self) -> dict[str, str]:
+        return theme_tokens(self.theme_mode(), self.settings)
 
     def audio_output_device_id(self) -> str:
         return normalize_audio_output_device_id(
@@ -196,21 +203,40 @@ class DrillWriterApp(QStackedWidget):
             self.update_channel(),
             self.tooltips_enabled(),
             self.dot_symbol(),
+            self.field_mode(),
+            self.appearance_tokens(),
             self,
         )
         dialog.exec()
 
     def apply_theme(self, mode: str) -> None:
-        normalized = "light" if mode == "light" else "dark"
+        normalized = normalize_theme(mode)
         self.settings.setValue("appearance/theme", normalized)
         self.settings.sync()
-        stylesheet = theme_stylesheet(normalized)
+        self.refresh_app_theme()
+
+    def apply_appearance_tokens(self, values: dict[str, str]) -> None:
+        for key in CUSTOM_COLOR_KEYS:
+            if key in values:
+                self.settings.setValue(f"appearance/{key}", values[key])
+        if "font_size" in values:
+            self.settings.setValue("appearance/font_size", values["font_size"])
+        self.settings.sync()
+        self.refresh_app_theme()
+
+    def refresh_app_theme(self) -> None:
+        stylesheet = theme_stylesheet(self.theme_mode(), self.settings)
         self.plugin_manager.base_stylesheet = stylesheet
         app = QApplication.instance()
         if isinstance(app, QApplication):
             app.setStyleSheet(stylesheet)
         self.plugin_manager.reload_active_plugins()
-        self.apply_canvas_theme(normalized)
+        for index in range(self.count()):
+            widget = self.widget(index)
+            handler = getattr(widget, "apply_visual_theme", None)
+            if callable(handler):
+                handler(self.appearance_tokens())
+        self.apply_canvas_theme(self.theme_mode())
 
     def apply_canvas_theme(self, mode: str) -> None:
         for index in range(self.count()):
@@ -218,6 +244,25 @@ class DrillWriterApp(QStackedWidget):
             field = getattr(widget, "field", None)
             if field is not None and hasattr(field, "set_canvas_theme"):
                 field.set_canvas_theme(mode)
+            if field is not None and hasattr(field, "set_field_mode"):
+                field.set_field_mode(self.field_mode())
+            minimap = getattr(widget, "minimap", None)
+            if minimap is not None:
+                minimap.update()
+            set_preview_handler = getattr(widget, "refresh_set_thumbnails", None)
+            if callable(set_preview_handler):
+                set_preview_handler()
+
+    def apply_field_mode(self, mode: str) -> None:
+        normalized = normalize_field_mode(mode)
+        self.settings.setValue("appearance/field_mode", normalized)
+        self.settings.sync()
+        if hasattr(self.startup, "apply_field_mode"):
+            self.startup.apply_field_mode(normalized)
+        self.apply_canvas_theme(self.theme_mode())
+        current = self.currentWidget()
+        if isinstance(current, MainWindow):
+            current.statusBar().showMessage(f"Field mode: {normalized.title()}", 2200)
 
     def apply_audio_output_device(self, device_id: str) -> None:
         normalized = normalize_audio_output_device_id(device_id)
@@ -268,6 +313,9 @@ class DrillWriterApp(QStackedWidget):
     def return_home(self, window: MainWindow) -> None:
         self.startup.refresh_projects()
         self.plugin_manager.unregister_main_window(window)
+        release = getattr(window, "release_media_resources", None)
+        if callable(release):
+            release()
         self.setCurrentWidget(self.startup)
         self.removeWidget(window)
         window.deleteLater()
@@ -408,10 +456,12 @@ class DrillWriterApp(QStackedWidget):
         layout.addLayout(button_row)
         dialog.exec()
 
-        self.record_release_notes_seen(release.tag)
+        self.record_release_notes_seen(release.tag, suppress=bool(result["dont_show"]))
 
-    def record_release_notes_seen(self, tag: str) -> None:
+    def record_release_notes_seen(self, tag: str, suppress: bool = False) -> None:
         self.settings.setValue("updates/release_notes_seen_tag", tag)
+        if suppress:
+            self.settings.setValue("updates/release_notes_suppressed_tag", tag)
         self.clear_pending_release_notes(sync=False)
         self.settings.sync()
 
@@ -571,8 +621,8 @@ def main() -> int:
     app = QApplication(sys.argv)
     app.setWindowIcon(QIcon(str(app_icon_path())))
     settings = QSettings("OpenAI", "DrillWriter")
-    mode = "light" if settings.value("appearance/theme", "dark") == "light" else "dark"
-    app.setStyleSheet(theme_stylesheet(mode))
+    mode = normalize_theme(str(settings.value("appearance/theme", "dark")))
+    app.setStyleSheet(theme_stylesheet(mode, settings))
     window = DrillWriterApp()
     window.show()
     return app.exec()

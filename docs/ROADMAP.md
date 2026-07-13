@@ -148,11 +148,11 @@ Current state:
 
 Production target:
 
-- Versioned plugin API.
-- Plugin compatibility warnings.
-- Safer plugin permissions.
-- Plugin signing or trust prompts.
-- Example plugin gallery.
+- Versioned plugin API and compatibility warnings.
+- Permission/trust prompts for activation.
+- Plugin error isolation and diagnostics console.
+- Example plugin gallery covering form tools, themes, exports, rehearsal helpers, and panel extensions.
+- Future: plugin signing and marketplace distribution.
 - Better developer diagnostics.
 
 ## Distribution and Operations

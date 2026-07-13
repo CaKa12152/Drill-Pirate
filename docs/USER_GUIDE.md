@@ -61,7 +61,7 @@ Use workspaces to reduce panel crowding.
 | Forms Workspace | `Ctrl+Alt+2` | Formation tools and shape editing. |
 | Rehearse Workspace | `Ctrl+Alt+3` | Playback, timing, waveform, markers, and movement styles. |
 | Print Workspace | `Ctrl+Alt+4` | Export and staff/performer review. |
-| Focus Field | `Ctrl+Alt+5` | Maximum field space with minimal panels. |
+| Focus Field | `Ctrl+Alt+5` | Larger field view with condensed side and timeline panels still visible. |
 
 ## Field and Coordinates
 
@@ -116,6 +116,21 @@ Use:
 - `Del` to delete selected marchers.
 
 Add/delete is intended for Set 1 so the roster stays consistent across the show.
+
+### Moving During Set 1
+
+Set 1 can have movement. Drill Pirate treats each marcher’s base `dots.json` position as the opening picture, then moves into Set 1’s stored position.
+
+Use:
+
+- Build the opening form on the field.
+- Run `Tools > Set Opening Positions From Current View` or press `Ctrl+Alt+Shift+H`.
+- Move the same marchers into the Set 1 ending form.
+- Playback Set 1; marchers move from the captured opening form into the Set 1 form.
+
+When the timeline is on Count 1 of Set 1, dragging marchers edits the opening picture. Scrub later in Set 1, or to the end count, to edit the Set 1 destination picture.
+
+If marchers are selected, only selected marchers update their opening positions. If nothing is selected, all marchers update.
 
 ### Search and Batch Edit
 
@@ -245,15 +260,19 @@ Built-in tools:
 | Scatter | Creates organized circle, square, or rectangle scatter layouts with spacing. |
 | Mirror | Mirrors selected performers across an axis. |
 | Shape Line | Uses selected marchers as anchors for straight/curved line segments. |
-| Circle | Places selected marchers on a full circle. |
-| Rectangle | Places selected marchers on a rectangle perimeter. |
+| Circle / Oval | Places selected marchers on a hollow or solid round form. |
+| Rectangle / Triangle / Diamond | Places selected marchers on hollow or solid common shapes. |
+| Polygon / Star | Builds configurable hollow or solid polygons and stars. |
 | Lasso | Freehand multi-select. |
 | Scale Form | Scales the selected form larger/smaller without changing its shape identity. |
+| Warp/Bend | Bends an existing form into waves or multi-bend shapes using draggable handles. |
+| Rotate | Rotates a selected form with preview before applying. |
 | Spiral | Places selected marchers on a spiral. |
 | Block/Grid | Builds block and grid layouts. |
-| SVG Shape | Imports and places selected marchers along an SVG path. |
+| SVG Shape | Imports and places selected marchers along an SVG outline or inside closed SVG paths. |
 
 Tool controls only appear when that tool is active. Advanced tools also expose on-field handles when available.
+Shape tools include a `Fill` control. Use `Hollow` for outlines and `Solid` for filled-in forms.
 
 ## Path Editing
 
@@ -348,10 +367,12 @@ Tabs:
 
 | Tab | Purpose |
 | --- | --- |
-| Preferences | Switch Dark/Light Mode, choose marcher symbol style, toggle tooltips, and choose Stable Releases or Beta / Pre-Releases update channel. |
+| General | Switch Dark/Light Mode, choose White/Inverted/Grass field mode, choose marcher symbol style, toggle tooltips, and choose Stable Releases or Beta / Pre-Releases update channel. |
+| Appearance | Customize UI font size plus app background, panels, surfaces, inputs, buttons, text, borders, accent, and selection colors. |
 | Devices | Choose Windows Default or a specific audio output device. |
 
 Use `Refresh` in the Devices tab after plugging in headphones or changing audio hardware.
+Use `Load Defaults For Selected Theme` in Appearance to return to clean Dark or Light colors.
 
 ## Plugins
 
@@ -392,7 +413,7 @@ The bundle includes recent crash logs, diagnostics, and the current project fold
 
 1. Create project with audio, BPM, default counts, and starting marcher count.
 2. Rename/set up performers by section.
-3. Build Set 1.
+3. Build the opening form, then capture opening positions if Set 1 should move.
 4. Add Set 2 and shape the next form.
 5. Preview selected paths.
 6. Add path anchors or follow-leader motion where needed.

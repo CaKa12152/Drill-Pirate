@@ -82,7 +82,7 @@ Stores performer roster data.
 }
 ```
 
-The dot `x` and `y` fields are field coordinates, not pixels.
+The dot `x` and `y` fields are field coordinates, not pixels. They are also the opening/base positions used as the start of Set 1 animation. Set 1's `dot_positions` are the Set 1 endpoints, so Set 1 can move when these values differ.
 
 ## `props.json`
 
@@ -126,6 +126,9 @@ Stores every set and all set-specific positions/timing/path data.
           "y": 0.0
         }
       },
+      "dot_facings": {
+        "dot001": 90.0
+      },
       "prop_positions": {
         "prop001": {
           "x": 0.0,
@@ -138,6 +141,12 @@ Stores every set and all set-specific positions/timing/path data.
       "path_anchors": {},
       "path_controls": {},
       "count_positions": {},
+      "move_timings": {
+        "dot001": {
+          "start": 5.0,
+          "end": 16.0
+        }
+      },
       "movement_styles": {},
       "transition": "linear"
     }
@@ -153,11 +162,13 @@ Set fields:
 | `start_count` | First count of this set. |
 | `end_count` | Last count of this set. |
 | `tempo` | Optional set tempo override; `null` uses project/timing-map tempo. |
-| `dot_positions` | End/start position map for each performer in this set. |
+| `dot_positions` | Endpoint position map for each performer in this set. For Set 1, movement starts from `dots.json` `x`/`y`; later sets start from the previous set. |
+| `dot_facings` | Optional per-performer facing direction in degrees. `0` faces front field and is visible with triangle symbols. |
 | `prop_positions` | Prop state for this set. |
 | `path_anchors` | Red path anchor points per performer. |
 | `path_controls` | Bezier tangent control data per performer. |
 | `count_positions` | Per-count keyframe overrides. |
+| `move_timings` | Optional per-performer movement windows inside the set. Omitted performers move for the full set. |
 | `movement_styles` | Set-specific movement style metadata. |
 | `transition` | `linear`, `ease_in_out`, or `curved`. |
 

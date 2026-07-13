@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 
-from PySide6.QtCore import QEasingCurve, QPointF, Property, QPropertyAnimation, QRectF, Signal, Qt
+from PySide6.QtCore import QEasingCurve, QPointF, Property, QPropertyAnimation, QRectF, QSettings, Signal, Qt
 from PySide6.QtGui import QColor, QFont, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QDialog,
@@ -13,6 +14,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QMessageBox,
     QPlainTextEdit,
     QPushButton,
     QScrollArea,
@@ -25,6 +27,7 @@ from PySide6.QtWidgets import (
 )
 
 from drill_writer.core.coordinates import BACK_HASH_YARDS, FIELD_HALF_HEIGHT_YARDS, FRONT_HASH_YARDS
+from drill_writer.core.animation import dot_facing_at_set
 from drill_writer.core.models import DrillProject
 from drill_writer.core.plugin_manager import PluginManager, PluginManifest, plugin_library_dir
 from drill_writer.core.project_io import (
@@ -32,12 +35,17 @@ from drill_writer.core.project_io import (
     create_project_folder,
     discover_projects,
     load_project,
+    load_project_preview,
     parse_instrumentation_roster,
     project_library_dir,
     roster_count,
 )
 from drill_writer.resources import app_icon_path
 from drill_writer.ui.appearance import draw_dot_symbol, generated_prop_pixmap, normalize_dot_symbol, preferred_dot_symbol
+from drill_writer.ui.theme import normalize_field_mode
+
+
+FIELD_PREVIEW_CACHE: dict[str, QPixmap] = {}
 
 
 class SplashPage(QWidget):
@@ -76,7 +84,7 @@ class SplashPage(QWidget):
         title = QLabel("Drill Pirate")
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         title.setStyleSheet("font-size: 48px; font-weight: 850; letter-spacing: 1px; color: #f7c94a;")
-        version = QLabel("Alpha Version 2.4.0")
+        version = QLabel("Alpha v2.5")
         version.setAlignment(Qt.AlignmentFlag.AlignCenter)
         version.setStyleSheet("font-size: 16px; color: #f4f4f1;")
         tagline = QLabel("Professional drill design for the field")
@@ -205,6 +213,7 @@ class FieldPreview(QWidget):
         self.project = project
         self.project_dir = project_dir
         self.dot_symbol = preferred_dot_symbol()
+        self.field_mode = normalize_field_mode(str(QSettings("OpenAI", "DrillWriter").value("appearance/field_mode", "white")))
         self.setMinimumSize(260, 132)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
 
@@ -212,20 +221,85 @@ class FieldPreview(QWidget):
         self.dot_symbol = normalize_dot_symbol(symbol)
         self.update()
 
+    def set_field_mode(self, mode: str) -> None:
+        self.field_mode = normalize_field_mode(mode)
+        self.update()
+
+    def preview_palette(self) -> dict[str, str]:
+        if self.field_mode == "inverted":
+            return {
+                "outer": "#050607",
+                "fill": "#050607",
+                "line": "#ffffff",
+                "micro": "#303640",
+                "text": "#ffffff",
+                "hash": "#ffffff",
+            }
+        if self.field_mode == "grass":
+            return {
+                "outer": "#101419",
+                "fill": "#2f7d3b",
+                "line": "#ffffff",
+                "micro": "#5aa766",
+                "text": "#ffffff",
+                "hash": "#ffffff",
+            }
+        return {
+            "outer": "#101419",
+            "fill": "#f9fbf7",
+            "line": "#88939a",
+            "micro": "#e3e9e8",
+            "text": "#6c767e",
+            "hash": "#1f2529",
+        }
+
     def paintEvent(self, _event) -> None:  # type: ignore[override]
-        painter = QPainter(self)
+        cache_key = self.preview_cache_key()
+        cached = FIELD_PREVIEW_CACHE.get(cache_key)
+        if cached is not None and not cached.isNull():
+            painter = QPainter(self)
+            painter.drawPixmap(self.rect(), cached)
+            painter.end()
+            return
+        pixmap = QPixmap(self.size())
+        pixmap.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pixmap)
+        self.render_preview(painter)
+        painter.end()
+        FIELD_PREVIEW_CACHE[cache_key] = QPixmap(pixmap)
+        if len(FIELD_PREVIEW_CACHE) > 120:
+            for key in list(FIELD_PREVIEW_CACHE)[:30]:
+                FIELD_PREVIEW_CACHE.pop(key, None)
+        screen_painter = QPainter(self)
+        screen_painter.drawPixmap(self.rect(), pixmap)
+        screen_painter.end()
+
+    def preview_cache_key(self) -> str:
+        mtimes: list[str] = []
+        if self.project_dir and self.project_dir.exists():
+            for filename in ("metadata.json", "dots.json", "props.json", "sets.json"):
+                path = self.project_dir / filename
+                mtimes.append(f"{filename}:{path.stat().st_mtime if path.exists() else 0}")
+        payload = (
+            f"{self.project_dir}|{'|'.join(mtimes)}|{self.field_mode}|"
+            f"{self.dot_symbol}|{self.width()}x{self.height()}"
+        )
+        return hashlib.sha1(payload.encode("utf-8")).hexdigest()
+
+    def render_preview(self, painter: QPainter) -> None:
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        outer = QRectF(self.rect()).adjusted(1, 1, -1, -1)
+        palette = self.preview_palette()
+        outer = QRectF(0, 0, self.width(), self.height()).adjusted(1, 1, -1, -1)
         painter.setPen(QPen(QColor("#2f3744"), 1))
-        painter.setBrush(QColor("#101419"))
+        painter.setBrush(QColor(palette["outer"]))
         painter.drawRoundedRect(outer, 10, 10)
 
         rect = self.field_rect(outer)
-        painter.setPen(QPen(QColor("#88939a"), 0.55))
-        painter.setBrush(QColor("#f9fbf7"))
+        painter.setPen(QPen(QColor(palette["line"]), 0.55))
+        painter.setBrush(QColor(palette["fill"]))
         painter.drawRoundedRect(rect, 5, 5)
 
-        micro_pen = QPen(QColor("#e3e9e8"), 0.16)
+        micro_pen = QPen(QColor(palette["micro"]), 0.16)
         painter.setPen(micro_pen)
         for index in range(49):
             x = rect.left() + rect.width() * index / 48
@@ -234,13 +308,13 @@ class FieldPreview(QWidget):
             y = rect.top() + rect.height() * index / 8
             painter.drawLine(int(rect.left()), int(y), int(rect.right()), int(y))
 
-        yard_pen = QPen(QColor("#5d686f"), 0.42)
+        yard_pen = QPen(QColor(palette["line"]), 0.42)
         painter.setPen(yard_pen)
         for index in range(13):
             x = rect.left() + rect.width() * index / 12
             painter.drawLine(int(x), int(rect.top()), int(x), int(rect.bottom()))
 
-        hash_pen = QPen(QColor("#1f2529"), 0.42)
+        hash_pen = QPen(QColor(palette["hash"]), 0.42)
         painter.setPen(hash_pen)
         for field_y in (BACK_HASH_YARDS, FRONT_HASH_YARDS):
             y = rect.top() + (FIELD_HALF_HEIGHT_YARDS - field_y) / (FIELD_HALF_HEIGHT_YARDS * 2) * rect.height()
@@ -248,7 +322,7 @@ class FieldPreview(QWidget):
                 x = rect.left() + rect.width() * index / 24
                 painter.drawLine(int(x), int(y - 0.8), int(x), int(y + 0.8))
 
-        painter.setPen(QPen(QColor("#6c767e"), 0.35))
+        painter.setPen(QPen(QColor(palette["text"]), 0.35))
         painter.setFont(QFont("Segoe UI", 4, QFont.Weight.DemiBold))
         for index, text in enumerate(("G", "10", "20", "30", "40", "50", "40", "30", "20", "10", "G")):
             x = rect.left() + rect.width() * index / 10
@@ -280,6 +354,7 @@ class FieldPreview(QWidget):
                 radius,
                 QColor(dot.color or "#e53935"),
                 self.dot_symbol,
+                rotation_degrees=dot_facing_at_set(self.project, 0, dot.id),
                 outline_width=0.42,
             )
 
@@ -366,7 +441,8 @@ class ProjectCard(QFrame):
         title = QLabel(project.metadata.show_title)
         title.setStyleSheet("font-size: 14px; font-weight: 700;")
         title.setWordWrap(True)
-        detail = QLabel(f"{len(project.dots)} marchers · {len(project.sets)} set(s)")
+        set_count = int(project.workflow.get("preview_set_count", len(project.sets)))
+        detail = QLabel(f"{len(project.dots)} marchers · {set_count} set(s)")
         detail.setStyleSheet("color: #9da7b8; font-size: 11px;")
         layout.addWidget(self.preview)
         layout.addWidget(title)
@@ -528,7 +604,7 @@ class StartupPage(QWidget):
         title = QLabel("Drill Pirate")
         title.setObjectName("HomeTitle")
         title.setStyleSheet("font-size: 34px; font-weight: 850; color: #f7c94a;")
-        version = QLabel("Alpha Version 2.4.0")
+        version = QLabel("Alpha v2.5")
         version.setStyleSheet("font-size: 12px; color: #f1f1ee;")
         path_label = QLabel(f"Project library · {self.library_dir}")
         path_label.setStyleSheet("color: #8d98aa;")
@@ -585,8 +661,11 @@ class StartupPage(QWidget):
         plugin_path.setStyleSheet("color: #8d98aa;")
         refresh_button = QPushButton("Refresh")
         refresh_button.clicked.connect(self.refresh_plugins)
+        console_button = QPushButton("Error Console")
+        console_button.clicked.connect(self.show_plugin_console)
         top_row.addWidget(heading)
         top_row.addWidget(plugin_path, 1)
+        top_row.addWidget(console_button)
         top_row.addWidget(refresh_button)
         tab_layout.addLayout(top_row)
         note = QLabel("Plugins are folders with a plugin.json manifest and Python entry file. Only enable plugins you trust.")
@@ -613,6 +692,10 @@ class StartupPage(QWidget):
         for preview in self.findChildren(FieldPreview):
             preview.set_dot_symbol(symbol)
 
+    def apply_field_mode(self, mode: str) -> None:
+        for preview in self.findChildren(FieldPreview):
+            preview.set_field_mode(mode)
+
     def refresh_projects(self) -> None:
         while self.grid.count():
             item = self.grid.takeAt(0)
@@ -627,7 +710,7 @@ class StartupPage(QWidget):
         col_count = 3
         for index, project_dir in enumerate(discover_projects(self.library_dir), start=1):
             try:
-                project = load_project(project_dir)
+                project = load_project_preview(project_dir)
                 card = ProjectCard(project_dir, project)
             except ProjectLoadError as exc:
                 card = RecoveryProjectCard(project_dir, exc)
@@ -650,15 +733,75 @@ class StartupPage(QWidget):
             return
 
         for index, manifest in enumerate(self.plugin_manager.discover()):
-            card = PluginCard(manifest, self.plugin_manager.is_active(manifest.id))
+            card = PluginCard(
+                manifest,
+                self.plugin_manager.is_active(manifest.id),
+                self.plugin_manager.is_trusted(manifest),
+                self.plugin_manager.compatibility_warnings(manifest),
+            )
             card.toggled.connect(self.toggle_plugin)
             self.plugin_grid.addWidget(card, index // 3, index % 3)
 
     def toggle_plugin(self, plugin_id: str, active: bool) -> None:
         if not self.plugin_manager:
             return
+        manifest = self.plugin_manager.manifest_for_id(plugin_id)
+        if active and manifest is not None and not self.plugin_manager.is_trusted(manifest):
+            warnings = self.plugin_manager.compatibility_warnings(manifest)
+            warning_text = "\n".join(f"- {warning}" for warning in warnings) or "- No compatibility warnings."
+            message = QMessageBox(self)
+            message.setWindowTitle("Trust Plugin")
+            message.setIcon(QMessageBox.Icon.Warning)
+            message.setText(f"Enable plugin: {manifest.name}?")
+            message.setInformativeText(
+                "Plugins run inside Drill Pirate's bundled Python runtime and can affect the app.\n\n"
+                f"Declared permissions:\n{self.plugin_manager.permission_summary(manifest)}\n\n"
+                f"Compatibility:\n{warning_text}"
+            )
+            message.setStandardButtons(QMessageBox.StandardButton.Cancel | QMessageBox.StandardButton.Yes)
+            message.setDefaultButton(QMessageBox.StandardButton.Cancel)
+            if message.exec() != QMessageBox.StandardButton.Yes:
+                self.refresh_plugins()
+                return
+            self.plugin_manager.trust_plugin(manifest)
         self.plugin_manager.set_active(plugin_id, active)
         self.refresh_plugins()
+
+    def show_plugin_console(self) -> None:
+        if not self.plugin_manager:
+            return
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Plugin Error Console")
+        dialog.resize(820, 560)
+        layout = QVBoxLayout(dialog)
+        heading = QLabel("Plugin Diagnostics")
+        heading.setStyleSheet("font-size: 18px; font-weight: 750;")
+        output = QPlainTextEdit()
+        output.setReadOnly(True)
+        output.setPlainText(self.plugin_manager.diagnostics_text())
+        buttons = QHBoxLayout()
+        refresh_button = QPushButton("Refresh")
+        clear_button = QPushButton("Clear Log")
+        close_button = QPushButton("Close")
+
+        def refresh_output() -> None:
+            output.setPlainText(self.plugin_manager.diagnostics_text())
+
+        def clear_output() -> None:
+            self.plugin_manager.clear_diagnostics()
+            refresh_output()
+
+        refresh_button.clicked.connect(refresh_output)
+        clear_button.clicked.connect(clear_output)
+        close_button.clicked.connect(dialog.accept)
+        buttons.addWidget(refresh_button)
+        buttons.addWidget(clear_button)
+        buttons.addStretch()
+        buttons.addWidget(close_button)
+        layout.addWidget(heading)
+        layout.addWidget(output, 1)
+        layout.addLayout(buttons)
+        dialog.exec()
 
     def open_create_dialog(self) -> None:
         dialog = CreateProjectDialog(self)
@@ -670,12 +813,12 @@ class StartupPage(QWidget):
 class PluginCard(QFrame):
     toggled = Signal(str, bool)
 
-    def __init__(self, manifest: PluginManifest, active: bool) -> None:
+    def __init__(self, manifest: PluginManifest, active: bool, trusted: bool, warnings: list[str]) -> None:
         super().__init__()
         self.manifest = manifest
         self.active = active
         self.setObjectName("PluginCard")
-        self.setMinimumSize(300, 118)
+        self.setMinimumSize(300, 156)
         self.setMaximumWidth(360)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
 
@@ -691,14 +834,27 @@ class PluginCard(QFrame):
         top.addWidget(status)
         layout.addLayout(top)
 
-        meta = QLabel(f"Version {manifest.version} · {manifest.author}")
+        trust_text = "Trusted" if trusted else "Needs trust"
+        meta = QLabel(f"Version {manifest.version} · API {manifest.api_version} · {manifest.author} · {trust_text}")
         meta.setStyleSheet("color: #9da7b8;")
+        meta.setWordWrap(True)
         layout.addWidget(meta)
         description = QLabel(manifest.description or "No description provided.")
         description.setWordWrap(True)
         description.setMaximumHeight(34)
         description.setStyleSheet("color: #c8cfdd;")
         layout.addWidget(description)
+        permissions = QLabel("Permissions: " + (", ".join(manifest.permissions) if manifest.permissions else "none declared"))
+        permissions.setStyleSheet("color: #9da7b8; font-size: 10px;")
+        permissions.setWordWrap(True)
+        permissions.setMaximumHeight(28)
+        layout.addWidget(permissions)
+        if warnings:
+            warning_label = QLabel("Warning: " + warnings[0])
+            warning_label.setStyleSheet("color: #f7d154; font-size: 10px;")
+            warning_label.setWordWrap(True)
+            warning_label.setMaximumHeight(28)
+            layout.addWidget(warning_label)
         path = QLabel(str(manifest.path))
         path.setStyleSheet("color: #788396; font-size: 10px;")
         path.setWordWrap(True)
