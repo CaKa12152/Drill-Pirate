@@ -24,7 +24,7 @@ This page is a full reference of the major Drill Pirate features currently repre
 | Default counts | Sets the default count length for new sets. |
 | Time signature | Stores display metadata. |
 | Marcher count | Creates a starting block with the requested number of performers. |
-| Instrumentation roster | Creates compact performer labels from instrument prefixes, such as `F1`, `T1`, `TR1`, `TU1`, and `M1`. |
+| Instrumentation roster | Keeps specific instruments separate from broad sections, supports explicit `Instrument \| Section = Count` entries, and creates compact labels such as `F1`, `T1`, `TR1`, `TU1`, and `M1`. |
 | Front ensemble props | Adds movable front ensemble props in front of the field. |
 | Drum major stands | Adds movable drum major stand props. |
 | Optimized starting block | Fits the initial performer block inside the field. |
@@ -63,11 +63,16 @@ This page is a full reference of the major Drill Pirate features currently repre
 | Group color assignment | Batch color selected marchers or filtered groups. |
 | Searchable list | Search marchers by identifying metadata. |
 | Batch editing | Apply shared metadata to selected performers. |
+| Opt-in transform handles | A compact, toggleable multi-selection gizmo provides move, rotate, corner scale, and editable pivot operations; exact stretch/skew controls remain in the inspector. |
+| Exact transform entry | Enter offsets, rotation, scale, skew, and pivot coordinates from the Selection inspector or the on-field Transform HUD. |
+| Precision nudging | Arrow keys move selected performers by a marching step; modifiers provide half-step, one-yard, and five-yard increments. |
+| Property paintbrush | Copy and paint position/form, paths, facing, movement style, move timing, appearance metadata, and constraints independently. |
 | Set positions | Every set stores positions for every marcher. |
 | Set 1 movement | Set 1 can animate from captured opening positions into Set 1 positions. |
 | Opening-position editing | Dragging marchers at Count 1 of Set 1 edits the opening picture; later counts edit the destination. |
 | Count keyframes | Optional per-count position overrides within a set. |
 | Move windows | Selected marchers can hold, start moving mid-set, or finish early inside the same set. |
+| Movement lanes | A draggable transition timeline shows section or selected-marcher move windows, implied velocity, holds, and staggered entrances. |
 | Facing direction | Selected marchers can store per-set facing angles for triangle-symbol visual turns. |
 | Movement styles | Normal, half time, double time, jazz run, halt, and visual. |
 
@@ -121,6 +126,7 @@ This page is a full reference of the major Drill Pirate features currently repre
 | Pickup offsets | Support pickup timing before Count 1. |
 | Markers | Add manual markers and count markers. |
 | Auto hit markers | Detect high-energy waveform moments and create markers. |
+| Beat-to-set generator | Turn selected musical markers into named set boundaries while preserving the tempo map, ritardandos, fermatas, audio anchors, and sampled drill pictures. |
 | Reload audio | Re-run audio load/waveform analysis. |
 | Audio devices | Choose Windows Default or a specific connected output. |
 
@@ -154,6 +160,9 @@ This page is a full reference of the major Drill Pirate features currently repre
 | On-field handles | Drag tool handles directly on the field when supported. |
 | Stable dot ordering | Tools try to preserve local selected order to avoid chaotic remapping. |
 | Deterministic assignment | Ordered form tools preserve performer order and rotate/reverse closed shapes to minimize travel. |
+| Assignment strategies | Choose automatic, shortest travel, section-aware, rank/file preserving, clockwise, counterclockwise, follow-leader, or lowest-conflict matching. |
+| Smart transition composer | Compare complete assignment candidates with total travel, longest move, crossing, spacing, and weighted conflict scores before applying. |
+| Section-aware fitting | Keeps sections and ranks spatially related while assigning performers to SVG and complex-form targets. |
 | Global SVG assignment | SVG imports use global minimum-distance matching so one nearby dot does not steal another dot's best target. |
 | Center selected | Moves selected formation to the field center. |
 | Rotate selected | Rotates selected form as a group. |
@@ -161,6 +170,9 @@ This page is a full reference of the major Drill Pirate features currently repre
 | Fit to prop | Scales selected formation to a selected prop footprint. |
 | Opening positions | Capture the current field view as the Set 1 starting form without changing Set 1 endpoints. |
 | Quick workflow | Select same section, invert selection, select moving marchers, copy sets, and carry selected dots forward. |
+| Repeat Last Action | Press F4 to repeat the latest transform, formation, batch metadata edit, property paint, or repeatable set operation. |
+| Parameterized macros | Macros capture command context, selection, tool values, and counts, then replay with repeat loops and optional set advancement. |
+| Ripple edit scopes | Apply transforms, timing, facing, movement styles, paths, and painted properties to the current set, all following sets, a selected range, until the next keyframe, or every matching formation. |
 | Snap align | Shows purple horizontal/vertical snap guides while dragging. |
 | Interval tools | Align and normalize spacing for selected marchers. |
 
@@ -196,6 +208,15 @@ This page is a full reference of the major Drill Pirate features currently repre
 | Label toggles | Reduce visual clutter on dense charts. |
 | Searchable performer list | Faster navigation in 150+ performer projects. |
 | Floating panels | Move panels to a second monitor or temporary workspace. |
+| Roster CSV import | Detects common roster columns and generates compact IDs, instrument prefixes, family colors, sections, ranks, and layers. |
+| Hierarchical groups | Builds and edits Ensemble → family → section → rank trees with selection, transforms, and inherited locking. |
+| Linked formations | Keeps equal-size repeated or mirrored groups synchronized until the writer explicitly detaches them. |
+| Spot-safe performer replacement | Replaces or swaps performer roster identities without changing drill coordinates, paths, timing, or facings. |
+| Automatic form cleanup | Removes overlaps, normalizes intervals, smooths curved segments, and preserves sharp corners. |
+| Live conflict heatmap | Continuously analyzes the current set in the background; click a hot count to jump directly to it. |
+| Set comparison | Shows two sets side-by-side with yellow difference vectors, travel distance, and direction. |
+| Formation variations | Stores alternate selected/full-set formations inside one project and reapplies them with undo. |
+| Multi-project tabs | Keeps multiple shows open and copies formations, timing maps, and props between project tabs. |
 
 ## Export System
 

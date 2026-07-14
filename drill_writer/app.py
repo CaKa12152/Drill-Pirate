@@ -8,13 +8,18 @@ from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
+    QDialogButtonBox,
+    QCheckBox,
+    QComboBox,
     QFileDialog,
+    QFormLayout,
     QHBoxLayout,
     QLabel,
     QMessageBox,
     QProgressDialog,
     QPushButton,
     QStackedWidget,
+    QTabWidget,
     QTextBrowser,
     QVBoxLayout,
 )
@@ -88,6 +93,13 @@ class DrillWriterApp(QStackedWidget):
         self.startup.settings_requested.connect(self.show_preferences)
         self.addWidget(self.splash)
         self.addWidget(self.startup)
+        self.project_tabs = QTabWidget()
+        self.project_tabs.setDocumentMode(True)
+        self.project_tabs.setTabsClosable(True)
+        self.project_tabs.setMovable(True)
+        self.project_tabs.tabCloseRequested.connect(self.close_project_tab)
+        self.project_tabs.currentChanged.connect(self.project_tab_changed)
+        self.addWidget(self.project_tabs)
         self.setWindowTitle("Drill Pirate")
         self.setWindowIcon(QIcon(str(app_icon_path())))
         self.resize(1120, 760)
@@ -153,6 +165,16 @@ class DrillWriterApp(QStackedWidget):
             self.settings.sync()
 
     def open_project(self, project_dir: Path) -> None:
+        resolved = project_dir.resolve()
+        for index in range(self.project_tabs.count()):
+            existing = self.project_tabs.widget(index)
+            if isinstance(existing, MainWindow) and existing.project_dir.resolve() == resolved:
+                self.project_tabs.setCurrentIndex(index)
+                self.setCurrentWidget(self.project_tabs)
+                if not self.isMaximized() and not self.isFullScreen():
+                    self.resize(1500, 900)
+                QTimer.singleShot(0, self.refresh_current_layout)
+                return
         try:
             window = MainWindow(project_dir)
         except ProjectLoadError as exc:
@@ -165,12 +187,120 @@ class DrillWriterApp(QStackedWidget):
         window.field.set_canvas_theme(self.theme_mode())
         window.field.set_field_mode(self.field_mode())
         window.return_home_requested.connect(lambda selected_window=window: self.return_home(selected_window))
-        self.addWidget(window)
+        self.project_tabs.addTab(window, window.project.metadata.show_title)
+        self.project_tabs.setCurrentWidget(window)
         self.plugin_manager.register_main_window(window)
-        self.setCurrentWidget(window)
+        self.setCurrentWidget(self.project_tabs)
         if not self.isMaximized() and not self.isFullScreen():
             self.resize(1500, 900)
         QTimer.singleShot(0, self.refresh_current_layout)
+
+    def project_windows(self) -> list[MainWindow]:
+        return [
+            widget
+            for index in range(self.project_tabs.count())
+            if isinstance((widget := self.project_tabs.widget(index)), MainWindow)
+        ]
+
+    def current_main_window(self) -> MainWindow | None:
+        widget = self.project_tabs.currentWidget()
+        return widget if isinstance(widget, MainWindow) else None
+
+    def project_tab_changed(self, _index: int) -> None:
+        active = self.current_main_window()
+        for window in self.project_windows():
+            if window is not active:
+                window.pause()
+        QTimer.singleShot(0, self.refresh_current_layout)
+
+    def application_widgets(self) -> list[object]:
+        return [self.startup, *self.project_windows()]
+
+    def open_project_tab_dialog(self) -> None:
+        directory = QFileDialog.getExistingDirectory(
+            self,
+            "Open Drill Pirate Project in New Tab",
+            str(project_library_dir()),
+        )
+        if directory:
+            self.open_project(Path(directory))
+
+    def copy_from_project_tab_dialog(self, destination: MainWindow) -> None:
+        sources = [window for window in self.project_windows() if window is not destination]
+        if not sources:
+            QMessageBox.information(
+                self,
+                "Copy From Project Tab",
+                "Open another project tab first with Ctrl+Shift+O.",
+            )
+            return
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Copy From Open Project")
+        dialog.resize(520, 360)
+        layout = QVBoxLayout(dialog)
+        note = QLabel(
+            "Copy reusable show content into the current project. Formation transfer matches marcher IDs first, then roster order."
+        )
+        note.setWordWrap(True)
+        form = QFormLayout()
+        source_combo = QComboBox()
+        for window in sources:
+            source_combo.addItem(window.project.metadata.show_title)
+        source_set = QComboBox()
+        destination_set = QComboBox()
+        for index, drill_set in enumerate(destination.project.sets):
+            destination_set.addItem(f"{index + 1}: {drill_set.name}", index)
+        destination_set.setCurrentIndex(destination.set_index)
+        formation_check = QCheckBox("Formation, paths, facings, and movement timing")
+        formation_check.setChecked(True)
+        timing_check = QCheckBox("Tempo and timing map")
+        props_check = QCheckBox("Props and their current set positions")
+
+        def refresh_source_sets() -> None:
+            source_set.clear()
+            selected_source = sources[source_combo.currentIndex()]
+            for index, drill_set in enumerate(selected_source.project.sets):
+                source_set.addItem(f"{index + 1}: {drill_set.name}", index)
+            source_set.setCurrentIndex(selected_source.set_index)
+
+        source_combo.currentIndexChanged.connect(refresh_source_sets)
+        refresh_source_sets()
+        form.addRow("Source project", source_combo)
+        form.addRow("Source set", source_set)
+        form.addRow("Destination set", destination_set)
+        form.addRow(formation_check)
+        form.addRow(timing_check)
+        form.addRow(props_check)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Cancel | QDialogButtonBox.StandardButton.Ok)
+        buttons.button(QDialogButtonBox.StandardButton.Ok).setText("Copy Into Current Project")
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(note)
+        layout.addLayout(form)
+        layout.addStretch()
+        layout.addWidget(buttons)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        if not any((formation_check.isChecked(), timing_check.isChecked(), props_check.isChecked())):
+            return
+        selected_source = sources[source_combo.currentIndex()]
+        try:
+            counts = destination.transfer_from_project(
+                selected_source.project,
+                selected_source.project_dir,
+                int(source_set.currentData() or 0),
+                int(destination_set.currentData() or 0),
+                formation=formation_check.isChecked(),
+                timing_map=timing_check.isChecked(),
+                props=props_check.isChecked(),
+            )
+        except Exception as exc:
+            QMessageBox.warning(self, "Project Transfer Failed", str(exc))
+            return
+        destination.statusBar().showMessage(
+            f"Copied {counts['formation']} positions, {counts['timing']} timing events, {counts['props']} props",
+            4000,
+        )
 
     def theme_mode(self) -> str:
         value = self.settings.value("appearance/theme", "dark")
@@ -231,16 +361,14 @@ class DrillWriterApp(QStackedWidget):
         if isinstance(app, QApplication):
             app.setStyleSheet(stylesheet)
         self.plugin_manager.reload_active_plugins()
-        for index in range(self.count()):
-            widget = self.widget(index)
+        for widget in self.application_widgets():
             handler = getattr(widget, "apply_visual_theme", None)
             if callable(handler):
                 handler(self.appearance_tokens())
         self.apply_canvas_theme(self.theme_mode())
 
     def apply_canvas_theme(self, mode: str) -> None:
-        for index in range(self.count()):
-            widget = self.widget(index)
+        for widget in self.application_widgets():
             field = getattr(widget, "field", None)
             if field is not None and hasattr(field, "set_canvas_theme"):
                 field.set_canvas_theme(mode)
@@ -260,71 +388,77 @@ class DrillWriterApp(QStackedWidget):
         if hasattr(self.startup, "apply_field_mode"):
             self.startup.apply_field_mode(normalized)
         self.apply_canvas_theme(self.theme_mode())
-        current = self.currentWidget()
-        if isinstance(current, MainWindow):
+        current = self.current_main_window()
+        if current is not None:
             current.statusBar().showMessage(f"Field mode: {normalized.title()}", 2200)
 
     def apply_audio_output_device(self, device_id: str) -> None:
         normalized = normalize_audio_output_device_id(device_id)
         self.settings.setValue(AUDIO_OUTPUT_DEVICE_SETTING, normalized)
         self.settings.sync()
-        for index in range(self.count()):
-            widget = self.widget(index)
+        for widget in self.application_widgets():
             handler = getattr(widget, "apply_audio_output_device", None)
             if callable(handler):
                 handler(normalized)
-        current = self.currentWidget()
-        if isinstance(current, MainWindow):
+        current = self.current_main_window()
+        if current is not None:
             current.statusBar().showMessage(f"Audio output: {audio_output_label_for_id(normalized)}", 3000)
 
     def apply_update_channel(self, channel: str) -> None:
         normalized = normalize_update_channel(channel)
         self.settings.setValue("updates/channel", normalized)
         self.settings.sync()
-        current = self.currentWidget()
-        if isinstance(current, MainWindow):
+        current = self.current_main_window()
+        if current is not None:
             current.statusBar().showMessage(f"Update channel: {normalized.title()}", 3000)
 
     def apply_tooltips_enabled(self, enabled: bool) -> None:
         self.settings.setValue("ui/tooltips_enabled", bool(enabled))
         self.settings.sync()
-        for index in range(self.count()):
-            widget = self.widget(index)
+        for widget in self.application_widgets():
             handler = getattr(widget, "apply_tooltips_enabled", None)
             if callable(handler):
                 handler(bool(enabled))
-        current = self.currentWidget()
-        if isinstance(current, MainWindow):
+        current = self.current_main_window()
+        if current is not None:
             state = "enabled" if enabled else "disabled"
             current.statusBar().showMessage(f"Tooltips {state}", 2200)
 
     def apply_dot_symbol(self, symbol: str) -> None:
         self.settings.setValue(DOT_SYMBOL_SETTING, symbol)
         self.settings.sync()
-        for index in range(self.count()):
-            widget = self.widget(index)
+        for widget in self.application_widgets():
             handler = getattr(widget, "apply_dot_symbol", None)
             if callable(handler):
                 handler(symbol)
-        current = self.currentWidget()
-        if isinstance(current, MainWindow):
+        current = self.current_main_window()
+        if current is not None:
             current.statusBar().showMessage(f"Marcher symbol: {dot_symbol_label(symbol)}", 2200)
 
     def return_home(self, window: MainWindow) -> None:
         self.startup.refresh_projects()
-        self.plugin_manager.unregister_main_window(window)
-        release = getattr(window, "release_media_resources", None)
-        if callable(release):
-            release()
+        for project_window in self.project_windows():
+            project_window.pause()
+        window.autosave()
         self.setCurrentWidget(self.startup)
-        self.removeWidget(window)
-        window.deleteLater()
         if not self.isMaximized() and not self.isFullScreen():
             self.resize(1120, 760)
         QTimer.singleShot(0, self.refresh_current_layout)
 
+    def close_project_tab(self, index: int) -> None:
+        window = self.project_tabs.widget(index)
+        if not isinstance(window, MainWindow):
+            return
+        self.plugin_manager.unregister_main_window(window)
+        window.close()
+        self.project_tabs.removeTab(index)
+        window.deleteLater()
+        if self.project_tabs.count() == 0:
+            self.startup.refresh_projects()
+            self.setCurrentWidget(self.startup)
+
     def refresh_current_layout(self) -> None:
-        current = self.currentWidget()
+        current = self.current_main_window() if self.currentWidget() is self.project_tabs else self.currentWidget()
         if current and current.layout():
             current.layout().activate()
         self.updateGeometry()

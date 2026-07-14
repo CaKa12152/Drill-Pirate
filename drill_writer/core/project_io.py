@@ -64,6 +64,8 @@ COMMON_INSTRUMENT_PREFIXES = {
     "flag": "FL",
 }
 
+InstrumentationEntry = tuple[str, int] | tuple[str, str, int]
+
 
 class ProjectLoadError(Exception):
     def __init__(self, project_dir: Path, message: str, cause: Exception | None = None) -> None:
@@ -94,7 +96,7 @@ def create_project_folder(
     counts_per_set: int,
     time_signature: str,
     marcher_count: int = 30,
-    instrumentation: list[tuple[str, int]] | None = None,
+    instrumentation: list[InstrumentationEntry] | None = None,
     front_ensemble_count: int = 0,
     drum_major_stands: int = 0,
 ) -> Path:
@@ -581,8 +583,8 @@ def safe_folder_name(title: str) -> str:
     return safe.strip().replace(" ", "_") or "Untitled_Show"
 
 
-def parse_instrumentation_roster(text: str) -> list[tuple[str, int]]:
-    roster: list[tuple[str, int]] = []
+def parse_instrumentation_roster(text: str) -> list[InstrumentationEntry]:
+    roster: list[InstrumentationEntry] = []
     for raw_line in text.splitlines():
         line = raw_line.strip()
         if not line or line.startswith("#"):
@@ -601,31 +603,47 @@ def parse_instrumentation_roster(text: str) -> list[tuple[str, int]]:
         except ValueError:
             continue
         name = name.strip()
-        if name and count > 0:
+        if not name or count <= 0:
+            continue
+        if "|" in name:
+            instrument, section = (part.strip() for part in name.split("|", 1))
+            if instrument:
+                roster.append((instrument, section, count))
+        else:
             roster.append((name, count))
     return roster
 
 
-def roster_count(instrumentation: list[tuple[str, int]] | None) -> int:
-    return sum(max(0, int(count)) for _name, count in instrumentation or [])
+def roster_count(instrumentation: list[InstrumentationEntry] | None) -> int:
+    return sum(max(0, int(entry[-1])) for entry in instrumentation or [])
 
 
-def default_dots(count: int = 30, instrumentation: list[tuple[str, int]] | None = None) -> list[Dot]:
-    roster = [(name, int(amount)) for name, amount in (instrumentation or []) if int(amount) > 0]
+def default_dots(count: int = 30, instrumentation: list[InstrumentationEntry] | None = None) -> list[Dot]:
+    roster: list[tuple[str, str, int]] = []
+    for entry in instrumentation or []:
+        if len(entry) == 2:
+            instrument, amount = entry
+            section = default_section_for_instrument(instrument)
+        else:
+            instrument, section, amount = entry
+        if int(amount) > 0:
+            roster.append((str(instrument).strip(), str(section).strip(), int(amount)))
     total_count = roster_count(roster) or count
     positions = optimized_starting_block(total_count)
     dots: list[Dot] = []
     if not roster:
-        roster = [("Dot", total_count)]
-    prefixes = unique_instrument_prefixes([name for name, _amount in roster])
+        roster = [("Dot", "", total_count)]
+    prefixes = unique_instrument_prefixes([name for name, _section, _amount in roster])
+    instrument_numbers: dict[str, int] = {}
     dot_index = 0
-    for instrument, amount in roster:
+    for instrument, section, amount in roster:
         prefix = prefixes[instrument]
-        section = default_section_for_instrument(instrument)
-        for number in range(1, amount + 1):
+        start_number = instrument_numbers.get(instrument, 0)
+        for offset in range(1, amount + 1):
             if dot_index >= len(positions):
                 break
             x, y = positions[dot_index]
+            number = start_number + offset
             compact_name = f"{prefix}{number}"
             dots.append(
                 Dot(
@@ -641,6 +659,7 @@ def default_dots(count: int = 30, instrumentation: list[tuple[str, int]] | None 
                 )
             )
             dot_index += 1
+        instrument_numbers[instrument] = start_number + amount
     return dots
 
 
@@ -683,16 +702,20 @@ def preferred_instrument_prefix(instrument: str) -> str:
 
 
 def default_section_for_instrument(instrument: str) -> str:
-    normalized = instrument.lower()
+    normalized = instrument.strip().lower()
+    if not normalized or normalized == "dot":
+        return ""
+    if any(token in normalized for token in ("front ensemble", "pit", "marimba", "vibraphone", "xylophone", "synth")):
+        return "Front Ensemble"
     if any(token in normalized for token in ("snare", "tenor", "quad", "bass drum", "cymbal")):
-        return "battery"
+        return "Battery"
     if any(token in normalized for token in ("guard", "flag", "rifle", "sabre", "saber")):
-        return "guard"
+        return "Guard"
     if any(token in normalized for token in ("trumpet", "mello", "horn", "trombone", "baritone", "euphonium", "tuba", "sousaphone")):
-        return "brass"
+        return "Brass"
     if any(token in normalized for token in ("flute", "piccolo", "clarinet", "sax")):
-        return "woodwinds"
-    return "winds"
+        return "Woodwinds"
+    return "Other"
 
 
 def default_props(front_ensemble_count: int = 0, drum_major_stands: int = 0) -> list[Prop]:

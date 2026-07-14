@@ -52,18 +52,24 @@ class PreferencesDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Settings")
         self.setModal(True)
-        self.setMinimumWidth(640)
+        self.setMinimumSize(640, 430)
+        self.resize(760, 560)
         self.current_audio_device_id = normalize_audio_output_device_id(current_audio_device_id)
         self.current_theme = normalize_theme(current_theme)
         self.current_appearance_tokens = dict(current_appearance_tokens or theme_tokens(self.current_theme))
         self.color_buttons: dict[str, QPushButton] = {}
 
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 14, 16, 14)
+        layout.setSpacing(10)
         self.search_input = QLineEdit()
         self.search_input.setPlaceholderText("Search settings...")
         self.search_status = QLabel("")
         self.search_status.setWordWrap(True)
         tabs = QTabWidget()
+        tabs.setDocumentMode(True)
+        tabs.setUsesScrollButtons(True)
+        tabs.tabBar().setExpanding(False)
         self.tabs = tabs
         layout.addWidget(self.search_input)
         layout.addWidget(self.search_status)
@@ -71,6 +77,10 @@ class PreferencesDialog(QDialog):
 
         preferences_tab = QWidget()
         form = QFormLayout(preferences_tab)
+        form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+        form.setHorizontalSpacing(12)
+        form.setVerticalSpacing(9)
         self.theme_combo = QComboBox()
         self.theme_combo.addItem("Dark Mode", "dark")
         self.theme_combo.addItem("Light Mode", "light")
@@ -105,10 +115,13 @@ class PreferencesDialog(QDialog):
         appearance_tab = QWidget()
         appearance_layout = QVBoxLayout(appearance_tab)
         appearance_form = QFormLayout()
+        appearance_form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+        appearance_form.setHorizontalSpacing(12)
+        appearance_form.setVerticalSpacing(9)
         self.font_size_spin = QDoubleSpinBox()
         self.font_size_spin.setRange(7.0, 14.0)
         self.font_size_spin.setSingleStep(0.2)
-        self.font_size_spin.setValue(float(self.current_appearance_tokens.get("font_size", "8.8")))
+        self.font_size_spin.setValue(float(self.current_appearance_tokens.get("font_size", "9.2")))
         appearance_form.addRow("UI Font Size", self.font_size_spin)
         color_grid = QGridLayout()
         color_labels = {
@@ -126,6 +139,7 @@ class PreferencesDialog(QDialog):
         for index, key in enumerate(CUSTOM_COLOR_KEYS):
             label = QLabel(color_labels.get(key, key.replace("_", " ").title()))
             button = QPushButton()
+            button.setMinimumWidth(104)
             button.clicked.connect(lambda _checked=False, selected_key=key: self.pick_color(selected_key))
             self.color_buttons[key] = button
             self.update_color_button(key, self.current_appearance_tokens.get(key, DEFAULT_THEME_TOKENS[self.current_theme][key]))
@@ -148,6 +162,10 @@ class PreferencesDialog(QDialog):
         devices_tab = QWidget()
         devices_layout = QVBoxLayout(devices_tab)
         devices_form = QFormLayout()
+        devices_form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
+        devices_form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+        devices_form.setHorizontalSpacing(12)
+        devices_form.setVerticalSpacing(9)
         self.audio_output_combo = QComboBox()
         refresh_button = QPushButton("Refresh")
         refresh_button.clicked.connect(self.refresh_audio_devices)
@@ -286,7 +304,7 @@ class PreferencesDialog(QDialog):
 
     def load_theme_defaults(self) -> None:
         defaults = DEFAULT_THEME_TOKENS[self.selected_theme()]
-        self.font_size_spin.setValue(float(defaults.get("font_size", "8.8")))
+        self.font_size_spin.setValue(float(defaults.get("font_size", "9.2")))
         for key in CUSTOM_COLOR_KEYS:
             self.update_color_button(key, defaults[key])
 

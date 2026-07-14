@@ -126,11 +126,17 @@ class CreateProjectDialog(QDialog):
         self.marcher_count_input.setValue(30)
         self.roster_input = QPlainTextEdit()
         self.roster_input.setPlaceholderText(
-            "Optional roster counts, one per line:\n"
-            "Flute=5\nTrumpet=5\nTrombone=5\nTuba=5\nMellophone=5"
+            "Optional roster, one per line:\n"
+            "Flute | Woodwinds = 5\nTrumpet | Brass = 5\nSnare | Battery = 8"
         )
-        self.roster_input.setFixedHeight(92)
+        self.roster_input.setFixedHeight(104)
         self.roster_input.textChanged.connect(self.update_marcher_count_from_roster)
+        roster_help = QLabel(
+            "Instrument identifies what a marcher plays; Section is the broader selectable group. "
+            "Use Instrument = Count to infer the section, or Instrument | Section = Count to set both."
+        )
+        roster_help.setWordWrap(True)
+        roster_help.setStyleSheet("color: #9da4ad; font-size: 11px;")
         self.front_ensemble_input = QSpinBox()
         self.front_ensemble_input.setRange(0, 50)
         self.front_ensemble_input.setValue(0)
@@ -143,7 +149,8 @@ class CreateProjectDialog(QDialog):
         form.addRow("Initial Tempo", self.tempo_input)
         form.addRow("Default Counts", self.counts_input)
         form.addRow("Marchers", self.marcher_count_input)
-        form.addRow("Instrumentation", self.roster_input)
+        form.addRow("Roster", self.roster_input)
+        form.addRow("", roster_help)
         form.addRow("Front Ensemble Props", self.front_ensemble_input)
         form.addRow("Drum Major Stands", self.drum_major_stands_input)
         form.addRow("Time Signature", self.signature_input)
@@ -608,6 +615,7 @@ class StartupPage(QWidget):
         version.setStyleSheet("font-size: 12px; color: #f1f1ee;")
         path_label = QLabel(f"Project library · {self.library_dir}")
         path_label.setStyleSheet("color: #8d98aa;")
+        path_label.setWordWrap(True)
         self.plugin_banner = QLabel("")
         self.plugin_banner.setStyleSheet("color: #f7d154; font-weight: 650;")
         title_stack.addWidget(title)
@@ -625,6 +633,9 @@ class StartupPage(QWidget):
 
         self.tabs = QTabWidget()
         self.tabs.setObjectName("HomeTabs")
+        self.tabs.setDocumentMode(True)
+        self.tabs.setUsesScrollButtons(True)
+        self.tabs.tabBar().setExpanding(False)
         self.tabs.addTab(self.build_projects_tab(), "Projects")
         self.tabs.addTab(self.build_plugins_tab(), "Plugins")
         layout.addWidget(self.tabs, 1)
@@ -659,6 +670,7 @@ class StartupPage(QWidget):
         heading.setStyleSheet("font-size: 18px; font-weight: 750;")
         plugin_path = QLabel(str(plugin_library_dir()))
         plugin_path.setStyleSheet("color: #8d98aa;")
+        plugin_path.setWordWrap(True)
         refresh_button = QPushButton("Refresh")
         refresh_button.clicked.connect(self.refresh_plugins)
         console_button = QPushButton("Error Console")

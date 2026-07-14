@@ -34,7 +34,7 @@ DEFAULT_THEME_TOKENS = {
         "border_color": "#303642",
         "accent_color": "#f7c94a",
         "selection_color": "#2f6fed",
-        "font_size": "8.8",
+        "font_size": "9.2",
     },
     "light": {
         "background_color": "#f4f6fa",
@@ -47,7 +47,7 @@ DEFAULT_THEME_TOKENS = {
         "border_color": "#c8d0dc",
         "accent_color": "#2f6fed",
         "selection_color": "#2f6fed",
-        "font_size": "8.8",
+        "font_size": "9.2",
     },
 }
 
@@ -130,14 +130,33 @@ QGroupBox, QDockWidget {{
     color: {text};
     border-color: {border};
 }}
+QGroupBox {{
+    border: 1px solid {border};
+    border-radius: 7px;
+    margin-top: 10px;
+    padding: 8px 6px 6px 6px;
+}}
 QGroupBox::title, QDockWidget::title {{
     color: {muted};
     background: {panel};
+}}
+QGroupBox::title {{
+    subcontrol-origin: margin;
+    left: 8px;
+    padding: 0 4px;
 }}
 QMenuBar, QMenu, QToolBar, QStatusBar {{
     background: {panel};
     color: {text};
     border-color: {border};
+}}
+QMenuBar::item {{
+    padding: 5px 9px;
+    margin: 1px;
+    border-radius: 4px;
+}}
+QMenuBar::item:selected {{
+    background: {surface};
 }}
 QMenu::item:selected, QComboBox QAbstractItemView::item:selected {{
     background: {selection};
@@ -148,7 +167,8 @@ QPushButton, QToolButton {{
     color: {text};
     border: 1px solid {border};
     border-radius: 5px;
-    padding: 3px 6px;
+    min-height: 22px;
+    padding: 3px 8px;
 }}
 QPushButton:hover, QToolButton:hover {{
     background: {surface};
@@ -170,6 +190,11 @@ QTableWidget, QTableView {{
     selection-background-color: {selection};
     selection-color: white;
 }}
+QLineEdit, QTextEdit, QPlainTextEdit, QTextBrowser,
+QSpinBox, QDoubleSpinBox, QComboBox {{
+    min-height: 22px;
+    padding: 2px 5px;
+}}
 QLineEdit:disabled, QTextEdit:disabled, QPlainTextEdit:disabled,
 QSpinBox:disabled, QDoubleSpinBox:disabled, QComboBox:disabled,
 QListWidget:disabled, QTreeWidget:disabled, QTableWidget:disabled,
@@ -187,6 +212,7 @@ QHeaderView::section {{
     background: {surface};
     color: {text};
     border: 1px solid {border};
+    padding: 4px 6px;
 }}
 QTableWidget, QTableView {{
     gridline-color: {border};
@@ -197,7 +223,8 @@ QTabBar::tab {{
     color: {text};
     border: 1px solid {border};
     border-radius: 7px;
-    padding: 4px 8px;
+    min-height: 22px;
+    padding: 4px 10px;
 }}
 QTabBar::tab:selected {{
     background: {selection};
@@ -210,6 +237,21 @@ QSplitter::handle, QScrollBar::handle {{
 QScrollBar {{
     background: {surface};
     border: 0;
+}}
+QScrollBar:vertical {{
+    width: 10px;
+}}
+QScrollBar:horizontal {{
+    height: 10px;
+}}
+QScrollBar::handle:vertical, QScrollBar::handle:horizontal {{
+    min-height: 24px;
+    min-width: 24px;
+    border-radius: 5px;
+}}
+QScrollBar::add-line, QScrollBar::sub-line {{
+    width: 0;
+    height: 0;
 }}
 QToolTip {{
     background: {panel};
@@ -227,6 +269,22 @@ QToolTip {{
     background: {selection};
     color: white;
     border-color: {selection};
+}}
+#PanelPageSwitcher {{
+    background: transparent;
+}}
+#PanelPageSelector {{
+    background: {surface};
+    color: {text};
+    border: 1px solid {border};
+    border-left: 3px solid {accent};
+    border-radius: 6px;
+    min-height: 28px;
+    padding: 3px 8px;
+    font-weight: 650;
+}}
+#PanelPageSelector:hover {{
+    border-color: {accent};
 }}
 #FieldView {{
     border: 1px solid {border};

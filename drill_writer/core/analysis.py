@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Callable
 
 from drill_writer.core.animation import distance, interpolate_project, motion_window_for_dot, sample_transition_path
 from drill_writer.core.models import DrillProject
@@ -53,6 +54,7 @@ def detect_path_warnings(
     samples: int = 24,
     dot_ids: list[str] | None = None,
     warning_limit: int = 500,
+    cancel_callback: Callable[[], bool] | None = None,
 ) -> list[PathWarning]:
     if not project.sets or not 0 <= set_index < len(project.sets):
         return []
@@ -69,6 +71,8 @@ def detect_path_warnings(
     sampled_positions = [interpolate_project(project, set_index, count) for count in sampled_counts]
 
     for first_index, dot_a in enumerate(all_dot_ids):
+        if cancel_callback and cancel_callback():
+            return warnings
         for dot_b in all_dot_ids[first_index + 1 :]:
             if dot_a not in selected_dot_ids and dot_b not in selected_dot_ids:
                 continue
@@ -110,6 +114,8 @@ def detect_path_warnings(
     check_crossings = len(all_dot_ids) <= 450 or dot_ids is not None
     if check_crossings:
         for first_index, dot_a in enumerate(all_dot_ids):
+            if cancel_callback and cancel_callback():
+                return warnings
             for dot_b in all_dot_ids[first_index + 1 :]:
                 if dot_a not in selected_dot_ids and dot_b not in selected_dot_ids:
                     continue
@@ -129,6 +135,8 @@ def detect_path_warnings(
                         return warnings
 
     for dot_id in all_dot_ids:
+        if cancel_callback and cancel_callback():
+            return warnings
         if dot_id not in selected_dot_ids:
             continue
         path = path_by_dot[dot_id]
@@ -160,6 +168,8 @@ def build_conflict_timeline(
     max_yards_per_count: float = 4.0,
     samples: int = 24,
     dot_ids: list[str] | None = None,
+    fast_crossings: bool = False,
+    cancel_callback: Callable[[], bool] | None = None,
 ) -> list[ConflictTimelineEntry]:
     if not project.sets or not 0 <= set_index < len(project.sets):
         return []
@@ -178,6 +188,8 @@ def build_conflict_timeline(
     ]
 
     for sample_index, positions in enumerate(sampled_positions):
+        if cancel_callback and cancel_callback():
+            return [entry for entry in entries if entry.total > 0]
         entry = entries[sample_index]
         for first_index, dot_a in enumerate(all_dot_ids):
             for dot_b in all_dot_ids[first_index + 1 :]:
@@ -206,23 +218,40 @@ def build_conflict_timeline(
     if len(all_dot_ids) <= 450 or dot_ids is not None:
         previous_positions = transition_start_positions(project, set_index)
         current_positions = transition_end_positions(project, set_index)
-        path_by_dot = {
-            dot_id: sample_transition_path(
-                previous_positions.get(dot_id, project.dot_by_id(dot_id) and (project.dot_by_id(dot_id).x, project.dot_by_id(dot_id).y) or (0, 0)),
-                current_positions.get(dot_id, project.dot_by_id(dot_id) and (project.dot_by_id(dot_id).x, project.dot_by_id(dot_id).y) or (0, 0)),
-                drill_set.path_anchors.get(dot_id, []),
-                drill_set.path_controls.get(dot_id, []),
-                samples=max(12, samples),
-            )
-            for dot_id in all_dot_ids
-        }
         crossing_count = 0
-        for first_index, dot_a in enumerate(all_dot_ids):
-            for dot_b in all_dot_ids[first_index + 1 :]:
-                if dot_a not in selected_dot_ids and dot_b not in selected_dot_ids:
-                    continue
-                if polylines_cross(path_by_dot[dot_a], path_by_dot[dot_b]):
-                    crossing_count += 1
+        if fast_crossings:
+            for first_index, dot_a in enumerate(all_dot_ids):
+                if cancel_callback and cancel_callback():
+                    return [entry for entry in entries if entry.total > 0]
+                for dot_b in all_dot_ids[first_index + 1 :]:
+                    if dot_a not in selected_dot_ids and dot_b not in selected_dot_ids:
+                        continue
+                    if segments_intersect(
+                        previous_positions.get(dot_a, current_positions[dot_a]),
+                        current_positions[dot_a],
+                        previous_positions.get(dot_b, current_positions[dot_b]),
+                        current_positions[dot_b],
+                    ):
+                        crossing_count += 1
+        else:
+            path_by_dot = {
+                dot_id: sample_transition_path(
+                    previous_positions.get(dot_id, project.dot_by_id(dot_id) and (project.dot_by_id(dot_id).x, project.dot_by_id(dot_id).y) or (0, 0)),
+                    current_positions.get(dot_id, project.dot_by_id(dot_id) and (project.dot_by_id(dot_id).x, project.dot_by_id(dot_id).y) or (0, 0)),
+                    drill_set.path_anchors.get(dot_id, []),
+                    drill_set.path_controls.get(dot_id, []),
+                    samples=max(12, samples),
+                )
+                for dot_id in all_dot_ids
+            }
+            for first_index, dot_a in enumerate(all_dot_ids):
+                if cancel_callback and cancel_callback():
+                    return [entry for entry in entries if entry.total > 0]
+                for dot_b in all_dot_ids[first_index + 1 :]:
+                    if dot_a not in selected_dot_ids and dot_b not in selected_dot_ids:
+                        continue
+                    if polylines_cross(path_by_dot[dot_a], path_by_dot[dot_b]):
+                        crossing_count += 1
         if crossing_count and entries:
             midpoint = entries[len(entries) // 2]
             midpoint.crossing_conflicts = crossing_count

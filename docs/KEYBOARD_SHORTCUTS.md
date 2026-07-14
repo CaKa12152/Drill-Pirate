@@ -25,6 +25,7 @@ Ctrl+Shift+P
 | Export | `Ctrl+E` |
 | Undo | `Ctrl+Z` |
 | Redo | `Ctrl+Y` |
+| Repeat Last Action | `F4` |
 | Command Palette | `Ctrl+Shift+P` |
 | Keyboard Shortcuts | `Ctrl+Alt+,` |
 
@@ -67,6 +68,19 @@ Ctrl+Shift+P
 | Rotate Selected Facing Left 45 | `Ctrl+Alt+Left` |
 | Rotate Selected Facing Right 45 | `Ctrl+Alt+Right` |
 
+## Large Shows and Projects
+
+| Command | Shortcut |
+| --- | --- |
+| Open Project in New Tab | `Ctrl+Shift+O` |
+| Copy From Open Project Tab | `Ctrl+Shift+Alt+O` |
+| Import Roster CSV | `Ctrl+Shift+F6` |
+| Hierarchy & Linked Formations | `Ctrl+Shift+F7` |
+| Replace / Swap Performer | `Ctrl+Shift+F8` |
+| Automatic Form Cleanup | `Ctrl+Shift+F9` |
+| Compare Sets | `Ctrl+Shift+F10` |
+| Formation Variations | `Ctrl+Shift+F11` |
+
 ## Tools
 
 | Command | Shortcut |
@@ -104,6 +118,38 @@ Ctrl+Shift+P
 | Set Count Keyframe | `Ctrl+Alt+K` |
 | Follow-Leader Conveyor | `Ctrl+Alt+F` |
 | Fit Form to Selected Prop | `Ctrl+Alt+Shift+X` |
+| Smart Transition Composer | `Ctrl+Alt+Shift+C` |
+| Section-Aware Form Fit | `Ctrl+Alt+Shift+J` |
+| Copy With Property Paintbrush | `Ctrl+Shift+C` |
+| Paint Copied Properties | `Ctrl+Shift+V` |
+| Beat-to-Set Generator | `Ctrl+Alt+G` |
+
+## Precision Field Editing
+
+| Command | Shortcut |
+| --- | --- |
+| Nudge one 8-to-5 step | `Arrow key` |
+| Nudge half step | `Shift+Arrow key` |
+| Nudge one yard | `Ctrl+Arrow key` |
+| Nudge five yards | `Alt+Arrow key` |
+
+## Direct Manipulation
+
+| Action | Gesture |
+| --- | --- |
+| Temporary rotate | Hold `R`, drag the angle handle, release |
+| Temporary scale | Hold `S`, drag width/height handles, release |
+| Temporary warp | Hold `B`, drag bend handles, release |
+| Temporary arc / curve / line | Hold `A`, `C`, or `L` |
+| Temporary mirror / lasso | Hold `M` or `V` |
+| Apply any active field tool | `Enter` |
+| Cancel any active field tool or drag | `Esc` |
+| Constrain movement or snap angles | Hold `Shift` while dragging |
+| Edit symmetrically around the pivot | Hold `Alt` while dragging |
+| Reopen a path, prop, preview, or formation | Double-click it on the field |
+| Toggle compact transform handles | `Ctrl+Shift+T` |
+
+Transform handles are off by default and only appear for selections of two or more marchers. Toggle them with `Ctrl+Shift+T`, `View > Transform Handles`, the Selection inspector button, or the field context menu. The compact gizmo provides move, rotate, corner scale, and an editable white pivot; exact stretch/skew values remain in the inspector.
 
 ## Plugin Shortcuts
 
