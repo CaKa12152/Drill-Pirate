@@ -12,20 +12,28 @@ from typing import Any
 
 from drill_writer.core.models import (
     AudioVersion,
+    ChoreographyEvent,
+    ConstructionGuide,
     Dot,
     DotConstraint,
     DrillProject,
     DrillSet,
+    ImportedScore,
     Marker,
+    MusicPhrase,
     ProjectMetadata,
     Prop,
+    PropAttachment,
+    PerformerPhysicalLimits,
+    StoryboardScene,
+    SurfaceDefinition,
     TimingEvent,
     Transition,
 )
 
 
 PROJECTS_DIR = Path.home() / "Documents" / "Drill Pirate Projects"
-PROJECT_SCHEMA_VERSION = 2
+PROJECT_SCHEMA_VERSION = 6
 PROJECT_JSON_FILES = ("metadata.json", "dots.json", "props.json", "sets.json", "show.json")
 REQUIRED_PROJECT_FILES = ("metadata.json", "dots.json", "sets.json")
 BACKUP_DIR_NAME = ".drill_pirate_backups"
@@ -260,6 +268,40 @@ def load_project(project_dir: Path) -> DrillProject:
             TimingEvent.from_json(item)
             for item in show.get("timing_events", [])
         ]
+        guides = [
+            ConstructionGuide.from_json(item)
+            for item in show.get("guides", [])
+            if isinstance(item, dict)
+        ]
+        score_payload = show.get("imported_score")
+        imported_score = ImportedScore.from_json(score_payload) if isinstance(score_payload, dict) and score_payload else None
+        music_phrases = [
+            MusicPhrase.from_json(item)
+            for item in show.get("music_phrases", [])
+            if isinstance(item, dict)
+        ]
+        storyboard = [
+            StoryboardScene.from_json(item)
+            for item in show.get("storyboard", [])
+            if isinstance(item, dict)
+        ]
+        surface_payload = show.get("surface", {})
+        surface = SurfaceDefinition.from_json(surface_payload) if isinstance(surface_payload, dict) else SurfaceDefinition()
+        choreography = [
+            ChoreographyEvent.from_json(item)
+            for item in show.get("choreography", [])
+            if isinstance(item, dict)
+        ]
+        prop_attachments = [
+            PropAttachment.from_json(item)
+            for item in show.get("prop_attachments", [])
+            if isinstance(item, dict)
+        ]
+        physical_limits = [
+            PerformerPhysicalLimits.from_json(item)
+            for item in show.get("physical_limits", [])
+            if isinstance(item, dict)
+        ]
         if not sets:
             raise ProjectLoadError(project_dir, "Project has no sets.")
         project = DrillProject(
@@ -271,7 +313,15 @@ def load_project(project_dir: Path) -> DrillProject:
             constraints=constraints,
             audio_versions=audio_versions,
             timing_events=timing_events,
+            guides=guides,
             workflow=dict(show.get("workflow", {})) if isinstance(show.get("workflow", {}), dict) else {},
+            imported_score=imported_score,
+            music_phrases=music_phrases,
+            storyboard=storyboard,
+            surface=surface,
+            choreography=choreography,
+            prop_attachments=prop_attachments,
+            physical_limits=physical_limits,
         )
         project.ensure_set_positions()
         return project
@@ -288,7 +338,15 @@ def load_project_preview(project_dir: Path) -> DrillProject:
         props = [Prop.from_json(item) for item in read_json(project_dir / "props.json").get("props", [])]
         raw_sets = read_json(project_dir / "sets.json").get("sets", [])
         first_set = DrillSet.from_json(raw_sets[0]) if raw_sets else DrillSet("Set 1", 1, 1)
-        project = DrillProject(metadata=metadata, dots=dots, props=props, sets=[first_set])
+        show = read_json(project_dir / "show.json") if (project_dir / "show.json").exists() else {}
+        guides = [
+            ConstructionGuide.from_json(item)
+            for item in show.get("guides", [])
+            if isinstance(item, dict)
+        ]
+        surface_payload = show.get("surface", {})
+        surface = SurfaceDefinition.from_json(surface_payload) if isinstance(surface_payload, dict) else SurfaceDefinition()
+        project = DrillProject(metadata=metadata, dots=dots, props=props, sets=[first_set], guides=guides, surface=surface)
         project.workflow["preview_set_count"] = len(raw_sets)
         project.ensure_set_positions()
         return project
@@ -307,6 +365,7 @@ def save_project(
     project_dir.mkdir(parents=True, exist_ok=True)
     (project_dir / "audio").mkdir(exist_ok=True)
     (project_dir / "props").mkdir(exist_ok=True)
+    project.ensure_set_positions()
     if backup:
         create_project_backup(
             project_dir,
@@ -327,7 +386,15 @@ def save_project(
             "constraints": [constraint.to_json() for constraint in project.constraints],
             "audio_versions": [audio.to_json() for audio in project.audio_versions],
             "timing_events": [event.to_json() for event in project.timing_events],
+            "guides": [guide.to_json() for guide in project.guides],
             "workflow": dict(project.workflow),
+            "imported_score": project.imported_score.to_json() if project.imported_score else None,
+            "music_phrases": [phrase.to_json() for phrase in project.music_phrases],
+            "storyboard": [scene.to_json() for scene in project.storyboard],
+            "surface": project.surface.to_json(),
+            "choreography": [event.to_json() for event in project.choreography],
+            "prop_attachments": [attachment.to_json() for attachment in project.prop_attachments],
+            "physical_limits": [limits.to_json() for limits in project.physical_limits],
         },
     )
 
@@ -384,6 +451,14 @@ def migrate_project_files(project_dir: Path) -> None:
         ("constraints", []),
         ("audio_versions", []),
         ("timing_events", []),
+        ("guides", []),
+        ("imported_score", None),
+        ("music_phrases", []),
+        ("storyboard", []),
+        ("surface", SurfaceDefinition().to_json()),
+        ("choreography", []),
+        ("prop_attachments", []),
+        ("physical_limits", []),
     ):
         if key not in show:
             show[key] = default
@@ -403,8 +478,11 @@ def migrate_project_files(project_dir: Path) -> None:
             ("path_anchors", {}),
             ("path_controls", {}),
             ("count_positions", {}),
+            ("count_facings", {}),
             ("move_timings", {}),
             ("movement_styles", {}),
+            ("continuity", []),
+            ("motion_ribbons", []),
         ):
             if key not in drill_set:
                 drill_set[key] = default

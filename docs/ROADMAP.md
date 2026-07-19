@@ -9,15 +9,15 @@ Drill Pirate is an alpha application. It has a working editing/export foundation
 Current state:
 
 - Path analysis warns about close spacing, crossing paths, high travel speed, and sampled conflict timeline counts.
-- Auto-plan selected paths can add basic route anchors.
+- Generated forms use global collision-safe destination ownership while preserving the exact target coordinate set.
+- Assignment evaluates synchronized minimum spacing, crossing risk, speed, per-marcher movement windows, and unselected marcher obstacles.
+- A 400-marcher assignment uses a scalable auction solver and cached interactive results.
 
-Production target:
+Remaining depth:
 
-- Whole-section collision prediction.
-- Minimum-spacing constraints across full transitions.
-- Better crossing-path resolution.
-- Speed and stride-length warnings.
-- Automated rerouting with user approval.
+- Better validation and editing assistance for manually authored Bezier routes.
+- Clearer suggested fixes when fixed start and destination pictures make a conflict mathematically unavoidable.
+- Biomechanical stride and direction-change modeling beyond yards-per-count warnings.
 
 ### Intelligent Path Planning
 

@@ -661,6 +661,8 @@ def save_formation_variation(
             if dot_id in drill_set.dot_positions
         },
         "dot_facings": {dot_id: drill_set.dot_facings[dot_id] for dot_id in selected if dot_id in drill_set.dot_facings},
+        "count_facings": deepcopy({dot_id: drill_set.count_facings[dot_id] for dot_id in selected if dot_id in drill_set.count_facings}),
+        "count_positions": deepcopy({dot_id: drill_set.count_positions[dot_id] for dot_id in selected if dot_id in drill_set.count_positions}),
         "path_anchors": {
             dot_id: [[point[0], point[1]] for point in drill_set.path_anchors.get(dot_id, [])]
             for dot_id in selected
@@ -715,10 +717,14 @@ def transfer_project_content(
             destination_set.dot_positions[destination_id] = tuple(source_set.dot_positions[source_id])
             if source_id in source_set.dot_facings:
                 destination_set.dot_facings[destination_id] = float(source_set.dot_facings[source_id])
+            if source_id in source_set.count_facings:
+                destination_set.count_facings[destination_id] = deepcopy(source_set.count_facings[source_id])
             if source_id in source_set.path_anchors:
                 destination_set.path_anchors[destination_id] = deepcopy(source_set.path_anchors[source_id])
             if source_id in source_set.path_controls:
                 destination_set.path_controls[destination_id] = deepcopy(source_set.path_controls[source_id])
+            if source_id in source_set.count_positions:
+                destination_set.count_positions[destination_id] = deepcopy(source_set.count_positions[source_id])
             if source_id in source_set.move_timings:
                 destination_set.move_timings[destination_id] = deepcopy(source_set.move_timings[source_id])
             counts["formation"] += 1

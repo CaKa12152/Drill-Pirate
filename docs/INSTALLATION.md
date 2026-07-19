@@ -90,7 +90,7 @@ Expected output:
 
 ```text
 dist\Drill Pirate\Drill Pirate.exe
-dist\Drill Pirate Alpha v2.6.0 Windows.zip
+dist\Drill Pirate Alpha v2.7.0 Windows.zip
 ```
 
 Give testers the ZIP or the whole `dist\Drill Pirate` folder.

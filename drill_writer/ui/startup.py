@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 from pathlib import Path
 
-from PySide6.QtCore import QEasingCurve, QPointF, Property, QPropertyAnimation, QRectF, QSettings, Signal, Qt
+from PySide6.QtCore import QEasingCurve, QPointF, Property, QPropertyAnimation, QRectF, QSettings, QTimer, Signal, Qt
 from PySide6.QtGui import QColor, QFont, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QDialog,
@@ -20,15 +20,16 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QSizePolicy,
     QSpinBox,
+    QStackedWidget,
     QDoubleSpinBox,
-    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
 
-from drill_writer.core.coordinates import BACK_HASH_YARDS, FIELD_HALF_HEIGHT_YARDS, FRONT_HASH_YARDS
+from drill_writer import __version__
+
 from drill_writer.core.animation import dot_facing_at_set
-from drill_writer.core.models import DrillProject
+from drill_writer.core.models import DrillProject, SurfaceDefinition
 from drill_writer.core.plugin_manager import PluginManager, PluginManifest, plugin_library_dir
 from drill_writer.core.project_io import (
     ProjectLoadError,
@@ -42,7 +43,8 @@ from drill_writer.core.project_io import (
 )
 from drill_writer.resources import app_icon_path
 from drill_writer.ui.appearance import draw_dot_symbol, generated_prop_pixmap, normalize_dot_symbol, preferred_dot_symbol
-from drill_writer.ui.theme import normalize_field_mode
+from drill_writer.ui.surface_preview import draw_surface_preview, field_to_rect, fitted_surface_rect, size_to_rect
+from drill_writer.ui.theme import normalize_field_mode, normalize_theme, theme_tokens
 
 
 FIELD_PREVIEW_CACHE: dict[str, QPixmap] = {}
@@ -84,7 +86,7 @@ class SplashPage(QWidget):
         title = QLabel("Drill Pirate")
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         title.setStyleSheet("font-size: 48px; font-weight: 850; letter-spacing: 1px; color: #f7c94a;")
-        version = QLabel("Alpha v2.5")
+        version = QLabel(f"Alpha v{__version__}")
         version.setAlignment(Qt.AlignmentFlag.AlignCenter)
         version.setStyleSheet("font-size: 16px; color: #f4f4f1;")
         tagline = QLabel("Professional drill design for the field")
@@ -284,7 +286,7 @@ class FieldPreview(QWidget):
     def preview_cache_key(self) -> str:
         mtimes: list[str] = []
         if self.project_dir and self.project_dir.exists():
-            for filename in ("metadata.json", "dots.json", "props.json", "sets.json"):
+            for filename in ("metadata.json", "dots.json", "props.json", "sets.json", "show.json"):
                 path = self.project_dir / filename
                 mtimes.append(f"{filename}:{path.stat().st_mtime if path.exists() else 0}")
         payload = (
@@ -302,47 +304,13 @@ class FieldPreview(QWidget):
         painter.drawRoundedRect(outer, 10, 10)
 
         rect = self.field_rect(outer)
-        painter.setPen(QPen(QColor(palette["line"]), 0.55))
-        painter.setBrush(QColor(palette["fill"]))
-        painter.drawRoundedRect(rect, 5, 5)
-
-        micro_pen = QPen(QColor(palette["micro"]), 0.16)
-        painter.setPen(micro_pen)
-        for index in range(49):
-            x = rect.left() + rect.width() * index / 48
-            painter.drawLine(int(x), int(rect.top()), int(x), int(rect.bottom()))
-        for index in range(9):
-            y = rect.top() + rect.height() * index / 8
-            painter.drawLine(int(rect.left()), int(y), int(rect.right()), int(y))
-
-        yard_pen = QPen(QColor(palette["line"]), 0.42)
-        painter.setPen(yard_pen)
-        for index in range(13):
-            x = rect.left() + rect.width() * index / 12
-            painter.drawLine(int(x), int(rect.top()), int(x), int(rect.bottom()))
-
-        hash_pen = QPen(QColor(palette["hash"]), 0.42)
-        painter.setPen(hash_pen)
-        for field_y in (BACK_HASH_YARDS, FRONT_HASH_YARDS):
-            y = rect.top() + (FIELD_HALF_HEIGHT_YARDS - field_y) / (FIELD_HALF_HEIGHT_YARDS * 2) * rect.height()
-            for index in range(25):
-                x = rect.left() + rect.width() * index / 24
-                painter.drawLine(int(x), int(y - 0.8), int(x), int(y + 0.8))
-
-        painter.setPen(QPen(QColor(palette["text"]), 0.35))
-        painter.setFont(QFont("Segoe UI", 4, QFont.Weight.DemiBold))
-        for index, text in enumerate(("G", "10", "20", "30", "40", "50", "40", "30", "20", "10", "G")):
-            x = rect.left() + rect.width() * index / 10
-            painter.drawText(QRectF(x - 5, rect.bottom() - 10, 10, 6), Qt.AlignmentFlag.AlignCenter, text)
-            painter.save()
-            painter.translate(x, rect.top() + 7)
-            painter.rotate(180)
-            painter.drawText(QRectF(-5, -3, 10, 6), Qt.AlignmentFlag.AlignCenter, text)
-            painter.restore()
-
         if not self.project:
+            painter.setPen(QPen(QColor(palette["line"]), 0.55))
+            painter.setBrush(QColor(palette["fill"]))
+            painter.drawRoundedRect(rect, 5, 5)
             self.draw_empty_field(painter, rect)
             return
+        draw_surface_preview(painter, rect, self.project.surface, palette)
 
         first_set = self.project.sets[0] if self.project.sets else None
         self.draw_props(painter, rect, first_set.prop_positions if first_set else {})
@@ -351,8 +319,9 @@ class FieldPreview(QWidget):
         radius = max(0.75, min(1.55, 7 / (dot_count**0.5)))
         for dot in self.project.dots:
             x, y = positions.get(dot.id, (dot.x, dot.y))
-            screen_x = rect.left() + (x + 60) / 120 * rect.width()
-            screen_y = rect.top() + (26.666 - y) / 53.333 * rect.height()
+            screen = field_to_rect(rect, self.project.surface, x, y)
+            screen_x = screen.x()
+            screen_y = screen.y()
             if not rect.adjusted(-4, -4, 4, 4).contains(screen_x, screen_y):
                 continue
             draw_dot_symbol(
@@ -375,10 +344,10 @@ class FieldPreview(QWidget):
             prop_width = max(0.1, float(state.get("width", prop.width)))
             prop_height = max(0.1, float(state.get("height", prop.height)))
             prop_rotation = float(state.get("rotation", prop.rotation))
-            screen_x = rect.left() + (prop_x + 60) / 120 * rect.width()
-            screen_y = rect.top() + (26.666 - prop_y) / 53.333 * rect.height()
-            screen_width = prop_width / 120 * rect.width()
-            screen_height = prop_height / 53.333 * rect.height()
+            screen = field_to_rect(rect, self.project.surface, prop_x, prop_y)
+            screen_x = screen.x()
+            screen_y = screen.y()
+            screen_width, screen_height = size_to_rect(rect, self.project.surface, prop_width, prop_height)
             prop_rect = QRectF(-screen_width / 2, -screen_height / 2, screen_width, screen_height)
 
             painter.save()
@@ -410,18 +379,7 @@ class FieldPreview(QWidget):
         return generated_prop_pixmap(getattr(prop, "name", "Prop"), getattr(prop, "layer", "Props"))
 
     def field_rect(self, outer: QRectF) -> QRectF:
-        target_ratio = 120 / 53.333
-        width = outer.width() - 18
-        height = width / target_ratio
-        if height > outer.height() - 14:
-            height = outer.height() - 14
-            width = height * target_ratio
-        return QRectF(
-            outer.center().x() - width / 2,
-            outer.center().y() - height / 2,
-            width,
-            height,
-        )
+        return fitted_surface_rect(outer, self.project.surface if self.project else SurfaceDefinition(), 7)
 
     def draw_empty_field(self, painter: QPainter, rect: QRectF) -> None:
         painter.setPen(QPen(QColor("#f7d154"), 4))
@@ -438,19 +396,21 @@ class ProjectCard(QFrame):
         self.project_dir = project_dir
         self.setObjectName("ProjectCard")
         self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setMinimumSize(300, 220)
-        self.setMaximumWidth(330)
+        self.setMinimumSize(252, 196)
+        self.setMaximumWidth(340)
+        self.setMaximumHeight(220)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(12, 12, 12, 12)
         layout.setSpacing(9)
         self.preview = FieldPreview(project, project_dir)
         title = QLabel(project.metadata.show_title)
-        title.setStyleSheet("font-size: 14px; font-weight: 700;")
+        title.setObjectName("ProjectCardTitle")
         title.setWordWrap(True)
         set_count = int(project.workflow.get("preview_set_count", len(project.sets)))
         detail = QLabel(f"{len(project.dots)} marchers · {set_count} set(s)")
-        detail.setStyleSheet("color: #9da7b8; font-size: 11px;")
+        detail.setObjectName("ProjectCardMeta")
         layout.addWidget(self.preview)
         layout.addWidget(title)
         layout.addWidget(detail)
@@ -471,20 +431,22 @@ class RecoveryProjectCard(QFrame):
         self.project_dir = project_dir
         self.setObjectName("ProjectCard")
         self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setMinimumSize(300, 220)
-        self.setMaximumWidth(330)
+        self.setMinimumSize(252, 196)
+        self.setMaximumWidth(340)
+        self.setMaximumHeight(220)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(12, 12, 12, 12)
         layout.setSpacing(9)
         preview = FieldPreview(None, project_dir)
         title = QLabel(project_dir.name.replace("_", " "))
-        title.setStyleSheet("font-size: 14px; font-weight: 700; color: #f7d154;")
+        title.setObjectName("RecoveryCardTitle")
         title.setWordWrap(True)
         detail = QLabel("Project needs recovery")
-        detail.setStyleSheet("color: #ff9f8a; font-size: 12px; font-weight: 650;")
+        detail.setObjectName("RecoveryCardStatus")
         message = QLabel(str(error))
-        message.setStyleSheet("color: #9da7b8; font-size: 10px;")
+        message.setObjectName("ProjectCardMeta")
         message.setWordWrap(True)
         message.setMaximumHeight(42)
         layout.addWidget(preview)
@@ -510,8 +472,10 @@ class CreateProjectCard(QFrame):
         self.animation.setDuration(140)
         self.animation.setEasingCurve(QEasingCurve.Type.OutCubic)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setMinimumSize(300, 220)
-        self.setMaximumWidth(330)
+        self.setMinimumSize(252, 196)
+        self.setMaximumWidth(340)
+        self.setMaximumHeight(220)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
 
     def get_hover_progress(self) -> float:
         return self._hover_progress
@@ -540,9 +504,19 @@ class CreateProjectCard(QFrame):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         rect = QRectF(self.rect()).adjusted(10, 10, -10, -10)
-        color_value = 28 + int(self._hover_progress * 18)
-        painter.setBrush(QColor(color_value, color_value + 5, color_value + 14))
-        painter.setPen(QPen(QColor("#f7d154"), 1.6 + self._hover_progress))
+        settings = QSettings("OpenAI", "DrillWriter")
+        mode = normalize_theme(str(settings.value("appearance/theme", "dark")))
+        tokens = theme_tokens(mode, settings)
+        surface = QColor(tokens["surface_color"])
+        accent = QColor(tokens["accent_color"])
+        blend = 0.04 + self._hover_progress * 0.07
+        background = QColor(
+            round(surface.red() * (1.0 - blend) + accent.red() * blend),
+            round(surface.green() * (1.0 - blend) + accent.green() * blend),
+            round(surface.blue() * (1.0 - blend) + accent.blue() * blend),
+        )
+        painter.setBrush(background)
+        painter.setPen(QPen(accent, 1.4 + self._hover_progress))
         painter.drawRoundedRect(rect, 12, 12)
 
         field_rect = rect.adjusted(16, 18, -16, -58)
@@ -560,12 +534,12 @@ class CreateProjectCard(QFrame):
 
         center = field_rect.center()
         plus_size = 20 + int(self._hover_progress * 7)
-        painter.setPen(QPen(QColor("#f7d154"), 4.5))
+        painter.setPen(QPen(accent, 4.5))
         painter.drawLine(int(center.x() - plus_size), int(center.y()), int(center.x() + plus_size), int(center.y()))
         painter.drawLine(int(center.x()), int(center.y() - plus_size), int(center.x()), int(center.y() + plus_size))
-        painter.setPen(QColor("#f2f4f8"))
+        painter.setPen(QColor(tokens["text_color"]))
         painter.drawText(rect.adjusted(0, rect.height() - 46, 0, -22), Qt.AlignmentFlag.AlignCenter, "Create Project")
-        painter.setPen(QColor("#9da7b8"))
+        painter.setPen(QColor(tokens["muted_text_color"]))
         painter.drawText(rect.adjusted(0, rect.height() - 25, 0, -6), Qt.AlignmentFlag.AlignCenter, "Start a new show")
 
     def mousePressEvent(self, event) -> None:  # type: ignore[override]
@@ -585,78 +559,152 @@ class StartupPage(QWidget):
         self.plugin_manager = plugin_manager
         self.setObjectName("HomePage")
         self.library_dir = project_library_dir()
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(30, 26, 30, 26)
-        layout.setSpacing(18)
+        self.project_cards: list[QWidget] = []
+        self.create_project_card: CreateProjectCard | None = None
 
-        hero = QFrame()
-        hero.setObjectName("HomeHero")
-        hero_layout = QHBoxLayout(hero)
-        hero_layout.setContentsMargins(18, 16, 22, 16)
+        root = QHBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+
+        sidebar = QFrame()
+        sidebar.setObjectName("HomeSidebar")
+        sidebar.setFixedWidth(224)
+        sidebar_layout = QVBoxLayout(sidebar)
+        sidebar_layout.setContentsMargins(18, 20, 18, 18)
+        sidebar_layout.setSpacing(8)
+
+        brand = QHBoxLayout()
+        brand.setSpacing(10)
         hero_icon = QLabel()
-        hero_icon.setFixedSize(76, 76)
+        hero_icon.setFixedSize(46, 46)
         hero_icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
         pixmap = QPixmap(str(app_icon_path()))
         if not pixmap.isNull():
             hero_icon.setPixmap(
                 pixmap.scaled(
-                    74,
-                    74,
+                    44,
+                    44,
                     Qt.AspectRatioMode.KeepAspectRatio,
                     Qt.TransformationMode.SmoothTransformation,
                 )
             )
-        hero_layout.addWidget(hero_icon)
-        title_stack = QVBoxLayout()
+        brand.addWidget(hero_icon)
+        brand_text = QVBoxLayout()
+        brand_text.setSpacing(1)
         title = QLabel("Drill Pirate")
         title.setObjectName("HomeTitle")
-        title.setStyleSheet("font-size: 34px; font-weight: 850; color: #f7c94a;")
-        version = QLabel("Alpha v2.5")
-        version.setStyleSheet("font-size: 12px; color: #f1f1ee;")
-        path_label = QLabel(f"Project library · {self.library_dir}")
-        path_label.setStyleSheet("color: #8d98aa;")
-        path_label.setWordWrap(True)
-        self.plugin_banner = QLabel("")
-        self.plugin_banner.setStyleSheet("color: #f7d154; font-weight: 650;")
-        title_stack.addWidget(title)
-        title_stack.addWidget(version)
-        title_stack.addWidget(path_label)
-        title_stack.addWidget(self.plugin_banner)
-        hero_layout.addLayout(title_stack, 1)
-        settings_button = QPushButton("Settings")
-        settings_button.clicked.connect(self.settings_requested.emit)
-        new_project_button = QPushButton("New Project")
-        new_project_button.clicked.connect(self.open_create_dialog)
-        hero_layout.addWidget(settings_button)
-        hero_layout.addWidget(new_project_button)
-        layout.addWidget(hero)
+        title.setStyleSheet("font-size: 17px; font-weight: 800;")
+        version = QLabel(f"Alpha v{__version__}")
+        version.setObjectName("VersionBadge")
+        brand_text.addWidget(title)
+        brand_text.addWidget(version)
+        brand.addLayout(brand_text, 1)
+        sidebar_layout.addLayout(brand)
+        sidebar_layout.addSpacing(22)
 
-        self.tabs = QTabWidget()
-        self.tabs.setObjectName("HomeTabs")
-        self.tabs.setDocumentMode(True)
-        self.tabs.setUsesScrollButtons(True)
-        self.tabs.tabBar().setExpanding(False)
-        self.tabs.addTab(self.build_projects_tab(), "Projects")
-        self.tabs.addTab(self.build_plugins_tab(), "Plugins")
-        layout.addWidget(self.tabs, 1)
+        section_label = QLabel("WORKSPACE")
+        section_label.setObjectName("NavigationSectionLabel")
+        sidebar_layout.addWidget(section_label)
+        self.home_nav_buttons: list[QPushButton] = []
+        for index, label in enumerate(("Projects", "Plugins")):
+            button = QPushButton(label)
+            button.setObjectName("HomeNavButton")
+            button.setCheckable(True)
+            button.setCursor(Qt.CursorShape.PointingHandCursor)
+            button.clicked.connect(lambda _checked=False, page=index: self.show_home_page(page))
+            self.home_nav_buttons.append(button)
+            sidebar_layout.addWidget(button)
+
+        sidebar_layout.addStretch()
+        self.plugin_banner = QLabel("")
+        self.plugin_banner.setObjectName("HomeNotice")
+        self.plugin_banner.setWordWrap(True)
+        sidebar_layout.addWidget(self.plugin_banner)
+        library_caption = QLabel("PROJECT LIBRARY")
+        library_caption.setObjectName("NavigationSectionLabel")
+        sidebar_layout.addWidget(library_caption)
+        path_label = QLabel(str(self.library_dir))
+        path_label.setObjectName("LibraryPathLabel")
+        path_label.setWordWrap(True)
+        path_label.setToolTip(str(self.library_dir))
+        sidebar_layout.addWidget(path_label)
+        settings_button = QPushButton("Settings")
+        settings_button.setObjectName("SidebarFooterButton")
+        settings_button.clicked.connect(self.settings_requested.emit)
+        sidebar_layout.addWidget(settings_button)
+        root.addWidget(sidebar)
+
+        content = QFrame()
+        content.setObjectName("HomeContent")
+        content_layout = QVBoxLayout(content)
+        content_layout.setContentsMargins(30, 24, 30, 24)
+        content_layout.setSpacing(16)
+        header = QHBoxLayout()
+        header.setSpacing(12)
+        heading_stack = QVBoxLayout()
+        heading_stack.setSpacing(2)
+        self.page_title = QLabel("Projects")
+        self.page_title.setObjectName("HomePageTitle")
+        self.page_subtitle = QLabel("Open a recent show or start a new production.")
+        self.page_subtitle.setObjectName("HomePageSubtitle")
+        heading_stack.addWidget(self.page_title)
+        heading_stack.addWidget(self.page_subtitle)
+        header.addLayout(heading_stack, 1)
+        self.project_search = QLineEdit()
+        self.project_search.setObjectName("HomeProjectSearch")
+        self.project_search.setPlaceholderText("Search projects")
+        self.project_search.setClearButtonEnabled(True)
+        self.project_search.setMaximumWidth(270)
+        self.project_search.textChanged.connect(self.filter_project_cards)
+        header.addWidget(self.project_search)
+        self.new_project_button = QPushButton("New Project")
+        self.new_project_button.setObjectName("PrimaryButton")
+        self.new_project_button.clicked.connect(self.open_create_dialog)
+        header.addWidget(self.new_project_button)
+        content_layout.addLayout(header)
+        divider = QFrame()
+        divider.setObjectName("HomeDivider")
+        divider.setFrameShape(QFrame.Shape.HLine)
+        content_layout.addWidget(divider)
+
+        self.pages = QStackedWidget()
+        self.pages.setObjectName("HomePages")
+        self.pages.addWidget(self.build_projects_tab())
+        self.pages.addWidget(self.build_plugins_tab())
+        self.tabs = self.pages
+        content_layout.addWidget(self.pages, 1)
+        root.addWidget(content, 1)
+        self.show_home_page(0)
         self.refresh_projects()
         self.refresh_plugins()
 
     def build_projects_tab(self) -> QWidget:
         tab = QWidget()
         tab_layout = QVBoxLayout(tab)
-        tab_layout.setContentsMargins(0, 16, 0, 0)
-        heading = QLabel("Recent Projects")
-        heading.setStyleSheet("font-size: 18px; font-weight: 750;")
-        tab_layout.addWidget(heading)
+        tab_layout.setContentsMargins(0, 0, 0, 0)
+        section_row = QHBoxLayout()
+        heading = QLabel("Recent projects")
+        heading.setObjectName("HomeSectionTitle")
+        self.project_count_label = QLabel("")
+        self.project_count_label.setObjectName("HomeSectionMeta")
+        refresh_button = QPushButton("Refresh")
+        refresh_button.setObjectName("QuietButton")
+        refresh_button.clicked.connect(self.refresh_projects)
+        section_row.addWidget(heading)
+        section_row.addWidget(self.project_count_label)
+        section_row.addStretch()
+        section_row.addWidget(refresh_button)
+        tab_layout.addLayout(section_row)
         self.scroll = QScrollArea()
         self.scroll.setWidgetResizable(True)
         self.scroll.setFrameShape(QFrame.Shape.NoFrame)
         self.grid_container = QWidget()
         self.grid = QGridLayout(self.grid_container)
-        self.grid.setHorizontalSpacing(18)
-        self.grid.setVerticalSpacing(18)
+        self.grid.setContentsMargins(0, 0, 8, 8)
+        self.grid.setHorizontalSpacing(16)
+        self.grid.setVerticalSpacing(16)
         self.grid.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
+        self.grid_container.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
         self.scroll.setWidget(self.grid_container)
         tab_layout.addWidget(self.scroll, 1)
         return tab
@@ -664,12 +712,12 @@ class StartupPage(QWidget):
     def build_plugins_tab(self) -> QWidget:
         tab = QWidget()
         tab_layout = QVBoxLayout(tab)
-        tab_layout.setContentsMargins(0, 16, 0, 0)
+        tab_layout.setContentsMargins(0, 0, 0, 0)
         top_row = QHBoxLayout()
-        heading = QLabel("Plugins")
-        heading.setStyleSheet("font-size: 18px; font-weight: 750;")
+        heading = QLabel("Installed plugins")
+        heading.setObjectName("HomeSectionTitle")
         plugin_path = QLabel(str(plugin_library_dir()))
-        plugin_path.setStyleSheet("color: #8d98aa;")
+        plugin_path.setObjectName("HomeSectionMeta")
         plugin_path.setWordWrap(True)
         refresh_button = QPushButton("Refresh")
         refresh_button.clicked.connect(self.refresh_plugins)
@@ -681,7 +729,7 @@ class StartupPage(QWidget):
         top_row.addWidget(refresh_button)
         tab_layout.addLayout(top_row)
         note = QLabel("Plugins are folders with a plugin.json manifest and Python entry file. Only enable plugins you trust.")
-        note.setStyleSheet("color: #aeb7c8;")
+        note.setObjectName("HomePageSubtitle")
         note.setWordWrap(True)
         tab_layout.addWidget(note)
 
@@ -696,6 +744,21 @@ class StartupPage(QWidget):
         self.plugin_scroll.setWidget(self.plugin_grid_container)
         tab_layout.addWidget(self.plugin_scroll, 1)
         return tab
+
+    def show_home_page(self, index: int) -> None:
+        page_index = max(0, min(index, self.pages.count() - 1))
+        self.pages.setCurrentIndex(page_index)
+        for button_index, button in enumerate(self.home_nav_buttons):
+            button.setChecked(button_index == page_index)
+        is_projects = page_index == 0
+        self.page_title.setText("Projects" if is_projects else "Plugins")
+        self.page_subtitle.setText(
+            "Open a recent show or start a new production."
+            if is_projects
+            else "Manage trusted extensions and inspect plugin diagnostics."
+        )
+        self.project_search.setVisible(is_projects)
+        self.new_project_button.setVisible(is_projects)
 
     def set_plugin_banner(self, text: str) -> None:
         self.plugin_banner.setText(text)
@@ -715,23 +778,56 @@ class StartupPage(QWidget):
             if widget:
                 widget.deleteLater()
 
-        create_card = CreateProjectCard()
-        create_card.clicked.connect(self.open_create_dialog)
-        self.grid.addWidget(create_card, 0, 0)
+        self.project_cards = []
+        self.create_project_card = CreateProjectCard()
+        self.create_project_card.clicked.connect(self.open_create_dialog)
 
-        col_count = 3
-        for index, project_dir in enumerate(discover_projects(self.library_dir), start=1):
+        project_directories = discover_projects(self.library_dir)
+        for project_dir in project_directories:
             try:
                 project = load_project_preview(project_dir)
                 card = ProjectCard(project_dir, project)
+                card.setProperty("searchText", f"{project.metadata.show_title} {project_dir.name}".lower())
             except ProjectLoadError as exc:
                 card = RecoveryProjectCard(project_dir, exc)
+                card.setProperty("searchText", project_dir.name.replace("_", " ").lower())
             except Exception as exc:
                 card = RecoveryProjectCard(project_dir, exc)
+                card.setProperty("searchText", project_dir.name.replace("_", " ").lower())
             card.clicked.connect(self.project_ready.emit)
-            row = index // col_count
-            col = index % col_count
-            self.grid.addWidget(card, row, col)
+            self.project_cards.append(card)
+        self.project_count_label.setText(f"{len(project_directories)} total")
+        self.filter_project_cards()
+
+    def filter_project_cards(self, _text: str = "") -> None:
+        if not hasattr(self, "grid"):
+            return
+        query = self.project_search.text().strip().lower() if hasattr(self, "project_search") else ""
+        while self.grid.count():
+            self.grid.takeAt(0)
+        visible_cards = [
+            card
+            for card in self.project_cards
+            if not query or query in str(card.property("searchText") or "")
+        ]
+        cards: list[QWidget] = []
+        if self.create_project_card is not None:
+            self.create_project_card.setVisible(not query)
+            if not query:
+                cards.append(self.create_project_card)
+        cards.extend(visible_cards)
+        viewport_width = self.scroll.viewport().width() if hasattr(self, "scroll") else self.width()
+        column_count = max(1, min(5, max(1, (viewport_width + 16) // 294)))
+        for index, card in enumerate(cards):
+            card.setVisible(True)
+            self.grid.addWidget(card, index // column_count, index % column_count)
+        for card in self.project_cards:
+            if card not in visible_cards:
+                card.setVisible(False)
+
+    def resizeEvent(self, event) -> None:  # type: ignore[override]
+        super().resizeEvent(event)
+        QTimer.singleShot(0, self.filter_project_cards)
 
     def refresh_plugins(self) -> None:
         if not hasattr(self, "plugin_grid"):

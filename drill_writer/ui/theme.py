@@ -311,6 +311,208 @@ QToolTip {{
 #HomeTitle {{
     color: {accent};
 }}
+#HomeSidebar {{
+    background: {panel};
+    border: 0;
+    border-right: 1px solid {border};
+}}
+#HomeContent, #HomePages {{
+    background: {background};
+    border: 0;
+}}
+#VersionBadge {{
+    color: {muted};
+    font-size: 8.2pt;
+}}
+#NavigationSectionLabel {{
+    color: {muted};
+    font-size: 8pt;
+    font-weight: 700;
+    letter-spacing: 0.7px;
+}}
+#HomeNavButton, #SidebarFooterButton {{
+    background: transparent;
+    color: {text};
+    border: 0;
+    border-radius: 6px;
+    min-height: 28px;
+    padding: 5px 10px;
+    text-align: left;
+}}
+#HomeNavButton:hover, #SidebarFooterButton:hover {{
+    background: {surface};
+    border: 0;
+}}
+#HomeNavButton:checked {{
+    background: {selection};
+    color: white;
+    font-weight: 650;
+}}
+#LibraryPathLabel {{
+    color: {muted};
+    font-size: 8pt;
+}}
+#HomeNotice {{
+    color: {accent};
+    font-size: 8.3pt;
+}}
+#HomePageTitle {{
+    color: {text};
+    font-size: 20pt;
+    font-weight: 750;
+}}
+#HomePageSubtitle, #HomeSectionMeta {{
+    color: {muted};
+}}
+#HomeSectionTitle {{
+    color: {text};
+    font-size: 11pt;
+    font-weight: 650;
+}}
+#HomeDivider {{
+    color: {border};
+    background: {border};
+    border: 0;
+    max-height: 1px;
+}}
+#HomeProjectSearch {{
+    min-height: 28px;
+    border-radius: 7px;
+    padding-left: 9px;
+}}
+#PrimaryButton {{
+    background: {selection};
+    color: white;
+    border-color: {selection};
+    min-height: 28px;
+    padding-left: 14px;
+    padding-right: 14px;
+    font-weight: 650;
+}}
+#PrimaryButton:hover {{
+    background: {accent};
+    color: {background};
+    border-color: {accent};
+}}
+#QuietButton {{
+    background: transparent;
+    border-color: transparent;
+    color: {muted};
+}}
+#QuietButton:hover {{
+    background: {surface};
+    border-color: {border};
+    color: {text};
+}}
+#ProjectCard, #PluginCard {{
+    border-radius: 8px;
+}}
+#ProjectCardTitle {{
+    color: {text};
+    font-size: 10.2pt;
+    font-weight: 700;
+}}
+#ProjectCardMeta {{
+    color: {muted};
+    font-size: 8.2pt;
+}}
+#RecoveryCardTitle {{
+    color: {accent};
+    font-size: 10.2pt;
+    font-weight: 700;
+}}
+#RecoveryCardStatus {{
+    color: #d65a4a;
+    font-size: 9pt;
+    font-weight: 650;
+}}
+#PrimaryToolbar, #FavoritesToolbar {{
+    background: {panel};
+    border: 0;
+    border-bottom: 1px solid {border};
+    spacing: 6px;
+    padding: 4px 7px;
+}}
+#PrimaryToolbar QToolButton, #FavoritesToolbar QToolButton {{
+    min-height: 25px;
+    padding: 3px 9px;
+    border-color: transparent;
+    background: transparent;
+}}
+#PrimaryToolbar QToolButton:hover, #FavoritesToolbar QToolButton:hover {{
+    background: {surface};
+    border-color: {border};
+}}
+#ProjectContextTitle {{
+    color: {text};
+    font-size: 10pt;
+    font-weight: 700;
+    padding: 0 6px;
+}}
+#ToolbarCaption {{
+    color: {muted};
+    font-size: 8pt;
+    padding-left: 5px;
+}}
+#WorkspaceSelector, #ToolbarSetSelector {{
+    min-height: 24px;
+    padding: 1px 7px;
+    border-radius: 5px;
+}}
+QDockWidget::title {{
+    background: {panel};
+    color: {text};
+    border-bottom: 1px solid {border};
+    padding: 7px 10px;
+    font-weight: 650;
+    text-align: left;
+}}
+QDockWidget QGroupBox {{
+    background: transparent;
+    border: 0;
+    border-top: 1px solid {border};
+    border-radius: 0;
+    margin-top: 15px;
+    padding: 11px 0 0 0;
+}}
+QDockWidget QGroupBox::title {{
+    subcontrol-origin: margin;
+    left: 0;
+    padding: 0 7px 0 0;
+    background: {panel};
+    color: {muted};
+    font-weight: 650;
+}}
+#SideTabs::pane, #TimelineTabs::pane {{
+    border: 0;
+    background: transparent;
+}}
+#SideTabs QTabBar::tab, #TimelineTabs QTabBar::tab {{
+    background: transparent;
+    color: {muted};
+    border: 0;
+    border-bottom: 2px solid transparent;
+    border-radius: 0;
+    min-height: 24px;
+    padding: 4px 9px;
+    margin: 0;
+}}
+#SideTabs QTabBar::tab:hover, #TimelineTabs QTabBar::tab:hover {{
+    color: {text};
+    background: {surface};
+}}
+#SideTabs QTabBar::tab:selected, #TimelineTabs QTabBar::tab:selected {{
+    background: transparent;
+    color: {text};
+    border-bottom-color: {accent};
+    font-weight: 650;
+}}
+#PanelPageSelector {{
+    border-left: 0;
+    border-radius: 5px;
+    min-height: 26px;
+    font-weight: 650;
+}}
 #PluginStatusInactive {{
     background: {surface};
     color: {muted};

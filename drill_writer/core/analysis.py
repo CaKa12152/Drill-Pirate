@@ -4,7 +4,9 @@ from dataclasses import dataclass
 from typing import Callable
 
 from drill_writer.core.animation import distance, interpolate_project, motion_window_for_dot, sample_transition_path
+from drill_writer.core.design_tools import guide_contains_point
 from drill_writer.core.models import DrillProject
+from drill_writer.core.specialized_design import physical_limits_for_dot, performer_is_attached_to_prop
 
 
 @dataclass(slots=True)
@@ -26,12 +28,13 @@ class ConflictTimelineEntry:
     spacing_conflicts: int = 0
     speed_conflicts: int = 0
     crossing_conflicts: int = 0
+    no_go_conflicts: int = 0
     worst_spacing: float = 999.0
     fastest_yards_per_count: float = 0.0
 
     @property
     def total(self) -> int:
-        return self.spacing_conflicts + self.speed_conflicts + self.crossing_conflicts
+        return self.spacing_conflicts + self.speed_conflicts + self.crossing_conflicts + self.no_go_conflicts
 
 
 def transition_start_positions(project: DrillProject, set_index: int) -> dict[str, tuple[float, float]]:
@@ -70,6 +73,39 @@ def detect_path_warnings(
     ]
     sampled_positions = [interpolate_project(project, set_index, count) for count in sampled_counts]
 
+    no_go_guides = [
+        guide
+        for guide in project.guides
+        if guide.visible and guide.guide_type in {"no_go_rectangle", "no_go_circle"}
+    ]
+    for dot_id in all_dot_ids:
+        if dot_id not in selected_dot_ids:
+            continue
+        for guide in no_go_guides:
+            conflict = next(
+                (
+                    count
+                    for count, positions in zip(sampled_counts, sampled_positions)
+                    if dot_id in positions and guide_contains_point(guide, positions[dot_id])
+                ),
+                None,
+            )
+            if conflict is None:
+                continue
+            warnings.append(
+                PathWarning(
+                    "no_go",
+                    set_index,
+                    drill_set.name,
+                    f"{dot_id} enters no-go region '{guide.name}'",
+                    dot_id,
+                    "",
+                    conflict,
+                )
+            )
+            if len(warnings) >= warning_limit:
+                return warnings
+
     for first_index, dot_a in enumerate(all_dot_ids):
         if cancel_callback and cancel_callback():
             return warnings
@@ -100,16 +136,20 @@ def detect_path_warnings(
 
     previous_positions = transition_start_positions(project, set_index)
     current_positions = transition_end_positions(project, set_index)
-    path_by_dot = {
-        dot_id: sample_transition_path(
-            previous_positions.get(dot_id, project.dot_by_id(dot_id) and (project.dot_by_id(dot_id).x, project.dot_by_id(dot_id).y) or (0, 0)),
-            current_positions.get(dot_id, project.dot_by_id(dot_id) and (project.dot_by_id(dot_id).x, project.dot_by_id(dot_id).y) or (0, 0)),
+    path_by_dot = {}
+    for dot_id in all_dot_ids:
+        if drill_set.count_positions.get(dot_id):
+            path_by_dot[dot_id] = [positions[dot_id] for positions in sampled_positions]
+            continue
+        dot = project.dot_by_id(dot_id)
+        fallback = (dot.x, dot.y) if dot else (0.0, 0.0)
+        path_by_dot[dot_id] = sample_transition_path(
+            previous_positions.get(dot_id, fallback),
+            current_positions.get(dot_id, fallback),
             drill_set.path_anchors.get(dot_id, []),
             drill_set.path_controls.get(dot_id, []),
             samples=12,
         )
-        for dot_id in all_dot_ids
-    }
 
     check_crossings = len(all_dot_ids) <= 450 or dot_ids is not None
     if check_crossings:
@@ -143,13 +183,18 @@ def detect_path_warnings(
         length = sum(distance(path[index], path[index + 1]) for index in range(len(path) - 1))
         move_start, move_end = motion_window_for_dot(drill_set, dot_id)
         yards_per_count = length / max(0.0001, move_end - move_start)
-        if yards_per_count > max_yards_per_count:
+        limits = physical_limits_for_dot(project, dot_id)
+        performer_limit = limits.max_yards_per_count
+        if performer_is_attached_to_prop(project, dot_id, move_start):
+            performer_limit *= limits.carry_speed_multiplier
+        effective_limit = min(max_yards_per_count, performer_limit)
+        if yards_per_count > effective_limit:
             warnings.append(
                 PathWarning(
                     "speed",
                     set_index,
                     drill_set.name,
-                    f"{dot_id} travels {yards_per_count:.2f} yd/count during counts {move_start:g}-{move_end:g} (stride/speed risk)",
+                    f"{dot_id} travels {yards_per_count:.2f} yd/count during counts {move_start:g}-{move_end:g}; {limits.profile_name} limit is {effective_limit:.2f}",
                     dot_id,
                     "",
                     move_start,
@@ -186,11 +231,22 @@ def build_conflict_timeline(
         ConflictTimelineEntry(set_index=set_index, set_name=drill_set.name, count=count)
         for count in sampled_counts
     ]
+    no_go_guides = [
+        guide
+        for guide in project.guides
+        if guide.visible and guide.guide_type in {"no_go_rectangle", "no_go_circle"}
+    ]
 
     for sample_index, positions in enumerate(sampled_positions):
         if cancel_callback and cancel_callback():
             return [entry for entry in entries if entry.total > 0]
         entry = entries[sample_index]
+        for dot_id in selected_dot_ids:
+            if dot_id not in positions:
+                continue
+            entry.no_go_conflicts += sum(
+                1 for guide in no_go_guides if guide_contains_point(guide, positions[dot_id])
+            )
         for first_index, dot_a in enumerate(all_dot_ids):
             for dot_b in all_dot_ids[first_index + 1 :]:
                 if dot_a not in selected_dot_ids and dot_b not in selected_dot_ids:
@@ -212,7 +268,11 @@ def build_conflict_timeline(
                 continue
             yards_per_count = distance(previous_positions[dot_id], current_positions[dot_id]) / count_span
             entry.fastest_yards_per_count = max(entry.fastest_yards_per_count, yards_per_count)
-            if yards_per_count > max_yards_per_count:
+            limits = physical_limits_for_dot(project, dot_id)
+            performer_limit = limits.max_yards_per_count
+            if performer_is_attached_to_prop(project, dot_id, current_count):
+                performer_limit *= limits.carry_speed_multiplier
+            if yards_per_count > min(max_yards_per_count, performer_limit):
                 entry.speed_conflicts += 1
 
     if len(all_dot_ids) <= 450 or dot_ids is not None:
@@ -234,16 +294,20 @@ def build_conflict_timeline(
                     ):
                         crossing_count += 1
         else:
-            path_by_dot = {
-                dot_id: sample_transition_path(
-                    previous_positions.get(dot_id, project.dot_by_id(dot_id) and (project.dot_by_id(dot_id).x, project.dot_by_id(dot_id).y) or (0, 0)),
-                    current_positions.get(dot_id, project.dot_by_id(dot_id) and (project.dot_by_id(dot_id).x, project.dot_by_id(dot_id).y) or (0, 0)),
+            path_by_dot = {}
+            for dot_id in all_dot_ids:
+                if drill_set.count_positions.get(dot_id):
+                    path_by_dot[dot_id] = [positions[dot_id] for positions in sampled_positions]
+                    continue
+                dot = project.dot_by_id(dot_id)
+                fallback = (dot.x, dot.y) if dot else (0.0, 0.0)
+                path_by_dot[dot_id] = sample_transition_path(
+                    previous_positions.get(dot_id, fallback),
+                    current_positions.get(dot_id, fallback),
                     drill_set.path_anchors.get(dot_id, []),
                     drill_set.path_controls.get(dot_id, []),
                     samples=max(12, samples),
                 )
-                for dot_id in all_dot_ids
-            }
             for first_index, dot_a in enumerate(all_dot_ids):
                 if cancel_callback and cancel_callback():
                     return [entry for entry in entries if entry.total > 0]

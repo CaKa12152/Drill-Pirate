@@ -174,14 +174,14 @@ This area is still improving; include the SVG and project ZIP when reporting cas
 Try:
 
 1. Undo the form placement.
-2. Re-select marchers in the intended order.
-3. Apply the form again.
-4. Use `Analyze Paths`.
-5. Use `Clear Selected Paths` if old anchors are affecting the move.
-6. Add path anchors manually where a performer should route around traffic.
-7. Use `Follow-Leader Conveyor` for outline rotation/conveyor visuals.
+2. Select the affected marchers and use `Optimize Selected Spot Assignment`.
+3. Confirm that the target picture is unchanged and review the yellow preview lines.
+4. Use `Analyze Paths` to inspect any conflicts that remain unavoidable with the fixed pictures.
+5. Use `Clear Selected Paths` if old manual anchors are affecting the move.
+6. Add path anchors manually only when the intended route must curve around traffic.
+7. Use `Follow the Leader...` for shared-route outline, conveyor, line, and complex-shape motion.
 
-Auto-planning is not yet a full commercial collision solver.
+Spot optimization changes destination ownership, not the target coordinates or manual path geometry.
 
 ## Dragging a Tool Handle Moves the Whole Form
 

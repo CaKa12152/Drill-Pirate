@@ -30,7 +30,7 @@ Fields:
 | Default Counts Per Set | Count length used when new sets are created. |
 | Time Signature | Display metadata for the project. |
 | Marchers | Number of performers to create in the starting block when no instrumentation roster is entered. |
-| Instrumentation | Optional roster lines like `Flute=5`; generated performers use compact labels like `F1`, `T1`, `TR1`, and `M1`. |
+| Roster | Optional lines like `Flute=5` or `Trumpet \| Brass = 5`. Instrument is the specific assignment, while Section is the broader selectable group. Generated performers use compact labels like `F1`, `T1`, `TR1`, and `M1`. |
 | Front Ensemble Props | Optional movable front ensemble props placed in front of the field. |
 | Drum Major Stands | Optional movable drum major stand props placed in front of the field. |
 | Save Location | Root folder where the project folder is created. |
@@ -62,6 +62,20 @@ Use workspaces to reduce panel crowding.
 | Rehearse Workspace | `Ctrl+Alt+3` | Playback, timing, waveform, markers, and movement styles. |
 | Print Workspace | `Ctrl+Alt+4` | Export and staff/performer review. |
 | Focus Field | `Ctrl+Alt+5` | Larger field view with condensed side and timeline panels still visible. |
+| Music Design Workspace | `Ctrl+Alt+6` | Score import, phrase planning, storyboarding, and automated set suggestions. |
+| Specialized Design Workspace | `Ctrl+Alt+7` | Custom surfaces, guard choreography, performer-linked props, and physical-limit analysis. |
+
+## Music and Show Design
+
+Open the **Music** workspace or use `Tools > Music & Show Design`.
+
+1. Import `.musicxml`, `.xml`, `.mxl`, `.mid`, or `.midi` from **Score Import**.
+2. Review imported measures, pickups, meter, tempo, rehearsal marks, and warnings.
+3. Use **Phrase & Set Planner** to detect phrases and edit their ranges, intensity, and design notes.
+4. Choose a target set length and transition profile, then generate a working set plan. Existing authored movement is preserved by default.
+5. Use **Storyboard** to organize movements, scenes, production notes, and visual pacing.
+6. Review **Automated Suggestions** for explainable recommendations based on phrase energy and existing form travel.
+7. Click **Save Changes** to apply everything as one undoable project edit, or Cancel to discard the working plan.
 
 ## Field and Coordinates
 
@@ -83,6 +97,28 @@ Coordinate references:
 | `FH` | Front hash. |
 | `BH` | Back hash. |
 | `Mid` | Midfield front-to-back center line. |
+
+### Custom Surfaces
+
+Open `Tools > Specialized Design > Surface & Parade Route` or the **Specialized** workspace.
+
+- Load College, High School, Indoor, Parade, or Staging presets, then customize dimensions and grid spacing.
+- Football surfaces support college, high-school, custom, or hidden hashes plus configurable end zones and yard numbers.
+- Parade surfaces use reorderable route points and a route-width corridor.
+- Optional surface and line colors are saved with the project and appear in the editor, minimap, home cards, set thumbnails, PDFs, and MP4 exports.
+- Indoor/staging coordinates export as centered X/Y values. Parade coordinates export as route station and left/right offset.
+- Keyboard coordinate entry accepts `T1 X 4.5, Y -2` on any surface.
+
+### Guard and Choreography
+
+Select one or more performers, then open `Tools > Specialized Design > Guard Choreography Tracks`.
+
+1. Choose choreography, toss, equipment change, spin, or dance/body.
+2. Enter its count range and optional equipment, toss revolutions/height, and teaching notes.
+3. Add the event; select a row and use **Update Selected Event** to revise it.
+4. Review all events in the studio lane view or the bottom **Choreography** timeline.
+
+Equipment changes update the performer's active equipment after the event's ending count. Overlapping toss/equipment-change assignments are blocked when saving.
 
 ## Marchers
 
@@ -136,6 +172,10 @@ If marchers are selected, only selected marchers update their opening positions.
 
 Use the searchable marcher list to find performers by ID, name, section, instrument, rank, equipment, or layer. Select visible search results, then batch-edit metadata such as section, color, layer, instrument, rank, or equipment.
 
+For selections of two or more marchers, toggle compact on-field transform handles with `Ctrl+Shift+T`, `View > Transform Handles`, the Selection inspector, or the field context menu. Handles are off by default. Drag corners to scale, the cyan handle to rotate, the white handle to move the pivot, or the yellow handle to move the form. Exact stretch/skew values remain in the Selection inspector. Arrow keys nudge by one 8-to-5 step; hold Shift for a half-step, Ctrl for one yard, or Alt for five yards.
+
+Use `F4` to repeat the latest transform or other repeatable edit on the current selection.
+
 ## Props
 
 Props are imported or designed visual objects that can move through sets like marchers.
@@ -163,6 +203,10 @@ Imported images are copied into the project `props\` folder. Props are included 
 The in-app Prop Designer can create props from rectangles, circles/ovals, lines, text, fill/stroke colors, exact yard sizing, and anchor-based shape scaling. Saved designs become transparent PNG props in the project `props\` folder.
 
 Use `Fit Form to Selected Prop` to scale selected marchers to fit a selected prop while preserving the selected form shape.
+
+To attach a prop to performers, select the prop and its carriers/pushers before opening `Tools > Specialized Design > Performer Prop Attachments`. Choose Carry, Push, or Rotate; set a count range, leader/handle, local offset, and rotation behavior. Drill Pirate initializes the offset from the prop's current location to avoid a jump when the link begins. During playback and export, the prop follows the interpolated performer positions.
+
+Use the **Physical Limits & Warnings** page to review instrument defaults, save performer-specific overrides, and analyze the current set for travel, backward/lateral movement, turning, toss/recovery, surface-boundary, and parade-route risks.
 
 ## Selection
 
@@ -197,6 +241,16 @@ Each set contains:
 - Transition mode.
 
 Use the set list to add, remove, copy, rename, reorder, and edit counts/tempo. If a set does not specify its own tempo, it uses the project tempo or timing-map tempo active at that count.
+
+The Ripple Edit Scope controls whether marcher edits affect only the current set, all following sets, a selected set range, sets until the next keyframe, or every set containing the same normalized formation. The same scope is honored by transforms, movement timing, facing, movement styles, path edits, and the property paintbrush.
+
+Open the bottom panel's Movement Lanes tab to edit transition timing visually. Drag a bar edge to create a hold or change when a section starts/finishes. Drag the whole bar to move its timing window. The displayed yards-per-count value updates as the movement window changes.
+
+Use the Beat-to-Set Generator from the timeline or Tools menu to turn musical markers into set boundaries. Drill Pirate samples the existing animation at each generated destination and leaves tempo events, ritardandos, fermatas, and audio anchors attached to their counts.
+
+The Smart Transition Composer compares shortest-travel, rank-preserving, section-preserving, clockwise, counterclockwise, follow-leader, and lowest-conflict assignments. Review the distance and conflict scores, preview any row, then apply the preferred assignment.
+
+The Property Paintbrush copies only the categories you select: relative form position, path geometry, facing, movement style, move timing, appearance metadata, and constraints. Copy from one marcher or an equal-sized form, select the targets, then paint with `Ctrl+Shift+V`.
 
 ## Timeline and Playback
 
@@ -288,9 +342,19 @@ To edit a path:
 
 Use `Clear Selected Paths` to remove custom path anchors/controls from selected marchers.
 
-## Follow-Leader Conveyor
+## Follow the Leader
 
-Use `Follow-Leader Conveyor` when selected performers should rotate or travel around a shape instead of cutting directly across it.
+Use `Follow the Leader...` or `Ctrl+Alt+F` when selected performers should trace one shared route instead of cutting directly between spots. Every follower retains its distance behind the marcher ahead, including through multiple curves and angle changes.
+
+## Group Motion and CAD Drafting
+
+Open the `Motion` tab for transition-level design tools:
+
+- `Group Motion Ribbon` creates one shared curved route for the selected rank or section. Drag red route nodes or cyan tangent handles; hold `Alt` to mirror the opposite tangent. Marcher movement is locked while handles are active, and each drag creates one undo step.
+- `Formation Morph` previews a coordinated blend into the current set picture with assignment, coherence, section/rank preservation, precision, and travel-facing options.
+- `Continuity Designer` writes count-ranged step size, direction, body/horn facing, and performer instructions. These instructions appear in dot books and coordinate CSV exports.
+- `Construction Guides` creates permanent draggable geometry. Lock finished guides to prevent accidental movement. No-go circles and rectangles are included in path warnings and the conflict timeline.
+- `CAD Path Toolkit` operates on the active ribbon, selected guides, or selected marcher paths. Transition endpoints remain exact after CAD edits.
 
 This is useful for:
 
@@ -299,6 +363,10 @@ This is useful for:
 - Stars.
 - Conveyor-belt visuals.
 - Custom plugin or SVG shapes where performers should preserve outline order.
+
+The preview dialog supports incoming or current-form routes, automatic/open/closed topology, smooth curves or sharp corners, forward/reverse travel, roster or spatial order, and separate routes by disconnected form, row, file, or section. The red line is the shared route, gold dots are destinations, and the labeled gold handle identifies each leader.
+
+Enable `Face the direction of travel throughout the move` to create per-count facing changes. Triangle marcher symbols continuously turn with the route tangent; `Facing Offset` adds an intentional visual orientation without changing the travel path.
 
 ## Snapping and Alignment
 
@@ -338,7 +406,46 @@ Path analysis warns about:
 - High travel speed.
 - Conflict-heavy counts in the timeline.
 
-Auto-plan selected paths can add basic route anchors, but it is not a full commercial-grade collision solver yet. Review all automated results visually before relying on them.
+Optimize Selected Spot Assignment keeps every destination coordinate in place and changes only which selected marcher owns each spot. The solver evaluates synchronized spacing, crossing risk, travel outliers, movement windows, speed limits, and unselected marchers. It does not create path anchors or alter the destination picture. Review unresolved warnings when the fixed start and destination pictures make a conflict unavoidable.
+
+## Large-Show Accelerators
+
+Open `Tools > Large-Show Accelerators` or use the `Large Show` tab in the left panel.
+
+### Import a roster
+
+1. Choose `Import Roster CSV`.
+2. Select a CSV containing any common combination of name, ID, instrument, section, rank, color, layer, or equipment columns.
+3. Choose Merge to update matching IDs or Append to guarantee new IDs.
+4. Review the generated IDs, colors, and layers before importing.
+
+### Build and lock a hierarchy
+
+Use `Hierarchy & Linked Formations`, then choose `Build From Roster` to create Ensemble → instrument family → section → rank groups. Double-click a group to select its members. Group transforms use numeric move, rotate, and scale values. Locked parent groups lock every descendant member.
+
+### Link repeated or mirrored forms
+
+Create equal-size groups for the master and each copy. Select the master group, choose `Link Groups`, then choose whether the instance is repeated or mirrored. Corresponding marcher edits remain connected until `Detach` is selected.
+
+### Replace or swap performers
+
+- Select one marcher to replace roster information at that drill spot.
+- Select exactly two marchers to swap their roster identities.
+
+Coordinates, paths, timing windows, facings, and set data remain assigned to the original drill spots.
+
+### Clean a formation
+
+Select a form and open `Automatic Form Cleanup`. Configure spacing, strength, and cleanup passes. Drill Pirate previews the proposed result and reports overlaps and average interval before applying it.
+
+### Compare and save alternatives
+
+- `Compare Sets` displays two field views and sortable difference vectors.
+- `Formation Variations` stores selected or full-set alternatives without duplicating the project.
+
+### Work across projects
+
+Use `File > Open Project in New Tab` (`Ctrl+Shift+O`). Tabs can be reordered and closed independently. `File > Copy From Open Project Tab` copies a source formation, timing map, or props into the current project and supports undo.
 
 ## Exporting
 
@@ -412,7 +519,7 @@ The bundle includes recent crash logs, diagnostics, and the current project fold
 ## Recommended Workflow
 
 1. Create project with audio, BPM, default counts, and starting marcher count.
-2. Rename/set up performers by section.
+2. Import the roster and build the ensemble hierarchy.
 3. Build the opening form, then capture opening positions if Set 1 should move.
 4. Add Set 2 and shape the next form.
 5. Preview selected paths.

@@ -13,8 +13,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
+from drill_writer import __version__
 
-CURRENT_VERSION = "v2.5.0"
+
+CURRENT_VERSION = f"v{__version__}"
 GITHUB_LATEST_RELEASE_API = "https://api.github.com/repos/CaKa12152/Drill-Pirate/releases/latest"
 GITHUB_RELEASES_API = "https://api.github.com/repos/CaKa12152/Drill-Pirate/releases?per_page=20"
 GITHUB_RELEASES_URL = "https://github.com/CaKa12152/Drill-Pirate/releases/"

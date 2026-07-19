@@ -68,7 +68,7 @@ from geometry_helpers import make_shape_points
   "description": "What the plugin does.",
   "entry": "plugin.py",
   "api_version": "1.0",
-  "min_app_version": "v2.6.0",
+  "min_app_version": "v2.7.0",
   "permissions": ["ui", "project_read"]
 }
 ```
@@ -84,7 +84,7 @@ Manifest fields:
 | `description` | Recommended | Short explanation. |
 | `entry` | Yes | Python file to load, usually `plugin.py`. |
 | `api_version` | Recommended | Plugin API version. Current supported API is `1.0`. |
-| `min_app_version` | Recommended | Minimum Drill Pirate version, such as `v2.6.0`. |
+| `min_app_version` | Recommended | Minimum Drill Pirate version, such as `v2.7.0`. |
 | `permissions` | Recommended | Declared access needs shown in the trust prompt. |
 
 ## API Compatibility
@@ -312,6 +312,8 @@ return {
 ```
 
 The number of returned positions should match the selected dot count.
+
+List results are treated as unlabeled form spots and use Drill Pirate's collision-safe global assignment. Dictionary results explicitly assign each dot ID to a spot and preserve the plugin's identity mapping.
 
 ## Example: Menu Action
 

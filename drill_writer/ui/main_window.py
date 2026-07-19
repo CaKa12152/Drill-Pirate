@@ -7,9 +7,10 @@ import tempfile
 import traceback
 import base64
 import hashlib
+from uuid import uuid4
 from copy import deepcopy
 from dataclasses import dataclass
-from math import atan2, cos, degrees, pi, sin
+from math import atan2, cos, degrees, pi, radians, sin
 from pathlib import Path
 from typing import Any, Callable
 
@@ -22,10 +23,12 @@ except Exception:  # pragma: no cover - optional Qt module
     QOpenGLWidget = None  # type: ignore[assignment]
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QAbstractSpinBox,
     QCheckBox,
     QColorDialog,
     QComboBox,
     QDialog,
+    QDialogButtonBox,
     QDockWidget,
     QDoubleSpinBox,
     QFileDialog,
@@ -65,17 +68,54 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from drill_writer.core.analysis import auto_plan_paths, build_conflict_timeline, detect_path_warnings, segments_intersect
+from drill_writer.core.analysis import build_conflict_timeline, detect_path_warnings, segments_intersect
+from drill_writer.core.accelerators import (
+    alternating_selection,
+    array_target_points,
+    assign_targets_minimum_cost,
+    create_live_symmetry_record,
+    expand_live_symmetry_changes,
+    parallel_form_target_points,
+    rank_file_target_points,
+    spatial_id_order,
+)
 from drill_writer.core.animation import distance, dot_facing_at_set, interpolate_dot_facings, interpolate_project, interpolate_props, sample_transition_path
-from drill_writer.core.assignment import minimum_cost_target_assignment, ordered_targets
+from drill_writer.core.assignment import ordered_targets
 from drill_writer.core.constraints import (
     make_arc_metadata,
     make_block_metadata,
     make_relative_metadata,
     solve_constraints,
 )
-from drill_writer.core.coordinates import BACK_HASH_YARDS, FIELD_HALF_HEIGHT_YARDS, FIELD_HALF_WIDTH_YARDS, FRONT_HASH_YARDS, STEPS_PER_YARD, format_drill_coordinate
-from drill_writer.core.models import AudioVersion, Dot, DotConstraint, DrillProject, DrillSet, Marker, MovementStyle, Prop, TimingEvent, Transition, prop_default_state
+from drill_writer.core.cad_paths import (
+    cad_extend,
+    cad_fillet,
+    cad_join,
+    cad_offset,
+    cad_reverse,
+    cad_simplify,
+    cad_smooth,
+    cad_split,
+    cad_trim,
+    path_to_bezier_nodes,
+)
+from drill_writer.core.design_tools import (
+    MorphOptions,
+    create_motion_ribbon,
+    guide_path,
+    motion_ribbon_by_id,
+    plan_formation_morph,
+    plan_motion_ribbon,
+    sample_motion_ribbon,
+)
+from drill_writer.core.follow_leader import (
+    FollowLeaderOptions,
+    FollowLeaderPlan,
+    plan_follow_leader,
+    split_follow_leader_groups,
+)
+from drill_writer.core.coordinates import STEPS_PER_YARD, format_surface_coordinate
+from drill_writer.core.models import AudioVersion, ConstructionGuide, Dot, DotConstraint, DrillProject, DrillSet, Marker, MotionRibbon, MovementStyle, Prop, TimingEvent, Transition, prop_default_state
 from drill_writer.core.large_show import (
     cleanup_formation,
     expand_linked_position_changes,
@@ -97,6 +137,7 @@ from drill_writer.core.project_io import (
     save_project,
 )
 from drill_writer.core.svg_import import load_svg_contours
+from drill_writer.core.specialized_design import surface_contains_point
 from drill_writer.core.timing import (
     active_audio_version,
     audio_ms_for_set_count,
@@ -109,7 +150,9 @@ from drill_writer.core.timing import (
 from drill_writer.core.workflow import (
     TransformParameters,
     assignment_for_mode,
+    collision_aware_assignment_for_project,
     generate_sets_from_markers,
+    project_assignment_quality,
     ripple_set_indices,
     selection_center,
     transform_positions,
@@ -121,7 +164,6 @@ from drill_writer.core.tools import (
     bezier_curve_positions,
     circle_positions,
     centered_positions,
-    conveyor_follow_positions,
     curve_positions,
     ellipse_positions,
     elliptical_arc_path,
@@ -171,6 +213,26 @@ from drill_writer.ui.audio_devices import (
     audio_output_label_for_id,
     normalize_audio_output_device_id,
 )
+from drill_writer.ui.advanced_design_tools import (
+    CadPathDialog,
+    ConstructionGuidesDialog,
+    ContinuityDesignerDialog,
+    FormationMorphDialog,
+    MotionRibbonDialog,
+)
+from drill_writer.ui.design_accelerators import (
+    AcceleratorPanel,
+    AlternatingSelectionDialog,
+    ArrayDialog,
+    LiveSymmetryDialog,
+    ParallelFormDialog,
+    RankFileDialog,
+    ReferenceAnnotationsDialog,
+    SymmetryManagerDialog,
+)
+from drill_writer.ui.music_design import MusicDesignPanel, MusicDesignStudioDialog
+from drill_writer.ui.specialized_design import ChoreographyTimelineWidget, SpecializedDesignPanel, SpecializedDesignStudioDialog
+from drill_writer.ui.surface_preview import draw_surface_preview, field_to_rect, rect_to_field, size_to_rect
 from drill_writer.ui.field_view import EditorTool, FieldView
 from drill_writer.ui.prop_designer import CreatedPropDesign, PropDesignerDialog
 from drill_writer.ui.theme import theme_tokens
@@ -278,11 +340,14 @@ def refresh_ancestor_layouts(widget: QWidget) -> None:
         current = current.parentWidget()
     if scroll_area is not None and scroll_area.widget() is not None:
         content = scroll_area.widget()
-        minimum = content.minimumSizeHint()
-        content.resize(
-            max(1, scroll_area.viewport().width()),
-            max(scroll_area.viewport().height(), minimum.height()),
-        )
+        content.updateGeometry()
+        scroll_area.updateGeometry()
+        if not scroll_area.widgetResizable():
+            minimum = content.minimumSizeHint()
+            content.resize(
+                max(1, scroll_area.viewport().width()),
+                max(scroll_area.viewport().height(), minimum.height()),
+            )
 
 
 class ResponsivePanelWidget(QWidget):
@@ -302,7 +367,7 @@ class AdaptivePanelScrollArea(QScrollArea):
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setWidgetResizable(False)
+        self.setWidgetResizable(True)
         self.form_wrap_threshold = 300
         self._forms_wrapped: bool | None = None
         self._content_resize_timer = QTimer(self)
@@ -333,13 +398,8 @@ class AdaptivePanelScrollArea(QScrollArea):
                 content_layout.invalidate()
                 content_layout.activate()
             content.updateGeometry()
-        minimum = content.minimumSizeHint()
-        target = QSize(
-            max(1, self.viewport().width()),
-            max(self.viewport().height(), minimum.height()),
-        )
-        if content.size() != target:
-            content.resize(target)
+        content.updateGeometry()
+        self.updateGeometry()
 
     def resizeEvent(self, event) -> None:  # type: ignore[override]
         super().resizeEvent(event)
@@ -365,6 +425,18 @@ class CurrentPageStack(QStackedWidget):
             return QSize(180, 120)
         hint = current.minimumSizeHint()
         return QSize(180, max(120, hint.height()))
+
+    def hasHeightForWidth(self) -> bool:  # type: ignore[override]
+        current = self.currentWidget()
+        return bool(current and current.hasHeightForWidth())
+
+    def heightForWidth(self, width: int) -> int:  # type: ignore[override]
+        current = self.currentWidget()
+        if current is None:
+            return 320
+        if current.hasHeightForWidth():
+            return max(current.minimumSizeHint().height(), current.heightForWidth(max(1, width)))
+        return max(current.minimumSizeHint().height(), current.sizeHint().height())
 
     def setCurrentIndex(self, index: int) -> None:  # type: ignore[override]
         super().setCurrentIndex(index)
@@ -396,6 +468,22 @@ class CompactTabWidget(QTabWidget):
             return QSize(200, 120)
         hint = current.minimumSizeHint()
         return QSize(200, max(120, hint.height() + self.tabBar().minimumSizeHint().height()))
+
+    def hasHeightForWidth(self) -> bool:  # type: ignore[override]
+        current = self.currentWidget()
+        return bool(current and current.hasHeightForWidth())
+
+    def heightForWidth(self, width: int) -> int:  # type: ignore[override]
+        current = self.currentWidget()
+        if current is None:
+            return 240
+        page_height = (
+            current.heightForWidth(max(1, width))
+            if current.hasHeightForWidth()
+            else max(current.minimumSizeHint().height(), current.sizeHint().height())
+        )
+        chrome_height = self.tabBar().sizeHint().height() + 18
+        return max(self.minimumSizeHint().height(), page_height + chrome_height)
 
     def refresh_current_page_geometry(self, _index: int = -1) -> None:
         current = self.currentWidget()
@@ -453,6 +541,23 @@ class PanelPageSwitcher(QWidget):
 
     def tabText(self, index: int) -> str:
         return self.selector.itemText(index)
+
+    def setPageOrder(self, pages: list[tuple[QWidget, str]]) -> None:
+        current = self.currentWidget()
+        self.selector.blockSignals(True)
+        self.selector.clear()
+        for index, (widget, label) in enumerate(pages):
+            existing_index = self.stack.indexOf(widget)
+            if existing_index >= 0:
+                self.stack.removeWidget(widget)
+            self.stack.insertWidget(index, widget)
+            self.selector.addItem(label)
+        target_index = self.stack.indexOf(current) if current is not None else 0
+        target_index = max(0, target_index)
+        self.selector.setCurrentIndex(target_index)
+        self.stack.setCurrentIndex(target_index)
+        self.selector.blockSignals(False)
+        refresh_ancestor_layouts(self)
 
     def _set_current_index(self, index: int) -> None:
         self.stack.setCurrentIndex(index)
@@ -696,31 +801,7 @@ class FieldMiniMap(QWidget):
         painter.setPen(QColor(tokens["muted_text_color"]))
         painter.drawText(title_rect, Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, "Minimap")
 
-        painter.setPen(QPen(QColor(tokens["border_color"]), 0.9))
-        painter.setBrush(QColor(field_palette["field_fill"]))
-        painter.drawRoundedRect(rect, 5, 5)
-
-        endzone_width = rect.width() * (10 / (FIELD_HALF_WIDTH_YARDS * 2))
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QColor(field_palette["endzone_fill"]))
-        painter.drawRect(QRectF(rect.left(), rect.top(), endzone_width, rect.height()))
-        painter.drawRect(QRectF(rect.right() - endzone_width, rect.top(), endzone_width, rect.height()))
-
-        minor_color = field_palette.get("minor", field_palette.get("yard", "#8b96a4"))
-        yard_color = field_palette.get("yard", field_palette.get("heavy", "#66717a"))
-        hash_color = field_palette.get("hash", yard_color)
-        painter.setPen(QPen(QColor(minor_color), 0.55))
-        for yard in range(-50, 51, 5):
-            x = rect.left() + (yard + FIELD_HALF_WIDTH_YARDS) / (FIELD_HALF_WIDTH_YARDS * 2) * rect.width()
-            painter.drawLine(QPointF(x, rect.top()), QPointF(x, rect.bottom()))
-        painter.setPen(QPen(QColor(yard_color), 0.8))
-        for yard in range(-50, 51, 10):
-            x = rect.left() + (yard + FIELD_HALF_WIDTH_YARDS) / (FIELD_HALF_WIDTH_YARDS * 2) * rect.width()
-            painter.drawLine(QPointF(x, rect.top()), QPointF(x, rect.bottom()))
-        painter.setPen(QPen(QColor(hash_color), 0.7, Qt.PenStyle.DotLine))
-        for y_value in (-17.8, 17.8):
-            y = rect.top() + (FIELD_HALF_HEIGHT_YARDS - y_value) / (FIELD_HALF_HEIGHT_YARDS * 2) * rect.height()
-            painter.drawLine(QPointF(rect.left(), y), QPointF(rect.right(), y))
+        draw_surface_preview(painter, rect, self.window.project.surface, field_palette)
 
         drill_set = self.window.current_set() if self.window.project.sets else None
         if drill_set:
@@ -731,8 +812,14 @@ class FieldMiniMap(QWidget):
                     float(prop_state.get("x", 0.0)),
                     float(prop_state.get("y", 0.0)),
                 )
-                width = max(3.0, float(prop_state.get("width", 3.0)) / (FIELD_HALF_WIDTH_YARDS * 2) * rect.width())
-                height = max(2.0, float(prop_state.get("height", 3.0)) / (FIELD_HALF_HEIGHT_YARDS * 2) * rect.height())
+                raw_width, raw_height = size_to_rect(
+                    rect,
+                    self.window.project.surface,
+                    float(prop_state.get("width", 3.0)),
+                    float(prop_state.get("height", 3.0)),
+                )
+                width = max(3.0, raw_width)
+                height = max(2.0, raw_height)
                 prop_color = QColor("#e53935" if not prop else "#e53935")
                 prop_color.setAlpha(150)
                 painter.setPen(QPen(QColor(tokens["border_color"]), 0.5))
@@ -764,18 +851,13 @@ class FieldMiniMap(QWidget):
         return QRectF(self.rect()).adjusted(8, 23, -8, -8)
 
     def field_to_minimap(self, rect: QRectF, x: float, y: float) -> QPointF:
-        return QPointF(
-            rect.left() + (x + FIELD_HALF_WIDTH_YARDS) / (FIELD_HALF_WIDTH_YARDS * 2) * rect.width(),
-            rect.top() + (FIELD_HALF_HEIGHT_YARDS - y) / (FIELD_HALF_HEIGHT_YARDS * 2) * rect.height(),
-        )
+        return field_to_rect(rect, self.window.project.surface, x, y)
 
     def minimap_to_field(self, point: QPointF) -> tuple[float, float]:
         rect = self.map_rect()
         clamped_x = max(rect.left(), min(rect.right(), point.x()))
         clamped_y = max(rect.top(), min(rect.bottom(), point.y()))
-        x = ((clamped_x - rect.left()) / max(1, rect.width())) * FIELD_HALF_WIDTH_YARDS * 2 - FIELD_HALF_WIDTH_YARDS
-        y = FIELD_HALF_HEIGHT_YARDS - ((clamped_y - rect.top()) / max(1, rect.height())) * FIELD_HALF_HEIGHT_YARDS * 2
-        return x, y
+        return rect_to_field(rect, self.window.project.surface, QPointF(clamped_x, clamped_y))
 
     def point_inside_map(self, point: QPointF) -> bool:
         return self.map_rect().contains(point)
@@ -1170,9 +1252,12 @@ class MainWindow(QMainWindow):
         self.plugin_contribution_widgets: dict[str, list[QWidget]] = {}
         self.plugin_named_menus: dict[str, QMenu] = {}
         self.active_plugin_form_tool_id = ""
+        self.active_motion_ribbon_id = ""
+        self._motion_ribbon_drag_before_sets: list[DrillSet] | None = None
         self.plugin_manager: Any = None
         self.preview_center_offset = (0.0, 0.0)
         self.preview_transform_pivot: tuple[float, float] | None = None
+        self.formation_assignment_cache: dict[tuple[Any, ...], list[int]] = {}
         self.field_hud_buttons: dict[EditorTool, QPushButton] = {}
         self.field_focus_active = False
         self.free_curve_anchors: list[tuple[float, float]] = []
@@ -1198,6 +1283,8 @@ class MainWindow(QMainWindow):
         self.conflict_heatmap_timer.timeout.connect(self.run_live_conflict_analysis)
         self._opengl_renderer_active = False
         self.radial_tool_menu: RadialToolMenu | None = None
+        self.measurements_enabled = False
+        self.measurement_mode = "all"
         self.command_actions: dict[str, QAction] = {}
         self.command_defaults: dict[str, str] = {}
         self.tooltip_widgets: list[QWidget] = []
@@ -1238,12 +1325,15 @@ class MainWindow(QMainWindow):
         self.field.selection_changed.connect(self.selection_changed)
         self.field.dot_moved.connect(self.dot_moved)
         self.field.dots_moved.connect(self.dots_moved)
+        self.field.dots_drag_preview.connect(self.preview_live_symmetry)
         self.field.prop_moved.connect(self.prop_moved)
         self.field.props_moved.connect(self.props_moved)
+        self.field.guide_moved.connect(self.move_construction_guide)
+        self.field.guide_edit_requested.connect(self.edit_construction_guide)
         self.field.context_action.connect(self.context_action)
         self.field.dot_edit_requested.connect(self.edit_dot_from_field)
         self.field.preview_handle_moved_detailed.connect(self.preview_handle_moved)
-        self.field.preview_handle_dragged.connect(self.preview_handle_moved)
+        self.field.preview_handle_dragged.connect(self.preview_handle_dragged)
         self.field.path_anchor_added.connect(self.add_path_anchor)
         self.field.path_anchor_moved_detailed.connect(self.move_path_anchor)
         self.field.path_tangent_moved_detailed.connect(self.move_path_tangent)
@@ -1269,6 +1359,7 @@ class MainWindow(QMainWindow):
         self.apply_visual_theme(theme_tokens(str(self.settings.value("appearance/theme", "dark")), self.settings))
         self.build_menus()
         self.apply_tooltips_enabled(self.tooltips_enabled())
+        self.migrate_editor_layout()
         self.restore_ui_layout()
         self.refresh_audio_versions()
         self.refresh_timing_events()
@@ -1290,8 +1381,28 @@ class MainWindow(QMainWindow):
         self.schedule_live_conflict_analysis()
 
     def build_menus(self) -> None:
-        file_menu = self.menuBar().addMenu("File")
-        self.plugin_named_menus["File"] = file_menu
+        menu_bar = self.menuBar()
+        menu_bar.clear()
+        file_menu = menu_bar.addMenu("File")
+        edit_menu = menu_bar.addMenu("Edit")
+        view_menu = menu_bar.addMenu("View")
+        tools_menu = menu_bar.addMenu("Tools")
+        playback_menu = menu_bar.addMenu("Playback")
+        self.plugin_tools_menu = menu_bar.addMenu("Plugins")
+        settings_menu = menu_bar.addMenu("Settings")
+        help_menu = menu_bar.addMenu("Help")
+        self.plugin_named_menus.update(
+            {
+                "File": file_menu,
+                "Edit": edit_menu,
+                "View": view_menu,
+                "Tools": tools_menu,
+                "Playback": playback_menu,
+                "Plugin Tools": self.plugin_tools_menu,
+                "Settings": settings_menu,
+                "Help": help_menu,
+            }
+        )
         save_action = self.menu_action("Save", self.save, QKeySequence.StandardKey.Save)
         save_as_action = self.menu_action("Save As", self.save_as, QKeySequence.StandardKey.SaveAs)
         restore_action = self.menu_action("Restore Previous Save", self.restore_previous_save)
@@ -1305,8 +1416,6 @@ class MainWindow(QMainWindow):
         file_menu.addAction(copy_tab_action)
         file_menu.addAction(home_action)
 
-        edit_menu = self.menuBar().addMenu("Edit")
-        self.plugin_named_menus["Edit"] = edit_menu
         edit_menu.addAction(self.menu_action("Undo", self.undo_stack.undo, QKeySequence.StandardKey.Undo))
         edit_menu.addAction(self.menu_action("Redo", self.undo_stack.redo, QKeySequence.StandardKey.Redo))
         edit_menu.addAction(self.menu_action("Repeat Last Action", self.repeat_last_action, QKeySequence("F4")))
@@ -1320,23 +1429,15 @@ class MainWindow(QMainWindow):
         macros_menu.addAction(self.menu_action("Replay Macro", self.replay_macro, QKeySequence("Ctrl+Alt+Shift+Enter")))
         macros_menu.addAction(self.menu_action("Delete Macro", self.delete_macro))
 
-        playback_menu = self.menuBar().addMenu("Playback")
-        self.plugin_named_menus["Playback"] = playback_menu
         playback_menu.addAction(self.menu_action("Play/Pause", self.toggle_playback, Qt.Key.Key_Space))
         playback_menu.addAction(self.menu_action("Pause", self.pause))
         playback_menu.addAction(self.menu_action("Toggle Loop Current Set", self.toggle_loop_current_set, QKeySequence("Ctrl+L")))
         playback_menu.addAction(self.menu_action("Go To Count", self.focus_count_finder, QKeySequence("Ctrl+G")))
 
-        settings_menu = self.menuBar().addMenu("Settings")
-        self.plugin_named_menus["Settings"] = settings_menu
         settings_menu.addAction(self.menu_action("Preferences", self.open_preferences, QKeySequence("Ctrl+,")))
 
-        help_menu = self.menuBar().addMenu("Help")
-        self.plugin_named_menus["Help"] = help_menu
         help_menu.addAction(self.menu_action("Export Bug Report Bundle", self.export_bug_report_bundle))
 
-        view_menu = self.menuBar().addMenu("View")
-        self.plugin_named_menus["View"] = view_menu
         self.minimap_action = self.menu_action("Show Field Minimap", self.set_minimap_visible)
         self.minimap_action.setCheckable(True)
         self.minimap_action.setChecked(self.minimap_visible())
@@ -1375,6 +1476,8 @@ class MainWindow(QMainWindow):
             ("rehearse", "Rehearse Workspace", "Ctrl+Alt+3"),
             ("print", "Print Workspace", "Ctrl+Alt+4"),
             ("focus", "Focus Field", "Ctrl+Alt+5"),
+            ("music", "Music Design Workspace", "Ctrl+Alt+6"),
+            ("specialized", "Specialized Design Workspace", "Ctrl+Alt+7"),
         ):
             workspace_menu.addAction(
                 self.menu_action(
@@ -1393,8 +1496,6 @@ class MainWindow(QMainWindow):
         workspace_menu.addAction(self.menu_action("Load Workspace Profile", self.load_workspace_profile))
         workspace_menu.addAction(self.menu_action("Delete Workspace Profile", self.delete_workspace_profile))
 
-        tools_menu = self.menuBar().addMenu("Tools")
-        self.plugin_named_menus["Tools"] = tools_menu
         add_marcher_action = self.menu_action("Add Marcher", self.add_marcher, QKeySequence("Ctrl+M"))
         delete_marcher_action = self.menu_action("Delete Selected", self.delete_selected_marchers, QKeySequence("Del"))
         import_prop_action = self.menu_action("Import Prop Image", self.import_prop_image, QKeySequence("Ctrl+Alt+I"))
@@ -1480,10 +1581,20 @@ class MainWindow(QMainWindow):
         tools_menu.addSeparator()
         snap_action = self.menu_action("Toggle Snap Align", self.toggle_snap_align, QKeySequence("Ctrl+Alt+N"))
         analyze_action = self.menu_action("Analyze Paths", self.analyze_paths, QKeySequence("Ctrl+Alt+A"))
-        plan_action = self.menu_action("Auto Plan Selected Paths", self.auto_plan_selected_paths, QKeySequence("Ctrl+Alt+R"))
+        plan_action = self.menu_action(
+            "Optimize Selected Spot Assignment",
+            self.optimize_selected_spot_assignment,
+            QKeySequence("Ctrl+Alt+R"),
+        )
         clear_paths_action = self.menu_action("Clear Selected Paths", self.clear_selected_paths, QKeySequence("Ctrl+Alt+Shift+R"))
         keyframe_action = self.menu_action("Set Count Keyframe", self.add_micro_keyframe, QKeySequence("Ctrl+Alt+K"))
-        follow_action = self.menu_action("Follow-Leader Conveyor", self.follow_leader_rotate, QKeySequence("Ctrl+Alt+F"))
+        follow_action = self.menu_action("Follow the Leader...", self.follow_leader_rotate, QKeySequence("Ctrl+Alt+F"))
+        motion_ribbon_action = self.menu_action("Group Motion Ribbon...", self.create_group_motion_ribbon, QKeySequence("Ctrl+Shift+F1"))
+        group_handles_action = self.menu_action("Edit Group Path Handles", self.edit_group_path_handles, QKeySequence("Ctrl+Shift+F2"))
+        continuity_action = self.menu_action("Continuity Designer...", self.show_continuity_designer, QKeySequence("Ctrl+Shift+F3"))
+        guides_action = self.menu_action("Construction Guides...", self.show_construction_guides, QKeySequence("Ctrl+Shift+F4"))
+        cad_action = self.menu_action("CAD Path Toolkit...", self.show_cad_path_toolkit, QKeySequence("Ctrl+Shift+F5"))
+        morph_action = self.menu_action("Formation Morph...", self.show_formation_morph, QKeySequence("Ctrl+Shift+F12"))
         fit_prop_action = self.menu_action("Fit Form to Selected Prop", self.fit_selected_form_to_prop, QKeySequence("Ctrl+Alt+Shift+X"))
         composer_action = self.menu_action("Smart Transition Composer", self.show_smart_transition_composer, QKeySequence("Ctrl+Alt+Shift+C"))
         section_fit_action = self.menu_action("Section-Aware Form Fit", self.apply_section_aware_form_fit, QKeySequence("Ctrl+Alt+Shift+J"))
@@ -1497,11 +1608,79 @@ class MainWindow(QMainWindow):
         duplicate_mirror_action = self.menu_action("Duplicate Mirror To Next Set", self.duplicate_mirror_to_next_set, QKeySequence("Ctrl+Alt+Shift+D"))
         apply_preview_action = self.menu_action("Apply Current Preview", self.apply_current_preview, QKeySequence("Ctrl+Return"))
         clear_preview_action = self.menu_action("Clear Current Preview", self.clear_formation_preview, QKeySequence("Esc"))
-        tools_menu.addActions([snap_action, analyze_action, plan_action, clear_paths_action, keyframe_action, follow_action, fit_prop_action])
+        tools_menu.addActions([snap_action, analyze_action, plan_action, clear_paths_action, keyframe_action, follow_action, motion_ribbon_action, group_handles_action, continuity_action, guides_action, cad_action, morph_action, fit_prop_action])
         tools_menu.addSeparator()
         tools_menu.addActions([composer_action, section_fit_action, copy_properties_action, paint_properties_action, beat_sets_action, radial_action])
         quick_duplicate_menu = tools_menu.addMenu("Quick Duplicate/Transform")
         quick_duplicate_menu.addActions([duplicate_next_action, duplicate_rotate_action, duplicate_scale_action, duplicate_mirror_action])
+        design_accelerators_menu = tools_menu.addMenu("Design Accelerators")
+        design_accelerators_menu.addAction(
+            self.menu_action("Polar / Linear Array", self.show_polar_linear_array, QKeySequence("Ctrl+Alt+Shift+1"))
+        )
+        design_accelerators_menu.addAction(
+            self.menu_action("Parallel Form Generator", self.show_parallel_form_generator, QKeySequence("Ctrl+Alt+Shift+2"))
+        )
+        design_accelerators_menu.addAction(
+            self.menu_action("Rank / File Builder", self.show_rank_file_builder, QKeySequence("Ctrl+Alt+Shift+3"))
+        )
+        design_accelerators_menu.addSeparator()
+        design_accelerators_menu.addAction(
+            self.menu_action("Create Live Symmetry", self.create_live_symmetry, QKeySequence("Ctrl+Alt+Shift+4"))
+        )
+        design_accelerators_menu.addAction(
+            self.menu_action("Manage Live Symmetry", self.manage_live_symmetry)
+        )
+        design_accelerators_menu.addAction(
+            self.menu_action("Alternating Selection", self.show_alternating_selection, QKeySequence("Ctrl+Alt+Shift+5"))
+        )
+        design_accelerators_menu.addSeparator()
+        design_accelerators_menu.addAction(
+            self.menu_action("Toggle On-Field Measurements", self.toggle_measurement_overlay, QKeySequence("Ctrl+Alt+Shift+6"))
+        )
+        design_accelerators_menu.addAction(
+            self.menu_action("Reference / Annotation Layer", self.show_reference_annotations, QKeySequence("Ctrl+Alt+Shift+7"))
+        )
+        music_design_menu = tools_menu.addMenu("Music & Show Design")
+        music_studio_action = self.menu_action(
+            "Open Music Design Studio",
+            self.show_music_design_studio,
+            QKeySequence("Ctrl+Alt+Shift+8"),
+        )
+        music_import_action = self.menu_action(
+            "Import MusicXML / MIDI",
+            lambda: self.show_music_design_studio("score"),
+            QKeySequence("Ctrl+Alt+Shift+9"),
+        )
+        music_phrase_action = self.menu_action(
+            "Phrase & Set Planner",
+            lambda: self.show_music_design_studio("phrases"),
+        )
+        music_storyboard_action = self.menu_action(
+            "Show Storyboard",
+            lambda: self.show_music_design_studio("storyboard"),
+            QKeySequence("Ctrl+Alt+Shift+0"),
+        )
+        music_suggestions_action = self.menu_action(
+            "Automated Musical Set Suggestions",
+            lambda: self.show_music_design_studio("suggestions"),
+        )
+        music_design_menu.addActions(
+            [
+                music_studio_action,
+                music_import_action,
+                music_phrase_action,
+                music_storyboard_action,
+                music_suggestions_action,
+            ]
+        )
+        specialized_menu = tools_menu.addMenu("Specialized Design")
+        specialized_menu.addAction(
+            self.menu_action("Open Specialized Design Studio", self.show_specialized_design_studio, QKeySequence("Ctrl+Shift+F12"))
+        )
+        specialized_menu.addAction(self.menu_action("Surface & Parade Route", lambda: self.show_specialized_design_studio("surface")))
+        specialized_menu.addAction(self.menu_action("Guard Choreography Tracks", lambda: self.show_specialized_design_studio("choreography")))
+        specialized_menu.addAction(self.menu_action("Performer Prop Attachments", lambda: self.show_specialized_design_studio("props")))
+        specialized_menu.addAction(self.menu_action("Physical Limits & Warnings", lambda: self.show_specialized_design_studio("safety")))
         tools_menu.addSeparator()
         tools_menu.addActions([apply_preview_action, clear_preview_action])
         large_show_menu = tools_menu.addMenu("Large-Show Accelerators")
@@ -1519,6 +1698,11 @@ class MainWindow(QMainWindow):
                 cleanup_action,
                 compare_action,
                 variations_action,
+                music_studio_action,
+                music_import_action,
+                music_phrase_action,
+                music_storyboard_action,
+                music_suggestions_action,
             ]
         )
         favorites_menu = tools_menu.addMenu("Favorites")
@@ -1546,6 +1730,12 @@ class MainWindow(QMainWindow):
                 clear_paths_action,
                 keyframe_action,
                 follow_action,
+                motion_ribbon_action,
+                group_handles_action,
+                continuity_action,
+                guides_action,
+                cad_action,
+                morph_action,
                 fit_prop_action,
                 composer_action,
                 section_fit_action,
@@ -1567,8 +1757,6 @@ class MainWindow(QMainWindow):
                 variations_action,
             ]
         )
-        self.plugin_tools_menu = self.menuBar().addMenu("Plugin Tools")
-        self.plugin_named_menus["Plugin Tools"] = self.plugin_tools_menu
         self.build_workspace_toolbar()
 
     def menu_action(self, text: str, callback, shortcut=None) -> QAction:
@@ -1815,10 +2003,9 @@ class MainWindow(QMainWindow):
         self.favorite_toolbar.clear()
         favorite_ids = self.favorite_command_ids()
         if not favorite_ids:
-            hint = QAction("Pin Favorites", self)
-            hint.triggered.connect(self.add_favorite_command)
-            self.favorite_toolbar.addAction(hint)
+            self.favorite_toolbar.setVisible(False)
             return
+        self.favorite_toolbar.setVisible(True)
         for command_id in favorite_ids:
             source = self.command_actions.get(command_id)
             if not source:
@@ -2498,12 +2685,12 @@ class MainWindow(QMainWindow):
                     f"Plugin returned {len(result)} positions for {len(ids)} selected marchers.",
                 )
                 return {}
-            targets = {}
-            for dot_id, position in zip(ids, result):
+            target_points: list[tuple[float, float]] = []
+            for position in result:
                 if not isinstance(position, (tuple, list)) or len(position) < 2:
                     return {}
-                targets[dot_id] = (float(position[0]), float(position[1]))
-            return targets
+                target_points.append((float(position[0]), float(position[1])))
+            return self.assign_targets_to_marchers(ids, target_points)
         QMessageBox.warning(self, "Plugin Tool Failed", "Plugin must return a dict or list of positions.")
         return {}
 
@@ -2812,17 +2999,17 @@ class MainWindow(QMainWindow):
         )
         self.create_dock(
             "tools",
-            "Library / Tools",
-            self.scroll_panel(self.build_tools_panel(), 245),
+            "Design",
+            self.scroll_panel(self.build_tools_panel(), 270),
             Qt.DockWidgetArea.LeftDockWidgetArea,
-            minimum_width=245,
+            minimum_width=250,
         )
         self.create_dock(
             "inspector",
             "Inspector",
-            self.scroll_panel(self.build_inspector_panel(), 285),
+            self.scroll_panel(self.build_inspector_panel(), 310),
             Qt.DockWidgetArea.RightDockWidgetArea,
-            minimum_width=285,
+            minimum_width=290,
         )
         self.create_dock(
             "timeline",
@@ -2833,7 +3020,7 @@ class MainWindow(QMainWindow):
         )
         self.resizeDocks(
             [self.dock_widgets["tools"], self.dock_widgets["inspector"]],
-            [270, 320],
+            [285, 330],
             Qt.Orientation.Horizontal,
         )
         self.resizeDocks([self.dock_widgets["timeline"]], [210], Qt.Orientation.Vertical)
@@ -2852,6 +3039,12 @@ class MainWindow(QMainWindow):
                 combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
                 combo.setMinimumContentsLength(8)
                 combo.setSizePolicy(QSizePolicy.Policy.Expanding, combo.sizePolicy().verticalPolicy())
+            for control_type in (QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox, QPushButton, QToolButton, QCheckBox):
+                for control in content_root.findChildren(control_type):
+                    if isinstance(control, QLineEdit) and isinstance(control.parentWidget(), QAbstractSpinBox):
+                        continue
+                    comfortable_height = max(22, min(32, control.sizeHint().height()))
+                    control.setMinimumHeight(max(control.minimumHeight(), comfortable_height))
             self.polish_panel_layout(
                 content_root.layout(),
                 wrap_all_forms=False,
@@ -3208,34 +3401,50 @@ class MainWindow(QMainWindow):
         return dock
 
     def build_workspace_toolbar(self) -> None:
-        toolbar = QToolBar("Workspaces", self)
-        toolbar.setObjectName("WorkspaceToolbar")
+        toolbar = QToolBar("Editor Context", self)
+        toolbar.setObjectName("PrimaryToolbar")
         toolbar.setMovable(False)
         toolbar.setFloatable(False)
-        toolbar.setStyleSheet(
-            """
-            #WorkspaceToolbar QToolButton {
-                min-height: 24px;
-                padding: 3px 9px;
-                margin: 1px;
-            }
-            """
-        )
+        toolbar.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
         self.addToolBar(Qt.ToolBarArea.TopToolBarArea, toolbar)
+        project_title = QLabel(self.project.metadata.show_title)
+        project_title.setObjectName("ProjectContextTitle")
+        project_title.setMaximumWidth(260)
+        project_title.setToolTip(self.project.metadata.show_title)
+        toolbar.addWidget(project_title)
+        toolbar.addSeparator()
+        workspace_label = QLabel("Workspace")
+        workspace_label.setObjectName("ToolbarCaption")
+        toolbar.addWidget(workspace_label)
+        self.workspace_selector = QComboBox()
+        self.workspace_selector.setObjectName("WorkspaceSelector")
+        self.workspace_selector.setMaximumWidth(150)
         for workspace_name, label in (
             ("design", "Design"),
-            ("forms", "Forms"),
-            ("rehearse", "Rehearse"),
-            ("print", "Print"),
-            ("focus", "Focus"),
+            ("forms", "Form Editing"),
+            ("rehearse", "Rehearsal"),
+            ("music", "Music Design"),
+            ("specialized", "Specialized"),
+            ("print", "Print & Export"),
+            ("focus", "Field Focus"),
         ):
-            toolbar.addAction(
-                self.menu_action(
-                    label,
-                    lambda _checked=False, name=workspace_name: self.apply_workspace(name),
-                )
-            )
-        toolbar.addSeparator()
+            self.workspace_selector.addItem(label, workspace_name)
+        self.workspace_selector.currentIndexChanged.connect(
+            lambda index: self.apply_workspace(str(self.workspace_selector.itemData(index)))
+        )
+        toolbar.addWidget(self.workspace_selector)
+        set_label = QLabel("Set")
+        set_label.setObjectName("ToolbarCaption")
+        toolbar.addWidget(set_label)
+        self.toolbar_set_selector = QComboBox()
+        self.toolbar_set_selector.setObjectName("ToolbarSetSelector")
+        self.toolbar_set_selector.setMinimumContentsLength(12)
+        self.toolbar_set_selector.setMaximumWidth(250)
+        self.toolbar_set_selector.currentIndexChanged.connect(self.change_set_from_toolbar)
+        toolbar.addWidget(self.toolbar_set_selector)
+        spacer = QWidget()
+        spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
+        toolbar.addWidget(spacer)
         toolbar.addAction(self.command_actions["command_palette"])
         favorites = QToolBar("Favorites", self)
         favorites.setObjectName("FavoritesToolbar")
@@ -3251,6 +3460,14 @@ class MainWindow(QMainWindow):
         if state:
             self.restoreState(state)
         QTimer.singleShot(0, self.apply_responsive_layout)
+
+    def migrate_editor_layout(self) -> None:
+        layout_version = int(self.settings.value("main_window/layout_version", 0) or 0)
+        if layout_version >= 3:
+            return
+        self.settings.remove("main_window/dock_state")
+        self.settings.setValue("main_window/layout_version", 3)
+        self.settings.sync()
 
     def reset_panel_layout(self) -> None:
         self.settings.remove("main_window/dock_state")
@@ -3338,16 +3555,16 @@ class MainWindow(QMainWindow):
         available_height = max(0, self.height())
         if available_width < 1250 or available_height < 760:
             bucket = "compact"
-            tools_width, inspector_width, timeline_height = 215, 255, 145
-            tools_minimum, inspector_minimum, timeline_minimum = 195, 230, 125
+            tools_width, inspector_width, timeline_height = 250, 290, 150
+            tools_minimum, inspector_minimum, timeline_minimum = 235, 275, 130
         elif available_width < 1550 or available_height < 900:
             bucket = "laptop"
-            tools_width, inspector_width, timeline_height = 245, 285, 175
-            tools_minimum, inspector_minimum, timeline_minimum = 215, 255, 140
+            tools_width, inspector_width, timeline_height = 270, 315, 175
+            tools_minimum, inspector_minimum, timeline_minimum = 250, 290, 145
         else:
             bucket = "desktop"
-            tools_width, inspector_width, timeline_height = 270, 315, 200
-            tools_minimum, inspector_minimum, timeline_minimum = 230, 275, 150
+            tools_width, inspector_width, timeline_height = 290, 340, 205
+            tools_minimum, inspector_minimum, timeline_minimum = 265, 310, 155
 
         tools.setMinimumWidth(tools_minimum)
         inspector.setMinimumWidth(inspector_minimum)
@@ -3361,6 +3578,12 @@ class MainWindow(QMainWindow):
             self.resizeDocks([timeline], [timeline_height], Qt.Orientation.Vertical)
 
     def apply_workspace(self, name: str) -> None:
+        if hasattr(self, "workspace_selector"):
+            selector_index = self.workspace_selector.findData(name)
+            if selector_index >= 0 and selector_index != self.workspace_selector.currentIndex():
+                self.workspace_selector.blockSignals(True)
+                self.workspace_selector.setCurrentIndex(selector_index)
+                self.workspace_selector.blockSignals(False)
         for dock in self.dock_widgets.values():
             dock.show()
         self.field_focus_active = False
@@ -3373,10 +3596,10 @@ class MainWindow(QMainWindow):
                 self.inspector_tabs.setCurrentIndex(inspector_index)
             self.resizeDocks(
                 [self.dock_widgets["tools"], self.dock_widgets["inspector"]],
-                [210, 220],
+                [240, 270],
                 Qt.Orientation.Horizontal,
             )
-            self.resizeDocks([self.dock_widgets["timeline"]], [125], Qt.Orientation.Vertical)
+            self.resizeDocks([self.dock_widgets["timeline"]], [130], Qt.Orientation.Vertical)
             self.field_focus_active = True
             self.position_field_hud()
             self.statusBar().showMessage("Focus workspace: panels kept visible, field expanded", 2200)
@@ -3391,6 +3614,12 @@ class MainWindow(QMainWindow):
         elif name == "rehearse":
             tools_index = self.tools_tabs.indexOf(self.rehearsal_tab)
             inspector_index = self.inspector_tabs.indexOf(self.sets_tab)
+        elif name == "music":
+            tools_index = self.tools_tabs.indexOf(self.music_tab)
+            inspector_index = self.inspector_tabs.indexOf(self.sets_tab)
+        elif name == "specialized":
+            tools_index = self.tools_tabs.indexOf(self.specialized_tab)
+            inspector_index = self.inspector_tabs.indexOf(self.selection_tab)
         elif name == "print":
             tools_index = self.tools_tabs.indexOf(self.analysis_tab)
             inspector_index = self.inspector_tabs.indexOf(self.sets_tab)
@@ -3684,7 +3913,31 @@ class MainWindow(QMainWindow):
                 category_grid.addWidget(button, index // 2, index % 2)
                 self.tool_buttons[tool] = button
             tools_layout.addLayout(category_grid)
+        follow_group = QGroupBox("Animate Formation")
+        follow_layout = QVBoxLayout(follow_group)
+        follow_layout.setContentsMargins(8, 8, 8, 8)
+        follow_layout.setSpacing(5)
+        self.follow_leader_button = QPushButton("Follow the Leader...")
+        self.follow_leader_button.setMinimumHeight(34)
+        self.follow_leader_button.setToolTip(
+            "Select two or more marchers, then build a shared route with complex turns, "
+            "fixed follower spacing, and optional direction-of-travel facing. Shortcut: Ctrl+Alt+F."
+        )
+        self.follow_leader_button.clicked.connect(self.follow_leader_rotate)
+        follow_layout.addWidget(self.follow_leader_button)
+        follow_shortcut_row = QHBoxLayout()
+        follow_hint = QLabel("Shared-route motion for lines, loops, SVGs, and custom shapes")
+        follow_hint.setWordWrap(True)
+        follow_hint.setObjectName("secondaryText")
+        follow_shortcut = QLabel("Ctrl+Alt+F")
+        follow_shortcut.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        follow_shortcut.setStyleSheet("color: #f7d154; font-weight: 700;")
+        follow_shortcut_row.addWidget(follow_hint, 1)
+        follow_shortcut_row.addWidget(follow_shortcut)
+        follow_layout.addLayout(follow_shortcut_row)
+        formation_layout.addWidget(follow_group)
         formation_layout.addWidget(group)
+
         self.tool_hint_label = QLabel(TOOL_HINTS[EditorTool.SELECT])
         self.tool_hint_label.setWordWrap(True)
         self.tool_hint_label.setObjectName("ToolHintLabel")
@@ -3693,15 +3946,17 @@ class MainWindow(QMainWindow):
         formation_layout.addWidget(QLabel("Assignment strategy"))
         assignment_row = QHBoxLayout()
         self.assignment_strategy_combo = QComboBox()
-        self.assignment_strategy_combo.addItem("Automatic (tool optimized)", "automatic")
+        self.assignment_strategy_combo.addItem("Collision-safe automatic", "automatic")
         self.assignment_strategy_combo.addItem("Section-aware", "section")
         self.assignment_strategy_combo.addItem("Preserve ranks / files", "rank")
         self.assignment_strategy_combo.addItem("Shortest total travel", "shortest")
         self.assignment_strategy_combo.addItem("Clockwise", "clockwise")
         self.assignment_strategy_combo.addItem("Counterclockwise", "counterclockwise")
-        self.assignment_strategy_combo.addItem("Follow leader", "follow_leader")
-        self.assignment_strategy_combo.addItem("Lowest collision risk", "lowest_collision")
-        self.assignment_strategy_combo.setToolTip("Controls how marchers are matched to preview targets for complex forms and SVG imports.")
+        self.assignment_strategy_combo.addItem("Preserve form order", "follow_leader")
+        self.assignment_strategy_combo.addItem("Collision-safe spot assignment", "lowest_collision")
+        self.assignment_strategy_combo.setToolTip(
+            "Reassigns marchers to the exact generated spots without changing the target picture or adding path bends."
+        )
         self.assignment_strategy_combo.currentIndexChanged.connect(self.update_formation_preview)
         assignment_row.addWidget(self.assignment_strategy_combo, 1)
         composer_button = QPushButton("Compare")
@@ -4034,8 +4289,11 @@ class MainWindow(QMainWindow):
         self.rotation_degrees.setRange(-360, 360)
         self.rotation_degrees.setValue(15)
         self.rotation_degrees.setSuffix(" deg")
-        rotate_form.addRow("Degrees / Conveyor Shift", self.rotation_degrees)
-        follow_button = QPushButton("Follow-Leader Conveyor")
+        rotate_form.addRow("Rotation Degrees", self.rotation_degrees)
+        follow_button = QPushButton("Follow the Leader...")
+        follow_button.setToolTip(
+            "Move a selected line or shape along one shared route with fixed follower spacing, complex turns, and optional travel-facing."
+        )
         follow_button.clicked.connect(self.follow_leader_rotate)
         rotate_form.addRow(follow_button)
         for editor in (
@@ -4097,6 +4355,112 @@ class MainWindow(QMainWindow):
         formation_layout.addStretch()
         tabs.addTab(formation_tab, "Form")
 
+        accelerator_tab = QWidget()
+        self.accelerator_tab = accelerator_tab
+        accelerator_layout = QVBoxLayout(accelerator_tab)
+        accelerator_layout.setContentsMargins(0, 0, 0, 0)
+        self.accelerator_panel = AcceleratorPanel()
+        self.accelerator_panel.array_requested.connect(self.show_polar_linear_array)
+        self.accelerator_panel.parallel_requested.connect(self.show_parallel_form_generator)
+        self.accelerator_panel.rank_file_requested.connect(self.show_rank_file_builder)
+        self.accelerator_panel.symmetry_requested.connect(self.create_live_symmetry)
+        self.accelerator_panel.symmetry_manage_requested.connect(self.manage_live_symmetry)
+        self.accelerator_panel.alternating_requested.connect(self.show_alternating_selection)
+        self.accelerator_panel.measurements_changed.connect(self.set_measurement_overlay)
+        self.accelerator_panel.references_requested.connect(self.show_reference_annotations)
+        accelerator_layout.addWidget(self.accelerator_panel)
+        tabs.addTab(accelerator_tab, "Accelerate")
+
+        music_tab = QWidget()
+        self.music_tab = music_tab
+        music_layout = QVBoxLayout(music_tab)
+        music_layout.setContentsMargins(0, 0, 0, 0)
+        self.music_design_panel = MusicDesignPanel()
+        self.music_design_panel.studio_requested.connect(self.show_music_design_studio)
+        self.music_design_panel.set_project(self.project)
+        music_layout.addWidget(self.music_design_panel)
+        tabs.addTab(music_tab, "Music")
+
+        specialized_tab = QWidget()
+        self.specialized_tab = specialized_tab
+        specialized_layout = QVBoxLayout(specialized_tab)
+        specialized_layout.setContentsMargins(0, 0, 0, 0)
+        self.specialized_design_panel = SpecializedDesignPanel()
+        self.specialized_design_panel.studio_requested.connect(self.show_specialized_design_studio)
+        self.specialized_design_panel.set_project(self.project)
+        specialized_layout.addWidget(self.specialized_design_panel)
+        tabs.addTab(specialized_tab, "Specialized")
+
+        motion_tab = QWidget()
+        self.motion_tab = motion_tab
+        motion_layout = QVBoxLayout(motion_tab)
+        motion_layout.setContentsMargins(4, 4, 4, 4)
+        motion_layout.setSpacing(8)
+        motion_title = QLabel("Group Motion & Drafting")
+        motion_title.setStyleSheet("font-size: 14px; font-weight: 750;")
+        motion_note = QLabel(
+            "Design transitions as shared geometry, write performer continuity, and keep permanent CAD-style guides on the field."
+        )
+        motion_note.setWordWrap(True)
+        motion_layout.addWidget(motion_title)
+        motion_layout.addWidget(motion_note)
+
+        ribbon_group = QGroupBox("Group Motion Ribbons")
+        ribbon_layout = QVBoxLayout(ribbon_group)
+        self.motion_ribbon_list = QListWidget()
+        self.motion_ribbon_list.setMinimumHeight(88)
+        self.motion_ribbon_list.itemDoubleClicked.connect(lambda _item: self.edit_group_path_handles())
+        ribbon_layout.addWidget(self.motion_ribbon_list)
+        ribbon_actions = QGridLayout()
+        create_ribbon_button = QPushButton("Create Ribbon")
+        create_ribbon_button.setToolTip("Create one curved transition ribbon for the selected rank or section.")
+        create_ribbon_button.clicked.connect(self.create_group_motion_ribbon)
+        edit_ribbon_button = QPushButton("Edit Handles")
+        edit_ribbon_button.setToolTip("Show shared Bézier nodes and tangent handles directly on the field.")
+        edit_ribbon_button.clicked.connect(self.edit_group_path_handles)
+        add_ribbon_node_button = QPushButton("Add Node")
+        add_ribbon_node_button.clicked.connect(self.add_motion_ribbon_node)
+        remove_ribbon_node_button = QPushButton("Remove Node")
+        remove_ribbon_node_button.clicked.connect(self.remove_motion_ribbon_node)
+        ribbon_settings_button = QPushButton("Ribbon Settings")
+        ribbon_settings_button.clicked.connect(self.edit_motion_ribbon_settings)
+        delete_ribbon_button = QPushButton("Delete Ribbon")
+        delete_ribbon_button.clicked.connect(self.delete_motion_ribbon)
+        ribbon_actions.addWidget(create_ribbon_button, 0, 0)
+        ribbon_actions.addWidget(edit_ribbon_button, 0, 1)
+        ribbon_actions.addWidget(add_ribbon_node_button, 1, 0)
+        ribbon_actions.addWidget(remove_ribbon_node_button, 1, 1)
+        ribbon_actions.addWidget(ribbon_settings_button, 2, 0)
+        ribbon_actions.addWidget(delete_ribbon_button, 2, 1)
+        ribbon_layout.addLayout(ribbon_actions)
+        motion_layout.addWidget(ribbon_group)
+
+        transition_group = QGroupBox("Transition Design")
+        transition_layout = QVBoxLayout(transition_group)
+        morph_button = QPushButton("Formation Morph…")
+        morph_button.setToolTip("Blend one form into another while preserving sections, intervals, and neighbors.")
+        morph_button.clicked.connect(self.show_formation_morph)
+        continuity_button = QPushButton("Continuity Designer…")
+        continuity_button.setToolTip("Assign step size, direction, facings, and written instructions by count range.")
+        continuity_button.clicked.connect(self.show_continuity_designer)
+        transition_layout.addWidget(morph_button)
+        transition_layout.addWidget(continuity_button)
+        motion_layout.addWidget(transition_group)
+
+        drafting_group = QGroupBox("Construction & CAD")
+        drafting_layout = QVBoxLayout(drafting_group)
+        guides_button = QPushButton("Construction Guides…")
+        guides_button.setToolTip("Add draggable lines, circles, arcs, grids, rulers, centers, and no-go regions.")
+        guides_button.clicked.connect(self.show_construction_guides)
+        cad_button = QPushButton("CAD Path Toolkit…")
+        cad_button.setToolTip("Join, split, trim, extend, offset, simplify, smooth, reverse, or fillet path geometry.")
+        cad_button.clicked.connect(self.show_cad_path_toolkit)
+        drafting_layout.addWidget(guides_button)
+        drafting_layout.addWidget(cad_button)
+        motion_layout.addWidget(drafting_group)
+        motion_layout.addStretch(1)
+        tabs.addTab(motion_tab, "Motion")
+
         align_tab = QWidget()
         self.align_tab = align_tab
         align_tab_layout = QVBoxLayout(align_tab)
@@ -4147,8 +4511,11 @@ class MainWindow(QMainWindow):
         self.max_yards_per_count.setSuffix(" yd/count")
         analyze_button = QPushButton("Analyze All Paths")
         analyze_button.clicked.connect(self.analyze_paths)
-        auto_plan_button = QPushButton("Auto-Plan Paths")
-        auto_plan_button.clicked.connect(self.auto_plan_selected_paths)
+        auto_plan_button = QPushButton("Optimize Selected Spots")
+        auto_plan_button.setToolTip(
+            "Keeps the current form exactly the same while reassigning which marcher owns each destination spot."
+        )
+        auto_plan_button.clicked.connect(self.optimize_selected_spot_assignment)
         clear_paths_button = QPushButton("Clear Selected Paths")
         clear_paths_button.clicked.connect(self.clear_selected_paths)
         cleanup_conflicts_button = QPushButton("Clean Selected Form")
@@ -4379,6 +4746,26 @@ class MainWindow(QMainWindow):
         view_tab_layout.addWidget(view_group)
         view_tab_layout.addStretch()
         tabs.addTab(view_tab, "View")
+        tabs.setPageOrder(
+            [
+                (marchers_tab, "Marchers"),
+                (formation_tab, "Forms"),
+                (motion_tab, "Motion"),
+                (align_tab, "Align"),
+                (accelerator_tab, "Accelerate"),
+                (props_tab, "Props"),
+                (prop_designer_tab, "Prop Designer"),
+                (music_tab, "Music"),
+                (specialized_tab, "Specialized"),
+                (large_show_tab, "Large Show"),
+                (analysis_tab, "Safety"),
+                (rehearsal_tab, "Rehearse"),
+                (view_tab, "Display"),
+            ]
+        )
+        tabs.selector.setToolTip(
+            "Pages are ordered by workflow: roster, design, production, show planning, review, and display."
+        )
         self.set_tool(EditorTool.SELECT)
         return panel
 
@@ -4775,7 +5162,8 @@ class MainWindow(QMainWindow):
         visibility_form.addRow("Layer", self.layer_filter)
         visibility_layout.addWidget(visibility_group)
         locks_group = QGroupBox("Locks")
-        locks_layout = QVBoxLayout(locks_group)
+        locks_layout = QFormLayout(locks_group)
+        locks_layout.setVerticalSpacing(6)
         self.lock_section_combo = QComboBox()
         self.lock_layer_combo = QComboBox()
         lock_section_row = QHBoxLayout()
@@ -4793,25 +5181,26 @@ class MainWindow(QMainWindow):
         lock_layer_row.addWidget(lock_layer_button)
         lock_layer_row.addWidget(unlock_layer_button)
         selected_lock_grid = QGridLayout()
-        lock_selected_button = QPushButton("Lock Selected")
+        lock_selected_button = QPushButton("Lock Sel.")
+        lock_selected_button.setToolTip("Lock the sections represented by the selected marchers.")
         lock_selected_button.clicked.connect(self.lock_selected_sections)
-        unlock_selected_button = QPushButton("Unlock Selected")
+        unlock_selected_button = QPushButton("Unlock Sel.")
+        unlock_selected_button.setToolTip("Unlock the sections represented by the selected marchers.")
         unlock_selected_button.clicked.connect(self.unlock_selected_sections)
-        clear_locks_button = QPushButton("Clear Locks")
+        clear_locks_button = QPushButton("Clear")
+        clear_locks_button.setToolTip("Clear all section and layer locks.")
         clear_locks_button.clicked.connect(self.clear_section_locks)
         selected_lock_grid.addWidget(lock_selected_button, 0, 0)
         selected_lock_grid.addWidget(unlock_selected_button, 0, 1)
-        selected_lock_grid.addWidget(clear_locks_button, 1, 0, 1, 2)
+        selected_lock_grid.addWidget(clear_locks_button, 0, 2)
         self.lock_status_label = QLabel("No locked sections or layers")
         self.lock_status_label.setWordWrap(True)
-        locks_layout.addWidget(QLabel("Section"))
-        locks_layout.addWidget(self.lock_section_combo)
-        locks_layout.addLayout(lock_section_row)
-        locks_layout.addWidget(QLabel("Layer"))
-        locks_layout.addWidget(self.lock_layer_combo)
-        locks_layout.addLayout(lock_layer_row)
-        locks_layout.addLayout(selected_lock_grid)
-        locks_layout.addWidget(self.lock_status_label)
+        locks_layout.addRow("Section", self.lock_section_combo)
+        locks_layout.addRow(lock_section_row)
+        locks_layout.addRow("Layer", self.lock_layer_combo)
+        locks_layout.addRow(lock_layer_row)
+        locks_layout.addRow(selected_lock_grid)
+        locks_layout.addRow(self.lock_status_label)
         visibility_layout.addWidget(locks_group)
         visibility_layout.addStretch()
         tabs.addTab(visibility_tab, "Visibility")
@@ -4881,6 +5270,23 @@ class MainWindow(QMainWindow):
         timeline_scroll.setWidget(self.transition_timeline)
         movement_layout.addWidget(timeline_scroll, 1)
         tabs.addTab(movement_page, "Movement Lanes")
+
+        choreography_page = QWidget()
+        choreography_layout = QVBoxLayout(choreography_page)
+        choreography_layout.setContentsMargins(4, 4, 4, 4)
+        choreography_hint = QLabel("Guard tosses, equipment changes, and choreography ranges. Edit them in Tools → Specialized Design.")
+        choreography_hint.setWordWrap(True)
+        choreography_hint.setObjectName("ToolHintLabel")
+        choreography_layout.addWidget(choreography_hint)
+        choreography_scroll = QScrollArea()
+        choreography_scroll.setWidgetResizable(True)
+        choreography_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        choreography_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.choreography_timeline = ChoreographyTimelineWidget()
+        self.choreography_timeline.set_project(self.project)
+        choreography_scroll.setWidget(self.choreography_timeline)
+        choreography_layout.addWidget(choreography_scroll, 1)
+        tabs.addTab(choreography_page, "Choreography")
         layout.addWidget(tabs)
         return panel
 
@@ -5094,6 +5500,10 @@ class MainWindow(QMainWindow):
 
     def set_tool(self, tool: EditorTool) -> None:
         previous_tool = self.field.active_tool
+        if self.active_motion_ribbon_id:
+            self.active_motion_ribbon_id = ""
+            self._motion_ribbon_drag_before_sets = None
+            self.field.set_motion_path_editing(False)
         if self.macro_recording and not self.macro_replaying and not self._invoking_command_id:
             command_id = self.tool_command_id(tool)
             if command_id and command_id in self.command_actions:
@@ -5234,6 +5644,10 @@ class MainWindow(QMainWindow):
             return f"Transform pivot  X {x:.2f}  Y {y:.2f}{suffix}"
         if kind.startswith("path_"):
             return f"{kind.replace('_', ' ').title()}  X {x:.2f}  Y {y:.2f}{suffix}"
+        if kind.startswith("motion_ribbon_node:"):
+            return f"Ribbon node  X {x:.2f}  Y {y:.2f}{suffix}"
+        if kind.startswith("motion_ribbon_tangent:"):
+            return f"Ribbon tangent  X {x:.2f}  Y {y:.2f}{suffix}"
         return f"{values.get(kind, kind.replace('_', ' ').title() + f'  X {x:.2f}  Y {y:.2f}')}{suffix}"
 
     def set_form_row_visible(self, widget: QWidget, visible: bool) -> None:
@@ -5547,10 +5961,23 @@ class MainWindow(QMainWindow):
         self.refresh_appearance_groups()
         self.refresh_constraints()
         self.refresh_timing_events()
+        self.refresh_music_design_panel()
+        self.refresh_specialized_design()
         self.refresh_selected_paths()
         self.apply_locks_to_field()
         self.selection_changed()
         self.schedule_live_conflict_analysis()
+
+    def refresh_music_design_panel(self) -> None:
+        if hasattr(self, "music_design_panel"):
+            self.music_design_panel.set_project(self.project)
+
+    def refresh_specialized_design(self) -> None:
+        if hasattr(self, "specialized_design_panel"):
+            self.specialized_design_panel.set_project(self.project)
+        if hasattr(self, "choreography_timeline"):
+            self.choreography_timeline.set_project(self.project)
+            self.choreography_timeline.set_current_count(self.current_count)
 
     def select_dot_ids(self, dot_ids: list[str], center: bool = False) -> None:
         selected = set(dot_ids)
@@ -5745,12 +6172,32 @@ class MainWindow(QMainWindow):
         selected = set(positions)
         for dot_id in selected:
             drill_set.dot_facings.pop(dot_id, None)
+            drill_set.count_facings.pop(dot_id, None)
             drill_set.path_anchors.pop(dot_id, None)
             drill_set.path_controls.pop(dot_id, None)
+            drill_set.count_positions.pop(dot_id, None)
             drill_set.move_timings.pop(dot_id, None)
             drill_set.movement_styles.pop(dot_id, None)
         drill_set.dot_facings.update(
             {str(dot_id): float(value) for dot_id, value in dict(record.get("dot_facings", {})).items() if dot_id in selected}
+        )
+        drill_set.count_facings.update(
+            {
+                str(dot_id): {float(count): float(facing) for count, facing in dict(keyframes).items()}
+                for dot_id, keyframes in dict(record.get("count_facings", {})).items()
+                if dot_id in selected and isinstance(keyframes, dict)
+            }
+        )
+        drill_set.count_positions.update(
+            {
+                str(dot_id): {
+                    float(count): (float(position[0]), float(position[1]))
+                    for count, position in dict(keyframes).items()
+                    if isinstance(position, (list, tuple)) and len(position) >= 2
+                }
+                for dot_id, keyframes in dict(record.get("count_positions", {})).items()
+                if dot_id in selected and isinstance(keyframes, dict)
+            }
         )
         drill_set.path_anchors.update(
             {
@@ -6149,6 +6596,7 @@ class MainWindow(QMainWindow):
                     else:
                         drill_set.path_controls.pop(target_id, None)
                 if "facing" in properties:
+                    drill_set.count_facings.pop(target_id, None)
                     facing = source_data.get("facing")
                     if facing is None:
                         drill_set.dot_facings.pop(target_id, None)
@@ -6240,6 +6688,63 @@ class MainWindow(QMainWindow):
         )
         self.remember_repeat_action({"type": "property_brush", "label": "Paint Properties"})
         self.statusBar().showMessage(f"Painted {', '.join(sorted(properties))} onto {len(target_ids)} marcher(s)", 3200)
+
+    def show_music_design_studio(self, initial_tab: str = "score") -> None:
+        before = deepcopy(self.project)
+        dialog = MusicDesignStudioDialog(self.project, self.project_dir, initial_tab, self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        after = deepcopy(dialog.project)
+        score = after.imported_score
+        if score and score.source_file:
+            source = Path(score.source_file)
+            if not source.is_absolute():
+                source = self.project_dir / source
+            if source.is_file():
+                score_dir = self.project_dir / "score"
+                score_dir.mkdir(exist_ok=True)
+                try:
+                    relative = source.resolve().relative_to(self.project_dir.resolve())
+                    score.source_file = str(relative)
+                except ValueError:
+                    destination = score_dir / source.name
+                    suffix = 2
+                    while destination.exists() and destination.read_bytes() != source.read_bytes():
+                        destination = score_dir / f"{source.stem}_{suffix}{source.suffix}"
+                        suffix += 1
+                    if not destination.exists():
+                        shutil.copy2(source, destination)
+                    score.source_file = str(destination.relative_to(self.project_dir))
+        if before == after:
+            return
+        self.apply_project_snapshot(before)
+        self.undo_stack.push(ProjectSnapshotCommand(self, before, after, "Edit Music & Show Design"))
+        self.statusBar().showMessage(
+            f"Music design updated: {len(after.music_phrases)} phrase(s), {len(after.storyboard)} scene(s)",
+            3500,
+        )
+
+    def show_specialized_design_studio(self, initial_tab: str = "surface") -> None:
+        before = deepcopy(self.project)
+        dialog = SpecializedDesignStudioDialog(
+            self.project,
+            self.field.selected_dot_ids(),
+            self.field.selected_prop_ids(),
+            self.set_index,
+            initial_tab,
+            self,
+        )
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        after = deepcopy(dialog.project)
+        if before == after:
+            return
+        self.apply_project_snapshot(before)
+        self.undo_stack.push(ProjectSnapshotCommand(self, before, after, "Edit Specialized Design"))
+        self.statusBar().showMessage(
+            f"Specialized design updated: {after.surface.name}, {len(after.choreography)} choreography event(s), {len(after.prop_attachments)} prop link(s)",
+            4000,
+        )
 
     def show_beat_set_generator(self) -> None:
         if not self.project.markers:
@@ -6869,6 +7374,7 @@ class MainWindow(QMainWindow):
                     drill_set.path_anchors.pop(dot_id, None)
                     drill_set.path_controls.pop(dot_id, None)
                     drill_set.count_positions.pop(dot_id, None)
+                    drill_set.count_facings.pop(dot_id, None)
         self.populate_sets()
         self.sync_timeline()
         self.set_count(self.current_count, seek_audio=False)
@@ -7009,6 +7515,7 @@ class MainWindow(QMainWindow):
                 drill_set.path_anchors.pop(dot_id, None)
                 drill_set.path_controls.pop(dot_id, None)
                 drill_set.count_positions.pop(dot_id, None)
+                drill_set.count_facings.pop(dot_id, None)
         self.field.clear_preview()
         self.field.clear_paths()
         self.field.rebuild_dots()
@@ -7333,6 +7840,17 @@ class MainWindow(QMainWindow):
         target_before = dict(self.project.sets[target_set_index].dot_positions)
         positions = dict(positions)
         if push_undo:
+            locked_ids = {
+                dot.id
+                for dot in self.project.dots
+                if self.is_dot_locked(dot.id)
+            }
+            positions = expand_live_symmetry_changes(
+                self.project.workflow.get("live_symmetry", []),
+                target_before,
+                positions,
+                locked_ids,
+            )
             positions = expand_linked_position_changes(
                 self.project,
                 target_set_index,
@@ -7376,6 +7894,7 @@ class MainWindow(QMainWindow):
                             drill_set.path_anchors.pop(dot_id, None)
                             drill_set.path_controls.pop(dot_id, None)
                             drill_set.count_positions.pop(dot_id, None)
+                            drill_set.count_facings.pop(dot_id, None)
                 self.populate_sets()
                 self.sync_timeline()
                 self.set_count(self.current_count, seek_audio=False)
@@ -7402,6 +7921,7 @@ class MainWindow(QMainWindow):
             self.update_formation_preview()
             self.refresh_selected_paths()
             self.sync_inspector()
+            self.refresh_measurements()
             if hasattr(self, "minimap"):
                 self.minimap.update()
             self.schedule_live_conflict_analysis()
@@ -7994,24 +8514,10 @@ class MainWindow(QMainWindow):
         else:
             return {}
         preserve_order = tool in {
-            EditorTool.LINE,
-            EditorTool.CURVE,
-            EditorTool.FREE_CURVE,
-            EditorTool.ARC,
-            EditorTool.CIRCLE,
-            EditorTool.ELLIPSE,
-            EditorTool.RECTANGLE,
-            EditorTool.TRIANGLE,
-            EditorTool.DIAMOND,
-            EditorTool.POLYGON,
-            EditorTool.STAR,
-            EditorTool.SPIRAL,
-            EditorTool.BLOCK,
             EditorTool.SCALE,
             EditorTool.ROTATE,
             EditorTool.WARP,
             EditorTool.MIRROR,
-            EditorTool.SHAPE_LINE,
         }
         closed_order = tool in {
             EditorTool.CIRCLE,
@@ -8045,138 +8551,93 @@ class MainWindow(QMainWindow):
             if hasattr(self, "assignment_strategy_combo")
             else "automatic"
         )
-        if strategy != "automatic":
-            return assignment_for_mode(self.project, self.set_index, ids, targets, strategy)
-        starts_source = self.current_transition_start_positions()
-        starts = {dot_id: starts_source.get(dot_id, self.current_set().dot_positions[dot_id]) for dot_id in ids}
-        if preserve_order or len(ids) <= 2:
-            ordered = ordered_targets(
-                [starts[dot_id] for dot_id in ids],
-                targets,
-                allow_reverse=True,
-                allow_rotation=closed_order,
-            )
-            return {dot_id: ordered[index] for index, dot_id in enumerate(ids)}
-        start_list = [starts[dot_id] for dot_id in ids]
-        if len(ids) <= 500:
-            assignment_indexes = minimum_cost_target_assignment(start_list, targets)
-        else:
-            assignment_indexes = self.shortest_pair_target_assignment(start_list, targets)
-        assignment = {dot_id: assignment_indexes[index] for index, dot_id in enumerate(ids)}
-
-        swap_iterations = 5 if len(ids) <= 220 else 2
-        use_crossing_penalty = len(ids) <= 220
-        for _iteration in range(swap_iterations):
-            changed = False
-            for first_index, dot_a in enumerate(ids):
-                for dot_b in ids[first_index + 1 :]:
-                    target_a = targets[assignment[dot_a]]
-                    target_b = targets[assignment[dot_b]]
-                    current_cost = self.assignment_cost(starts[dot_a], target_a) + self.assignment_cost(starts[dot_b], target_b)
-                    swapped_cost = self.assignment_cost(starts[dot_a], target_b) + self.assignment_cost(starts[dot_b], target_a)
-                    crosses = (
-                        use_crossing_penalty
-                        and segments_intersect(starts[dot_a], target_a, starts[dot_b], target_b)
-                    )
-                    if swapped_cost + 0.01 < current_cost or (crosses and swapped_cost <= current_cost * 1.08 + 1.0):
-                        assignment[dot_a], assignment[dot_b] = assignment[dot_b], assignment[dot_a]
-                        changed = True
-            if not changed:
-                break
-        return {dot_id: targets[assignment[dot_id]] for dot_id in ids}
-
-    def assignment_cost(self, start: tuple[float, float], target: tuple[float, float]) -> float:
-        move_distance = distance(start, target)
-        return move_distance * move_distance + move_distance * 0.05
-
-    def auction_target_assignment(
-        self,
-        starts: list[tuple[float, float]],
-        targets: list[tuple[float, float]],
-    ) -> list[int]:
-        count = len(starts)
-        costs = [
-            [self.assignment_cost(start, target) for target in targets]
-            for start in starts
-        ]
-        prices = [0.0] * count
-        owners: list[int | None] = [None] * count
-        assignment: list[int | None] = [None] * count
-        unassigned = list(range(count))
-        epsilon = 1 / max(10, count)
-        iterations = 0
-        max_iterations = max(1000, count * count * 4)
-
-        while unassigned and iterations < max_iterations:
-            iterations += 1
-            marcher_index = unassigned.pop()
-            best_target = 0
-            best_value = float("-inf")
-            second_value = float("-inf")
-            row_costs = costs[marcher_index]
-            for target_index, target_cost in enumerate(row_costs):
-                value = -target_cost - prices[target_index]
-                if value > best_value:
-                    second_value = best_value
-                    best_value = value
-                    best_target = target_index
-                elif value > second_value:
-                    second_value = value
-            if second_value == float("-inf"):
-                second_value = best_value - epsilon
-            bid = best_value - second_value + epsilon
-            prices[best_target] += bid
-            previous_owner = owners[best_target]
-            owners[best_target] = marcher_index
-            assignment[marcher_index] = best_target
-            if previous_owner is not None:
-                assignment[previous_owner] = None
-                unassigned.append(previous_owner)
-
-        if any(target_index is None for target_index in assignment):
-            remaining_targets = {index for index in range(count) if index not in assignment}
-            for marcher_index, target_index in enumerate(assignment):
-                if target_index is None:
-                    best_target = min(
-                        remaining_targets,
-                        key=lambda index: costs[marcher_index][index],
-                    )
-                    assignment[marcher_index] = best_target
-                    remaining_targets.remove(best_target)
-        return [int(target_index) for target_index in assignment]
-
-    def shortest_pair_target_assignment(
-        self,
-        starts: list[tuple[float, float]],
-        targets: list[tuple[float, float]],
-    ) -> list[int]:
-        pairs: list[tuple[float, int, int]] = []
-        for marcher_index, start in enumerate(starts):
-            for target_index, target in enumerate(targets):
-                pairs.append((self.assignment_cost(start, target), marcher_index, target_index))
-        pairs.sort(key=lambda item: item[0])
-
-        assignment: list[int | None] = [None] * len(starts)
-        used_marchers: set[int] = set()
-        used_targets: set[int] = set()
-        for _cost, marcher_index, target_index in pairs:
-            if marcher_index in used_marchers or target_index in used_targets:
-                continue
-            assignment[marcher_index] = target_index
-            used_marchers.add(marcher_index)
-            used_targets.add(target_index)
-            if len(used_marchers) == len(starts):
-                break
-        remaining_targets = [index for index in range(len(targets)) if index not in used_targets]
-        for marcher_index, target_index in enumerate(assignment):
-            if target_index is None:
-                best_target = min(
-                    remaining_targets,
-                    key=lambda index: self.assignment_cost(starts[marcher_index], targets[index]),
+        if strategy == "automatic" and preserve_order:
+            return {dot_id: targets[index] for index, dot_id in enumerate(ids)}
+        if strategy in {"automatic", "lowest_collision"}:
+            starts_source = self.current_transition_start_positions()
+            start_signature = tuple(
+                (
+                    dot_id,
+                    round(starts_source.get(dot_id, self.current_set().dot_positions[dot_id])[0], 3),
+                    round(starts_source.get(dot_id, self.current_set().dot_positions[dot_id])[1], 3),
                 )
-                assignment[marcher_index] = best_target
-                remaining_targets.remove(best_target)
-        return [int(target_index) for target_index in assignment]
+                for dot_id in ids
+            )
+            topology = (
+                self.field.active_tool.value,
+                self.active_plugin_form_tool_id,
+                bool(closed_order),
+                self.scatter_shape.currentText() if hasattr(self, "scatter_shape") else "",
+                self.imported_shape_name if self.field.active_tool == EditorTool.SVG_SHAPE else "",
+            )
+            cache_key = (
+                self.set_index,
+                tuple(ids),
+                strategy,
+                topology,
+                start_signature,
+                round(self.min_spacing.value() if hasattr(self, "min_spacing") else 1.25, 3),
+                round(self.max_yards_per_count.value() if hasattr(self, "max_yards_per_count") else 4.0, 3),
+            )
+            assignment = self.formation_assignment_cache.get(cache_key)
+            if assignment is None or len(assignment) != len(targets):
+                assignment = collision_aware_assignment_for_project(
+                    self.project,
+                    self.set_index,
+                    ids,
+                    targets,
+                    min_spacing=self.min_spacing.value() if hasattr(self, "min_spacing") else 1.25,
+                    max_yards_per_count=(
+                        self.max_yards_per_count.value()
+                        if hasattr(self, "max_yards_per_count")
+                        else 4.0
+                    ),
+                )
+                self.formation_assignment_cache[cache_key] = assignment
+                quality = project_assignment_quality(
+                    self.project,
+                    self.set_index,
+                    ids,
+                    targets,
+                    assignment,
+                    min_spacing=self.min_spacing.value() if hasattr(self, "min_spacing") else 1.25,
+                    max_yards_per_count=(
+                        self.max_yards_per_count.value()
+                        if hasattr(self, "max_yards_per_count")
+                        else 4.0
+                    ),
+                )
+                if quality.collisions:
+                    self.statusBar().showMessage(
+                        f"Collision-safe assignment found {quality.collisions} unresolved spacing conflict(s). "
+                        "The fixed start/destination pictures or surrounding marchers may make them unavoidable.",
+                        5200,
+                    )
+                else:
+                    self.statusBar().showMessage(
+                        f"Collision-safe assignment: 0 synchronized spacing conflicts, "
+                        f"{quality.total_distance:.1f} yd total travel.",
+                        2800,
+                    )
+                while len(self.formation_assignment_cache) > 24:
+                    self.formation_assignment_cache.pop(next(iter(self.formation_assignment_cache)))
+            return {
+                dot_id: targets[assignment[index]]
+                for index, dot_id in enumerate(ids)
+            }
+        return assignment_for_mode(
+            self.project,
+            self.set_index,
+            ids,
+            targets,
+            strategy,
+            min_spacing=self.min_spacing.value() if hasattr(self, "min_spacing") else 1.25,
+            max_yards_per_count=(
+                self.max_yards_per_count.value()
+                if hasattr(self, "max_yards_per_count")
+                else 4.0
+            ),
+        )
 
     def formation_handles(self, tool: EditorTool) -> dict[str, tuple[float, float]]:
         if tool == EditorTool.PLUGIN_FORM:
@@ -8347,7 +8808,16 @@ class MainWindow(QMainWindow):
             return
         self.field.show_preview(starts, targets, self.formation_handles(self.field.active_tool))
 
-    def preview_handle_moved(self, kind: str, x: float, y: float, modifiers: int = 0) -> None:
+    def preview_handle_moved(
+        self,
+        kind: str,
+        x: float,
+        y: float,
+        modifiers: int = 0,
+        commit: bool = True,
+    ) -> None:
+        if self.move_motion_ribbon_handle(kind, x, y, modifiers, commit):
+            return
         shift = bool(modifiers & int(Qt.KeyboardModifier.ShiftModifier.value))
         alt = bool(modifiers & int(Qt.KeyboardModifier.AltModifier.value))
         if kind.startswith("plugin_setting:"):
@@ -8525,6 +8995,7 @@ class MainWindow(QMainWindow):
             return
         try:
             self.imported_shape_contours = load_svg_contours(Path(path))
+            self.formation_assignment_cache.clear()
             self.imported_shape_points = [
                 point
                 for contour in self.imported_shape_contours
@@ -8597,6 +9068,9 @@ class MainWindow(QMainWindow):
 
     def clear_formation_preview(self) -> None:
         self.preview_center_offset = (0.0, 0.0)
+        self.active_motion_ribbon_id = ""
+        self._motion_ribbon_drag_before_sets = None
+        self.field.set_motion_path_editing(False)
         self.active_plugin_form_tool_id = ""
         for button in self.plugin_form_tool_buttons.values():
             button.setChecked(False)
@@ -8773,6 +9247,48 @@ class MainWindow(QMainWindow):
             return
         if name == "Toggle Transform Handles":
             self.set_transform_gizmo_visible(not self.transform_gizmo_visible())
+            return
+        if name == "Group Motion Ribbon":
+            self.create_group_motion_ribbon()
+            return
+        if name == "Edit Group Path Handles":
+            self.edit_group_path_handles()
+            return
+        if name == "Formation Morph":
+            self.show_formation_morph()
+            return
+        if name == "Polar / Linear Array":
+            self.show_polar_linear_array()
+            return
+        if name == "Parallel Form Generator":
+            self.show_parallel_form_generator()
+            return
+        if name == "Rank / File Builder":
+            self.show_rank_file_builder()
+            return
+        if name == "Create Live Symmetry":
+            self.create_live_symmetry()
+            return
+        if name == "Alternating Selection":
+            self.show_alternating_selection()
+            return
+        if name == "Toggle Measurements":
+            enabled = not self.measurements_enabled
+            self.accelerator_panel.measurements_enabled.setChecked(enabled)
+            self.set_measurement_overlay(enabled, self.measurement_mode)
+            return
+        if name == "Continuity Designer":
+            self.show_continuity_designer()
+            return
+        if name in {"Construction Guides", "Edit Construction Guides"}:
+            selected_guides = self.field.selected_guide_ids()
+            self.show_construction_guides(selected_guides[0] if selected_guides else "")
+            return
+        if name == "Reference / Annotation Layer":
+            self.show_reference_annotations()
+            return
+        if name == "CAD Path Toolkit":
+            self.show_cad_path_toolkit()
             return
         if name == "Save Selection Set":
             self.save_selection_set()
@@ -9041,6 +9557,7 @@ class MainWindow(QMainWindow):
             next_set.path_anchors.pop(dot_id, None)
             next_set.path_controls.pop(dot_id, None)
             next_set.count_positions.pop(dot_id, None)
+            next_set.count_facings.pop(dot_id, None)
         self.set_index = next_index
         self.current_count = self.current_set().start_count
         self.populate_sets()
@@ -9049,49 +9566,1194 @@ class MainWindow(QMainWindow):
         self.push_set_snapshot(before_sets, before_index, before_count, f"Duplicate {mode.title()} To Next Set")
 
     def follow_leader_rotate(self) -> None:
-        ids, positions = self.selected_positions()
+        ids = [
+            dot_id
+            for dot_id in self.ordered_dot_ids(self.field.selected_dot_ids())
+            if not self.is_dot_locked(dot_id)
+        ]
         if len(ids) < 2:
+            QMessageBox.information(self, "Follow the Leader", "Select at least two unlocked marchers first.")
             return
-        shift_degrees = self.rotation_degrees.value()
-        new_positions, conveyor_anchors = conveyor_follow_positions(positions, shift_degrees)
-        before_positions = self.current_positions()
-        after_positions = dict(before_positions)
-        after_positions.update({dot_id: new_positions[index] for index, dot_id in enumerate(ids)})
 
-        before_anchors = self.clone_path_anchors(self.set_index)
-        before_controls = self.clone_path_controls(self.set_index)
-        before_counts = self.clone_count_positions(self.set_index)
-        after_anchors = self.clone_path_anchors(self.set_index)
-        after_controls = self.clone_path_controls(self.set_index)
-        after_counts = self.clone_count_positions(self.set_index)
-        for dot_id in ids:
-            after_counts.pop(dot_id, None)
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Follow the Leader")
+        dialog.setMinimumWidth(500)
+        layout = QVBoxLayout(dialog)
+        description = QLabel(
+            "Marchers travel on the same ordered route and retain their distance behind the marcher ahead. "
+            "Use a shaped line, free curve, SVG outline, or any existing form as the route."
+        )
+        description.setWordWrap(True)
+        layout.addWidget(description)
+        form = QFormLayout()
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
 
-        if self.set_index > 0:
-            for index, dot_id in enumerate(ids):
-                if conveyor_anchors[index]:
-                    after_anchors[dot_id] = conveyor_anchors[index]
-                    after_controls.pop(dot_id, None)
+        route_source = QComboBox()
+        route_source.addItem("Incoming formation (recommended)", "incoming")
+        route_source.addItem("Current set form", "current")
+        group_mode = QComboBox()
+        group_mode.addItem("Auto-detect separate forms", "auto")
+        group_mode.addItem("One continuous route", "single")
+        group_mode.addItem("Separate rows", "rows")
+        group_mode.addItem("Separate files", "files")
+        group_mode.addItem("Separate sections", "sections")
+        topology = QComboBox()
+        topology.addItem("Auto-detect", "auto")
+        topology.addItem("Open line / path", "open")
+        topology.addItem("Closed loop", "closed")
+        order_mode = QComboBox()
+        order_mode.addItem("Automatic spatial order", "automatic")
+        order_mode.addItem("Roster order", "roster")
+        order_mode.addItem("Left to right", "horizontal")
+        order_mode.addItem("Front to back", "vertical")
+        turn_style = QComboBox()
+        turn_style.addItem("Smooth curves", True)
+        turn_style.addItem("Straight segments / sharp corners", False)
+        direction = QComboBox()
+        direction.addItem("Forward along preview", 1)
+        direction.addItem("Reverse along preview", -1)
+        advance = QDoubleSpinBox()
+        advance.setRange(0.0, max(2.0, len(ids) * 4.0))
+        advance.setDecimals(2)
+        advance.setSingleStep(0.25)
+        advance.setValue(1.0)
+        advance.setSuffix(" spots")
+        face_direction = QCheckBox("Face the direction of travel throughout the move")
+        facing_offset = QDoubleSpinBox()
+        facing_offset.setRange(-180.0, 180.0)
+        facing_offset.setDecimals(1)
+        facing_offset.setSuffix(" deg")
+        facing_offset.setToolTip(
+            "Adds an optional visual offset to the route tangent. "
+            "Zero points triangle symbols into the travel direction."
+        )
+        precision = QComboBox()
+        precision.addItem("Normal (2 samples/count)", 2)
+        precision.addItem("Smooth (4 samples/count)", 4)
+        precision.addItem("High (8 samples/count)", 8)
+        precision.setCurrentIndex(1)
+
+        form.addRow("Route Source", route_source)
+        form.addRow("Route Groups", group_mode)
+        form.addRow("Route Topology", topology)
+        form.addRow("Marcher Order", order_mode)
+        form.addRow("Direction Changes", turn_style)
+        form.addRow("Travel Direction", direction)
+        form.addRow("Advance", advance)
+        form.addRow(face_direction)
+        form.addRow("Facing Offset", facing_offset)
+        form.addRow("Playback Precision", precision)
+        layout.addLayout(form)
+        preview_status = QLabel()
+        preview_status.setWordWrap(True)
+        preview_status.setObjectName("secondaryText")
+        layout.addWidget(preview_status)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.button(QDialogButtonBox.StandardButton.Ok).setText("Apply Follow the Leader")
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+
+        plans: list[FollowLeaderPlan] = []
+
+        def build_plans() -> list[FollowLeaderPlan]:
+            if route_source.currentData() == "incoming":
+                if self.set_index > 0:
+                    route_positions = self.project.sets[self.set_index - 1].dot_positions
                 else:
-                    after_anchors.pop(dot_id, None)
-                    after_controls.pop(dot_id, None)
+                    route_positions = {dot.id: (dot.x, dot.y) for dot in self.project.dots}
+            else:
+                route_positions = self.current_set().dot_positions
+            selected_positions = {dot_id: route_positions[dot_id] for dot_id in ids if dot_id in route_positions}
+            sections = {
+                dot_id: (self.project.dot_by_id(dot_id).section if self.project.dot_by_id(dot_id) else "Unassigned")
+                for dot_id in ids
+            }
+            groups = split_follow_leader_groups(
+                ids,
+                selected_positions,
+                str(group_mode.currentData() or "auto"),
+                sections,
+            )
+            options = FollowLeaderOptions(
+                advance_spots=advance.value(),
+                direction=int(direction.currentData() or 1),
+                topology=str(topology.currentData() or "auto"),
+                order_mode=str(order_mode.currentData() or "automatic"),
+                curved=bool(turn_style.currentData()),
+                samples_per_count=int(precision.currentData() or 4),
+                face_direction=face_direction.isChecked(),
+                facing_offset=facing_offset.value(),
+            )
+            return [
+                plan_follow_leader(
+                    group,
+                    selected_positions,
+                    self.current_set().start_count,
+                    self.current_set().end_count,
+                    options,
+                )
+                for group in groups
+                if len(group) >= 2
+            ]
 
-        self.undo_stack.push(
-            MoveDotsCommand(
+        def update_preview() -> None:
+            nonlocal plans
+            try:
+                plans = build_plans()
+                targets = {dot_id: position for plan in plans for dot_id, position in plan.end_positions.items()}
+                leaders = [
+                    (plan.leader_id, plan.end_positions[plan.leader_id])
+                    for plan in plans
+                    if plan.leader_id in plan.end_positions
+                ]
+                self.field.show_follow_leader_preview([plan.route for plan in plans], targets, leaders)
+                closed_count = sum(1 for plan in plans if plan.route_closed)
+                preview_status.setText(
+                    f"{len(plans)} route(s), {closed_count} closed, {len(targets)} marchers. "
+                    f"Red = shared route; gold = destination; labeled handle = leader."
+                )
+                buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(bool(plans))
+            except ValueError as exc:
+                plans = []
+                self.field.clear_preview()
+                preview_status.setText(str(exc))
+                buttons.button(QDialogButtonBox.StandardButton.Ok).setEnabled(False)
+
+        for widget in (route_source, group_mode, topology, order_mode, turn_style, direction, precision):
+            widget.currentIndexChanged.connect(update_preview)
+        advance.valueChanged.connect(update_preview)
+        face_direction.toggled.connect(update_preview)
+        facing_offset.valueChanged.connect(update_preview)
+        facing_offset.setEnabled(False)
+        face_direction.toggled.connect(facing_offset.setEnabled)
+        update_preview()
+
+        accepted = dialog.exec() == QDialog.DialogCode.Accepted
+        self.field.clear_preview()
+        if not accepted or not plans:
+            self.refresh_selected_paths()
+            return
+
+        before_sets = deepcopy(self.project.sets)
+        before_index = self.set_index
+        before_count = self.current_count
+        drill_set = self.current_set()
+        changed_ids: set[str] = set()
+        for plan in plans:
+            for dot_id, position in plan.end_positions.items():
+                drill_set.dot_positions[dot_id] = position
+                drill_set.path_anchors.pop(dot_id, None)
+                drill_set.path_controls.pop(dot_id, None)
+                drill_set.count_positions[dot_id] = dict(plan.count_positions.get(dot_id, {}))
+                drill_set.count_facings.pop(dot_id, None)
+                if dot_id in plan.count_facings:
+                    drill_set.count_facings[dot_id] = dict(plan.count_facings[dot_id])
+                    drill_set.dot_facings[dot_id] = plan.end_facings[dot_id]
+                changed_ids.add(dot_id)
+        self.current_count = drill_set.start_count
+        self.set_count(self.current_count, seek_audio=False)
+        self.push_set_snapshot(before_sets, before_index, before_count, "Follow the Leader")
+        self.select_dot_ids(self.ordered_dot_ids(list(changed_ids)))
+        self.refresh_selected_paths()
+        facing_text = " with direction-of-travel facing" if face_direction.isChecked() else ""
+        self.statusBar().showMessage(
+            f"Built {len(plans)} shared Follow-the-Leader route(s) for {len(changed_ids)} marchers{facing_text}",
+            3600,
+        )
+
+    def refresh_motion_ribbon_list(self) -> None:
+        if not hasattr(self, "motion_ribbon_list") or not self.project.sets:
+            return
+        current_id = self.active_motion_ribbon_id
+        self.motion_ribbon_list.blockSignals(True)
+        self.motion_ribbon_list.clear()
+        for ribbon in self.current_set().motion_ribbons:
+            item = QListWidgetItem(f"{ribbon.name}  •  {len(ribbon.dot_ids)} marchers")
+            item.setData(Qt.ItemDataRole.UserRole, ribbon.id)
+            item.setToolTip("Double-click to show shared Bézier nodes and tangent handles on the field.")
+            self.motion_ribbon_list.addItem(item)
+            if ribbon.id == current_id:
+                self.motion_ribbon_list.setCurrentItem(item)
+        self.motion_ribbon_list.blockSignals(False)
+
+    def selected_motion_ribbon(self) -> MotionRibbon | None:
+        ribbon_id = self.active_motion_ribbon_id
+        if hasattr(self, "motion_ribbon_list") and self.motion_ribbon_list.currentItem() is not None:
+            ribbon_id = str(self.motion_ribbon_list.currentItem().data(Qt.ItemDataRole.UserRole) or ribbon_id)
+        ribbon = motion_ribbon_by_id(self.current_set().motion_ribbons, ribbon_id)
+        if ribbon is not None:
+            return ribbon
+        selected = set(self.field.selected_dot_ids())
+        candidates = [
+            item
+            for item in self.current_set().motion_ribbons
+            if selected and (selected <= set(item.dot_ids) or set(item.dot_ids) <= selected)
+        ]
+        return min(candidates, key=lambda item: len(set(item.dot_ids) ^ selected)) if candidates else None
+
+    def create_group_motion_ribbon(self) -> None:
+        dot_ids = [
+            dot_id
+            for dot_id in self.ordered_dot_ids(self.field.selected_dot_ids())
+            if not self.is_dot_locked(dot_id)
+        ]
+        if len(dot_ids) < 2:
+            QMessageBox.information(self, "Group Motion Ribbon", "Select at least two unlocked marchers first.")
+            return
+        dialog = MotionRibbonDialog(len(dot_ids), parent=self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        starts_source = self.current_transition_start_positions()
+        starts = {dot_id: starts_source[dot_id] for dot_id in dot_ids if dot_id in starts_source}
+        ends = {dot_id: self.current_set().dot_positions[dot_id] for dot_id in dot_ids}
+        try:
+            ribbon = create_motion_ribbon(
+                f"ribbon-{uuid4().hex[:10]}",
+                dialog.name.text().strip() or "Group Motion Ribbon",
+                dot_ids,
+                starts,
+                ends,
+                bend=dialog.bend.value(),
+                orient_to_path=dialog.orient_to_path.isChecked(),
+                face_direction=dialog.face_direction.isChecked(),
+                samples_per_count=dialog.precision.value(),
+            )
+        except ValueError as exc:
+            QMessageBox.warning(self, "Group Motion Ribbon", str(exc))
+            return
+        before_sets = deepcopy(self.project.sets)
+        before_index = self.set_index
+        before_count = self.current_count
+        self.current_set().motion_ribbons.append(ribbon)
+        self.apply_motion_ribbon_plan(ribbon)
+        self.active_motion_ribbon_id = ribbon.id
+        self.push_set_snapshot(before_sets, before_index, before_count, "Create Group Motion Ribbon")
+        self.select_dot_ids(ribbon.dot_ids)
+        self.refresh_motion_ribbon_list()
+        self.show_motion_ribbon_editor(ribbon)
+        self.statusBar().showMessage(
+            "Group Motion Ribbon created. Drag red route nodes or cyan tangent handles on the field.",
+            4200,
+        )
+
+    def apply_motion_ribbon_plan(self, ribbon: MotionRibbon, refresh_field: bool = True):
+        starts_source = self.current_transition_start_positions()
+        starts = {dot_id: starts_source[dot_id] for dot_id in ribbon.dot_ids if dot_id in starts_source}
+        ends = {
+            dot_id: self.current_set().dot_positions[dot_id]
+            for dot_id in ribbon.dot_ids
+            if dot_id in self.current_set().dot_positions
+        }
+        plan = plan_motion_ribbon(
+            ribbon,
+            starts,
+            ends,
+            self.current_set().start_count,
+            self.current_set().end_count,
+        )
+        drill_set = self.current_set()
+        for dot_id in ribbon.dot_ids:
+            drill_set.path_anchors.pop(dot_id, None)
+            drill_set.path_controls.pop(dot_id, None)
+            drill_set.count_positions[dot_id] = dict(plan.count_positions.get(dot_id, {}))
+            drill_set.count_facings.pop(dot_id, None)
+            if dot_id in plan.count_facings:
+                drill_set.count_facings[dot_id] = dict(plan.count_facings[dot_id])
+                drill_set.dot_facings[dot_id] = plan.end_facings[dot_id]
+        if refresh_field:
+            self.set_count(self.current_count, seek_audio=False)
+        return plan
+
+    def show_motion_ribbon_editor(self, ribbon: MotionRibbon | None = None) -> None:
+        ribbon = ribbon or self.selected_motion_ribbon()
+        if ribbon is None:
+            QMessageBox.information(self, "Group Path Handles", "Select a ribbon from the Motion tab first.")
+            return
+        try:
+            plan = self.apply_motion_ribbon_plan(ribbon, refresh_field=False)
+        except ValueError as exc:
+            QMessageBox.warning(self, "Group Path Handles", str(exc))
+            return
+        self.active_motion_ribbon_id = ribbon.id
+        self.field.set_motion_path_editing(True)
+        self.field.show_motion_ribbon_preview(
+            plan.center_path,
+            plan.left_edge,
+            plan.right_edge,
+            plan.paths,
+            ribbon.id,
+            ribbon.nodes,
+        )
+        self.refresh_motion_ribbon_list()
+
+    def edit_group_path_handles(self) -> None:
+        self.show_motion_ribbon_editor()
+
+    def edit_motion_ribbon_settings(self) -> None:
+        ribbon = self.selected_motion_ribbon()
+        if ribbon is None:
+            return
+        dialog = MotionRibbonDialog(len(ribbon.dot_ids), ribbon, self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        before_sets = deepcopy(self.project.sets)
+        before_index = self.set_index
+        before_count = self.current_count
+        ribbon.name = dialog.name.text().strip() or ribbon.name
+        ribbon.orient_to_path = dialog.orient_to_path.isChecked()
+        ribbon.face_direction = dialog.face_direction.isChecked()
+        ribbon.samples_per_count = dialog.precision.value()
+        self.apply_motion_ribbon_plan(ribbon)
+        self.push_set_snapshot(before_sets, before_index, before_count, "Edit Motion Ribbon Settings")
+        self.show_motion_ribbon_editor(self.selected_motion_ribbon())
+
+    def preview_handle_dragged(self, kind: str, x: float, y: float, modifiers: int = 0) -> None:
+        self.preview_handle_moved(kind, x, y, modifiers, commit=False)
+
+    def move_motion_ribbon_handle(
+        self,
+        kind: str,
+        x: float,
+        y: float,
+        modifiers: int,
+        commit: bool,
+    ) -> bool:
+        if not kind.startswith("motion_ribbon_"):
+            return False
+        parts = kind.split(":")
+        if len(parts) < 3:
+            return True
+        ribbon = motion_ribbon_by_id(self.current_set().motion_ribbons, parts[1])
+        if ribbon is None:
+            return True
+        try:
+            index = int(parts[2])
+        except ValueError:
+            return True
+        if not 0 <= index < len(ribbon.nodes):
+            return True
+        if self._motion_ribbon_drag_before_sets is None:
+            self._motion_ribbon_drag_before_sets = deepcopy(self.project.sets)
+        node = ribbon.nodes[index]
+        if kind.startswith("motion_ribbon_node:"):
+            old_point = node["point"]
+            delta = (x - old_point[0], y - old_point[1])
+            node["point"] = (x, y)
+            for control_name in ("in", "out"):
+                if control_name in node:
+                    control = node[control_name]
+                    node[control_name] = (control[0] + delta[0], control[1] + delta[1])
+        elif kind.startswith("motion_ribbon_tangent:") and len(parts) >= 4:
+            control_name = parts[3]
+            if control_name not in {"in", "out"}:
+                return True
+            node[control_name] = (x, y)
+            alt = bool(modifiers & int(Qt.KeyboardModifier.AltModifier.value))
+            if alt:
+                opposite = "out" if control_name == "in" else "in"
+                point = node["point"]
+                node[opposite] = (point[0] * 2 - x, point[1] * 2 - y)
+        try:
+            plan = self.apply_motion_ribbon_plan(ribbon)
+        except ValueError:
+            return True
+        self.field.show_motion_ribbon_preview(
+            plan.center_path,
+            plan.left_edge,
+            plan.right_edge,
+            plan.paths,
+            ribbon.id,
+            ribbon.nodes,
+        )
+        if commit and self._motion_ribbon_drag_before_sets is not None:
+            before_sets = self._motion_ribbon_drag_before_sets
+            self._motion_ribbon_drag_before_sets = None
+            before_index = self.set_index
+            before_count = self.current_count
+            self.push_set_snapshot(before_sets, before_index, before_count, "Edit Group Path Handles")
+            ribbon = motion_ribbon_by_id(self.current_set().motion_ribbons, self.active_motion_ribbon_id)
+            if ribbon is not None:
+                self.show_motion_ribbon_editor(ribbon)
+        return True
+
+    def add_motion_ribbon_node(self) -> None:
+        ribbon = self.selected_motion_ribbon()
+        if ribbon is None:
+            return
+        before_sets = deepcopy(self.project.sets)
+        before_index = self.set_index
+        before_count = self.current_count
+        sampled = sample_motion_ribbon(ribbon, 32)
+        first, second = cad_split(sampled, 0.5)
+        first = cad_simplify(first, 0.75)
+        second = cad_simplify(second, 0.75)
+        combined = [*first, *second[1:]] if second else first
+        ribbon.nodes = path_to_bezier_nodes(combined)
+        self.apply_motion_ribbon_plan(ribbon)
+        self.push_set_snapshot(before_sets, before_index, before_count, "Add Motion Ribbon Node")
+        self.show_motion_ribbon_editor(self.selected_motion_ribbon())
+
+    def remove_motion_ribbon_node(self) -> None:
+        ribbon = self.selected_motion_ribbon()
+        if ribbon is None or len(ribbon.nodes) <= 2:
+            self.statusBar().showMessage("A motion ribbon must retain at least two route nodes.", 2600)
+            return
+        before_sets = deepcopy(self.project.sets)
+        before_index = self.set_index
+        before_count = self.current_count
+        ribbon.nodes.pop(len(ribbon.nodes) // 2)
+        self.apply_motion_ribbon_plan(ribbon)
+        self.push_set_snapshot(before_sets, before_index, before_count, "Remove Motion Ribbon Node")
+        self.show_motion_ribbon_editor(self.selected_motion_ribbon())
+
+    def delete_motion_ribbon(self) -> None:
+        ribbon = self.selected_motion_ribbon()
+        if ribbon is None:
+            return
+        before_sets = deepcopy(self.project.sets)
+        before_index = self.set_index
+        before_count = self.current_count
+        self.current_set().motion_ribbons = [item for item in self.current_set().motion_ribbons if item.id != ribbon.id]
+        for dot_id in ribbon.dot_ids:
+            self.current_set().count_positions.pop(dot_id, None)
+            self.current_set().count_facings.pop(dot_id, None)
+        self.active_motion_ribbon_id = ""
+        self.field.clear_preview()
+        self.field.set_motion_path_editing(False)
+        self.set_count(self.current_count, seek_audio=False)
+        self.push_set_snapshot(before_sets, before_index, before_count, "Delete Group Motion Ribbon")
+        self.refresh_motion_ribbon_list()
+
+    def accelerator_selection(self) -> tuple[list[str], dict[str, tuple[float, float]]]:
+        positions = self.current_set().dot_positions
+        selected = [
+            dot_id
+            for dot_id in self.field.selected_dot_ids()
+            if dot_id in positions and not self.is_dot_locked(dot_id)
+        ]
+        return spatial_id_order(selected, positions), positions
+
+    def selected_design_guide_path(self) -> list[tuple[float, float]]:
+        selected = set(self.field.selected_guide_ids())
+        guide = next(
+            (
+                item
+                for item in self.project.guides
+                if item.id in selected and not item.guide_type.startswith("annotation_")
+            ),
+            None,
+        )
+        return guide_path(guide) if guide is not None else []
+
+    def apply_accelerator_targets(
+        self,
+        targets: dict[str, tuple[float, float]],
+        label: str,
+    ) -> bool:
+        if not targets:
+            return False
+        outside = [
+            dot_id
+            for dot_id, (x, y) in targets.items()
+            if not surface_contains_point(self.project.surface, (x, y))
+        ]
+        if outside:
+            answer = QMessageBox.question(
                 self,
-                self.set_index,
-                before_positions,
-                after_positions,
-                "Follow-Leader Conveyor",
-                before_anchors,
-                after_anchors,
-                before_controls,
-                after_controls,
-                before_counts,
-                after_counts,
+                f"{label}: Spots Outside Field",
+                f"{len(outside)} target spot(s) are outside the playable field. Apply anyway?",
+                QMessageBox.StandardButton.Apply | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel,
+            )
+            if answer != QMessageBox.StandardButton.Apply:
+                return False
+        self.field.clear_preview()
+        self.apply_positions(targets)
+        self.select_dot_ids(list(targets))
+        self.refresh_measurements()
+        self.statusBar().showMessage(f"{label} applied to {len(targets)} marcher(s)", 3000)
+        return True
+
+    def show_polar_linear_array(self) -> None:
+        dot_ids, positions = self.accelerator_selection()
+        if len(dot_ids) < 2:
+            QMessageBox.information(self, "Polar / Linear Array", "Select at least two unlocked marchers first.")
+            return
+        path = self.selected_design_guide_path()
+        dialog = ArrayDialog(len(dot_ids), bool(path), self)
+
+        def targets_for_dialog() -> dict[str, tuple[float, float]]:
+            source = [positions[dot_id] for dot_id in dot_ids]
+            target_points = array_target_points(source, len(dot_ids), dialog.options(), path)
+            return assign_targets_minimum_cost(dot_ids, positions, target_points)
+
+        def preview() -> None:
+            try:
+                targets = targets_for_dialog()
+            except ValueError as exc:
+                self.field.clear_preview()
+                self.statusBar().showMessage(str(exc), 2600)
+                return
+            self.field.show_preview({dot_id: positions[dot_id] for dot_id in dot_ids}, targets)
+
+        dialog.settings_changed.connect(preview)
+        preview()
+        accepted = dialog.exec() == QDialog.DialogCode.Accepted
+        self.field.clear_preview()
+        if not accepted:
+            self.refresh_selected_paths()
+            return
+        try:
+            targets = targets_for_dialog()
+        except ValueError as exc:
+            QMessageBox.warning(self, "Array Cannot Be Applied", str(exc))
+            return
+        self.apply_accelerator_targets(targets, "Polar / Linear Array")
+
+    def parallel_master_path(
+        self,
+        dot_ids: list[str],
+        positions: dict[str, tuple[float, float]],
+        prefer_guide: bool = False,
+    ) -> list[tuple[float, float]]:
+        guide = self.selected_design_guide_path()
+        if prefer_guide and len(guide) >= 2:
+            return guide
+        return [positions[dot_id] for dot_id in spatial_id_order(dot_ids, positions)]
+
+    def show_parallel_form_generator(self) -> None:
+        dot_ids, positions = self.accelerator_selection()
+        if len(dot_ids) < 2:
+            QMessageBox.information(self, "Parallel Form Generator", "Select at least two unlocked marchers first.")
+            return
+        dialog = ParallelFormDialog(len(dot_ids), parent=self)
+
+        def targets_for_dialog() -> dict[str, tuple[float, float]]:
+            master_path = self.parallel_master_path(dot_ids, positions)
+            target_points = parallel_form_target_points(master_path, len(dot_ids), dialog.options())
+            return assign_targets_minimum_cost(dot_ids, positions, target_points)
+
+        def preview() -> None:
+            try:
+                targets = targets_for_dialog()
+            except ValueError as exc:
+                self.field.clear_preview()
+                self.statusBar().showMessage(str(exc), 2600)
+                return
+            self.field.show_preview({dot_id: positions[dot_id] for dot_id in dot_ids}, targets)
+
+        dialog.settings_changed.connect(preview)
+        preview()
+        accepted = dialog.exec() == QDialog.DialogCode.Accepted
+        self.field.clear_preview()
+        if not accepted:
+            self.refresh_selected_paths()
+            return
+        try:
+            targets = targets_for_dialog()
+        except ValueError as exc:
+            QMessageBox.warning(self, "Parallel Form Cannot Be Applied", str(exc))
+            return
+        self.apply_accelerator_targets(targets, "Parallel Form Generator")
+
+    def show_rank_file_builder(self) -> None:
+        dot_ids, positions = self.accelerator_selection()
+        if len(dot_ids) < 2:
+            QMessageBox.information(self, "Rank / File Builder", "Select at least two unlocked marchers first.")
+            return
+        guide = self.selected_design_guide_path()
+        dialog = RankFileDialog(len(dot_ids), bool(guide), self)
+
+        def targets_for_dialog() -> dict[str, tuple[float, float]]:
+            use_guide = str(dialog.source.currentData()) == "guide"
+            master_path = self.parallel_master_path(dot_ids, positions, prefer_guide=use_guide)
+            target_points = rank_file_target_points(
+                master_path,
+                len(dot_ids),
+                dialog.ranks.value(),
+                dialog.interval.value(),
+                centered=str(dialog.placement.currentData()) == "centered",
+                closed=dialog.closed.isChecked(),
+            )
+            return assign_targets_minimum_cost(dot_ids, positions, target_points)
+
+        def preview() -> None:
+            try:
+                targets = targets_for_dialog()
+            except ValueError as exc:
+                self.field.clear_preview()
+                self.statusBar().showMessage(str(exc), 2600)
+                return
+            self.field.show_preview({dot_id: positions[dot_id] for dot_id in dot_ids}, targets)
+
+        dialog.settings_changed.connect(preview)
+        preview()
+        accepted = dialog.exec() == QDialog.DialogCode.Accepted
+        self.field.clear_preview()
+        if not accepted:
+            self.refresh_selected_paths()
+            return
+        try:
+            targets = targets_for_dialog()
+        except ValueError as exc:
+            QMessageBox.warning(self, "Rank / File Builder", str(exc))
+            return
+        self.apply_accelerator_targets(targets, "Rank / File Builder")
+
+    def create_live_symmetry(self) -> None:
+        dot_ids, positions = self.accelerator_selection()
+        if len(dot_ids) < 2:
+            QMessageBox.information(self, "Live Symmetry", "Select marchers on both sides of the desired axis.")
+            return
+        center = self.positions_center([positions[dot_id] for dot_id in dot_ids])
+        dialog = LiveSymmetryDialog(center, self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        try:
+            record = create_live_symmetry_record(
+                dot_ids,
+                positions,
+                (dialog.axis_x.value(), dialog.axis_y.value()),
+                dialog.angle.value(),
+                name=dialog.name.text(),
+            )
+        except ValueError as exc:
+            QMessageBox.warning(self, "Live Symmetry", str(exc))
+            return
+        before = deepcopy(self.project)
+        self.project.workflow.setdefault("live_symmetry", []).append(record)
+        angle = radians(float(record["axis_angle"]))
+        center_x, center_y = record["axis_point"]
+        extent = 70.0
+        direction = (cos(angle), sin(angle))
+        self.project.guides.append(
+            ConstructionGuide(
+                id=f"{record['id']}-axis",
+                name=f"{record['name']} Axis",
+                guide_type="line",
+                points=[
+                    (center_x - direction[0] * extent, center_y - direction[1] * extent),
+                    (center_x + direction[0] * extent, center_y + direction[1] * extent),
+                ],
+                color="#18b8d8",
+                visible=True,
+                locked=True,
+                metadata={"category": "live_symmetry", "symmetry_id": record["id"]},
             )
         )
+        after = deepcopy(self.project)
+        self.apply_project_snapshot(before)
+        self.undo_stack.push(ProjectSnapshotCommand(self, before, after, "Create Live Symmetry"))
+        self.statusBar().showMessage(f"Live symmetry created with {len(record['pairs'])} mirrored pair(s)", 3200)
+
+    def manage_live_symmetry(self) -> None:
+        records = list(self.project.workflow.get("live_symmetry", []))
+        if not records:
+            QMessageBox.information(self, "Live Symmetry", "No live symmetry links exist in this project yet.")
+            return
+        dialog = SymmetryManagerDialog(records, self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        before = deepcopy(self.project)
+        surviving_ids = {str(record.get("id", "")) for record in dialog.records}
+        self.project.workflow["live_symmetry"] = deepcopy(dialog.records)
+        self.project.guides = [
+            guide
+            for guide in self.project.guides
+            if guide.metadata.get("category") != "live_symmetry"
+            or str(guide.metadata.get("symmetry_id", "")) in surviving_ids
+        ]
+        enabled = {
+            str(record.get("id", "")): bool(record.get("enabled", True))
+            for record in dialog.records
+        }
+        for guide in self.project.guides:
+            if guide.metadata.get("category") == "live_symmetry":
+                guide.visible = enabled.get(str(guide.metadata.get("symmetry_id", "")), False)
+        after = deepcopy(self.project)
+        if before == after:
+            return
+        self.apply_project_snapshot(before)
+        self.undo_stack.push(ProjectSnapshotCommand(self, before, after, "Manage Live Symmetry"))
+
+    def preview_live_symmetry(self, proposed: dict[str, tuple[float, float]]) -> None:
+        records = self.project.workflow.get("live_symmetry", [])
+        if not records or not proposed:
+            return
+        expanded = expand_live_symmetry_changes(
+            records,
+            self.current_set().dot_positions,
+            proposed,
+            {
+                dot.id
+                for dot in self.project.dots
+                if self.is_dot_locked(dot.id)
+            },
+        )
+        for dot_id, position in expanded.items():
+            if dot_id in proposed:
+                continue
+            item = self.field.dot_items.get(dot_id)
+            if item:
+                item.setPos(self.field.field_to_scene(*position))
+
+    def show_alternating_selection(self) -> None:
+        current = self.field.selected_dot_ids()
+        visible = [
+            dot_id
+            for dot_id, item in self.field.dot_items.items()
+            if item.isVisible() and not self.is_dot_locked(dot_id)
+        ]
+        dialog = AlternatingSelectionDialog(len(current), len(visible), self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        candidates = current if str(dialog.scope.currentData()) == "selection" and current else visible
+        positions = self.current_set().dot_positions
+        current_points = [positions[dot_id] for dot_id in current if dot_id in positions]
+        anchor = self.positions_center(current_points) if current_points else None
+        if len(current) == 1 and current[0] in positions:
+            anchor = positions[current[0]]
+        ranks = {
+            dot.id: dot.rank
+            for dot in self.project.dots
+        }
+        selected = alternating_selection(
+            candidates,
+            positions,
+            str(dialog.mode.currentData()),
+            every=dialog.every.value(),
+            ranks=ranks,
+            count=dialog.count.value(),
+            anchor=anchor,
+        )
+        if dialog.additive.isChecked():
+            selected = list(dict.fromkeys([*current, *selected]))
+        self.select_dot_ids(selected)
+        self.statusBar().showMessage(f"Selected {len(selected)} marcher(s)", 2200)
+
+    def set_measurement_overlay(self, enabled: bool, mode: str = "all") -> None:
+        self.measurements_enabled = bool(enabled)
+        self.measurement_mode = str(mode or "all")
+        self.refresh_measurements()
+
+    def toggle_measurement_overlay(self) -> None:
+        enabled = not self.measurements_enabled
+        if hasattr(self, "accelerator_panel"):
+            self.accelerator_panel.measurements_enabled.setChecked(enabled)
+        self.set_measurement_overlay(enabled, self.measurement_mode)
+
+    def refresh_measurements(self) -> None:
+        if not self.measurements_enabled:
+            self.field.clear_measurements()
+            return
+        selected = self.field.selected_dot_ids()
+        current_positions = {
+            dot_id: self.field.scene_to_field(self.field.dot_items[dot_id].pos())
+            for dot_id in selected
+            if dot_id in self.field.dot_items
+        }
+        ordered_ids = spatial_id_order(list(current_positions), current_positions)
+        ordered_points = [(dot_id, current_positions[dot_id]) for dot_id in ordered_ids]
+        starts = self.current_transition_start_positions()
+        drill_set = self.current_set()
+        paths: dict[str, list[tuple[float, float]]] = {}
+        for dot_id in ordered_ids:
+            start = starts.get(dot_id)
+            end = drill_set.dot_positions.get(dot_id)
+            if start is None or end is None:
+                continue
+            keyframes = drill_set.count_positions.get(dot_id, {})
+            if keyframes:
+                paths[dot_id] = [
+                    start,
+                    *[
+                        point
+                        for count, point in sorted(keyframes.items())
+                        if drill_set.start_count < count < drill_set.end_count
+                    ],
+                    end,
+                ]
+            else:
+                paths[dot_id] = sample_transition_path(
+                    start,
+                    end,
+                    drill_set.path_anchors.get(dot_id, []),
+                    drill_set.path_controls.get(dot_id, []),
+                )
+        self.field.show_measurements(
+            ordered_points,
+            paths,
+            max(1.0, float(drill_set.duration_counts)),
+            self.measurement_mode,
+        )
+
+    def show_reference_annotations(self, selected_id: str = "") -> None:
+        center_scene = self.field.mapToScene(self.field.viewport().rect().center())
+        center = self.field.scene_to_field(center_scene)
+        dialog = ReferenceAnnotationsDialog(self.project.guides, center, self.set_index, self)
+        if selected_id:
+            dialog.active_id = selected_id
+            dialog.refresh_list()
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        before = deepcopy(self.project)
+        references_dir = self.project_dir / "references"
+        references_dir.mkdir(parents=True, exist_ok=True)
+        annotations = deepcopy(dialog.annotations)
+        for annotation in annotations:
+            if annotation.guide_type != "annotation_image":
+                continue
+            image_value = str(annotation.metadata.get("image_file", ""))
+            if not image_value:
+                continue
+            source = Path(image_value)
+            if not source.is_absolute():
+                source = self.project_dir / source
+            if not source.exists():
+                continue
+            try:
+                source.relative_to(self.project_dir)
+                inside_project = True
+            except ValueError:
+                inside_project = False
+            if inside_project:
+                annotation.metadata["image_file"] = str(source.relative_to(self.project_dir))
+                continue
+            destination = references_dir / source.name
+            suffix = 2
+            while destination.exists() and destination.read_bytes() != source.read_bytes():
+                destination = references_dir / f"{source.stem}_{suffix}{source.suffix}"
+                suffix += 1
+            if not destination.exists():
+                shutil.copy2(source, destination)
+            annotation.metadata["image_file"] = str(destination.relative_to(self.project_dir))
+        construction = [guide for guide in self.project.guides if not guide.guide_type.startswith("annotation_")]
+        self.project.guides = [*construction, *annotations]
+        after = deepcopy(self.project)
+        if before == after:
+            return
+        self.apply_project_snapshot(before)
+        self.undo_stack.push(ProjectSnapshotCommand(self, before, after, "Edit Reference Layer"))
+        self.statusBar().showMessage(f"Reference layer updated: {len(annotations)} object(s)", 2800)
+
+    def show_continuity_designer(self) -> None:
+        selected_ids = self.ordered_dot_ids(self.field.selected_dot_ids())
+        dialog = ContinuityDesignerDialog(
+            self.current_set().continuity,
+            selected_ids,
+            self.current_set().start_count,
+            self.current_set().end_count,
+            self,
+        )
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        before_sets = deepcopy(self.project.sets)
+        before_index = self.set_index
+        before_count = self.current_count
+        self.current_set().continuity = deepcopy(dialog.instructions)
+        for instruction in self.current_set().continuity:
+            if instruction.body_facing is None:
+                continue
+            for dot_id in instruction.dot_ids:
+                keys = self.current_set().count_facings.setdefault(dot_id, {})
+                keys[float(instruction.start_count)] = float(instruction.body_facing)
+                keys[float(instruction.end_count)] = float(instruction.body_facing)
+                if instruction.end_count >= self.current_set().end_count:
+                    self.current_set().dot_facings[dot_id] = float(instruction.body_facing)
+        self.set_count(self.current_count, seek_audio=False)
+        self.push_set_snapshot(before_sets, before_index, before_count, "Edit Continuity")
+        self.statusBar().showMessage(f"Saved {len(self.current_set().continuity)} continuity instruction(s).", 2800)
+
+    def show_construction_guides(self, selected_guide_id: str = "") -> None:
+        center_scene = self.field.mapToScene(self.field.viewport().rect().center())
+        center = self.field.scene_to_field(center_scene)
+        dialog = ConstructionGuidesDialog(self.project.guides, center, self)
+        if selected_guide_id:
+            for row in range(dialog.list.count()):
+                item = dialog.list.item(row)
+                if str(item.data(Qt.ItemDataRole.UserRole)) == selected_guide_id:
+                    dialog.list.setCurrentRow(row)
+                    break
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        before = deepcopy(self.project)
+        self.project.guides = deepcopy(dialog.guides)
+        after = deepcopy(self.project)
+        if before == after:
+            return
+        self.apply_project_snapshot(before)
+        self.undo_stack.push(ProjectSnapshotCommand(self, before, after, "Edit Construction Guides"))
+        self.statusBar().showMessage(f"Updated {len(self.project.guides)} construction guide(s).", 2600)
+
+    def edit_construction_guide(self, guide_id: str) -> None:
+        guide = next((item for item in self.project.guides if item.id == guide_id), None)
+        if guide is not None and guide.guide_type.startswith("annotation_"):
+            self.show_reference_annotations(guide_id)
+            return
+        self.show_construction_guides(guide_id)
+
+    def move_construction_guide(self, guide_id: str, delta_x: float, delta_y: float) -> None:
+        guide = next((item for item in self.project.guides if item.id == guide_id), None)
+        if guide is None or guide.locked:
+            self.field.rebuild_guides()
+            return
+        before = deepcopy(self.project)
+        guide.points = [(x + delta_x, y + delta_y) for x, y in guide.points]
+        after = deepcopy(self.project)
+        self.apply_project_snapshot(before)
+        self.undo_stack.push(ProjectSnapshotCommand(self, before, after, "Move Construction Guide"))
+
+    def show_formation_morph(self) -> None:
+        dot_ids = [
+            dot_id
+            for dot_id in self.ordered_dot_ids(self.field.selected_dot_ids())
+            if not self.is_dot_locked(dot_id)
+        ]
+        if len(dot_ids) < 2:
+            QMessageBox.information(self, "Formation Morph", "Select at least two unlocked marchers first.")
+            return
+        dialog = FormationMorphDialog(len(dot_ids), self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        starts_source = self.current_transition_start_positions()
+        starts = {dot_id: starts_source[dot_id] for dot_id in dot_ids if dot_id in starts_source}
+        target_points = [self.current_set().dot_positions[dot_id] for dot_id in dot_ids]
+        assignment_mode = str(dialog.assignment.currentData())
+        if assignment_mode == "keep":
+            ends = {dot_id: point for dot_id, point in zip(dot_ids, target_points)}
+        else:
+            mode = {
+                "shortest": "shortest",
+                "section": "section",
+                "collision": "lowest_collision",
+            }.get(assignment_mode, "shortest")
+            ends = assignment_for_mode(
+                self.project,
+                self.set_index,
+                dot_ids,
+                target_points,
+                mode,
+                min_spacing=self.min_spacing.value() if hasattr(self, "min_spacing") else 1.25,
+                max_yards_per_count=self.max_yards_per_count.value() if hasattr(self, "max_yards_per_count") else 4.0,
+            )
+        sections = {}
+        for dot_id in dot_ids:
+            dot = self.project.dot_by_id(dot_id)
+            section = dot.section if dot else ""
+            rank = dot.rank if dot else ""
+            sections[dot_id] = " :: ".join(value for value in (section, rank) if value) or "Unassigned"
+        try:
+            plan = plan_formation_morph(
+                dot_ids,
+                starts,
+                ends,
+                sections,
+                self.current_set().start_count,
+                self.current_set().end_count,
+                MorphOptions(
+                    coherence=dialog.coherence.value() / 100.0,
+                    section_strength=dialog.section_strength.value() / 100.0,
+                    samples_per_count=dialog.precision.value(),
+                    face_direction=dialog.face_direction.isChecked(),
+                ),
+            )
+        except ValueError as exc:
+            QMessageBox.warning(self, "Formation Morph", str(exc))
+            return
+        self.field.show_paths(plan.paths, {})
+        answer = QMessageBox.question(
+            self,
+            "Apply Formation Morph?",
+            "Yellow paths preview the coordinated morph. Apply this transition?",
+            QMessageBox.StandardButton.Apply | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Apply,
+        )
+        self.field.clear_paths()
+        if answer != QMessageBox.StandardButton.Apply:
+            self.refresh_selected_paths()
+            return
+        before_sets = deepcopy(self.project.sets)
+        before_index = self.set_index
+        before_count = self.current_count
+        drill_set = self.current_set()
+        for dot_id in dot_ids:
+            drill_set.dot_positions[dot_id] = ends[dot_id]
+            drill_set.path_anchors.pop(dot_id, None)
+            drill_set.path_controls.pop(dot_id, None)
+            drill_set.count_positions[dot_id] = dict(plan.count_positions.get(dot_id, {}))
+            drill_set.count_facings.pop(dot_id, None)
+            if dot_id in plan.count_facings:
+                drill_set.count_facings[dot_id] = dict(plan.count_facings[dot_id])
+                drill_set.dot_facings[dot_id] = plan.end_facings[dot_id]
+        selected_set = set(dot_ids)
+        drill_set.motion_ribbons = [
+            ribbon for ribbon in drill_set.motion_ribbons if not selected_set.intersection(ribbon.dot_ids)
+        ]
+        self.set_count(self.current_count, seek_audio=False)
+        self.push_set_snapshot(before_sets, before_index, before_count, "Formation Morph")
+        self.select_dot_ids(dot_ids)
         self.refresh_selected_paths()
+
+    @staticmethod
+    def apply_cad_path_operation(
+        path: list[tuple[float, float]],
+        operation: str,
+        value_a: float,
+        value_b: float,
+        iterations: int,
+    ) -> list[tuple[float, float]]:
+        if operation == "split":
+            first, second = cad_split(path, value_a)
+            return [*first, *second[1:]] if second else first
+        if operation == "trim":
+            return cad_trim(path, value_a, value_b)
+        if operation == "extend":
+            return cad_extend(path, max(0.0, value_a), max(0.0, value_b))
+        if operation == "offset":
+            return cad_offset(path, value_a)
+        if operation == "simplify":
+            return cad_simplify(path, max(0.001, abs(value_a)))
+        if operation == "smooth":
+            return cad_smooth(path, iterations)
+        if operation == "reverse":
+            return cad_reverse(path)
+        if operation == "fillet":
+            return cad_fillet(path, max(0.001, abs(value_a)), max(2, iterations))
+        return list(path)
+
+    @staticmethod
+    def preserve_transition_path_endpoints(
+        original: list[tuple[float, float]],
+        processed: list[tuple[float, float]],
+        operation: str,
+    ) -> list[tuple[float, float]]:
+        if len(original) < 2:
+            return processed
+        if operation == "reverse":
+            return [original[0], *list(reversed(original[1:-1])), original[-1]]
+        result = list(processed)
+        if not result:
+            return [original[0], original[-1]]
+        if distance(result[0], original[0]) > 0.0001:
+            result.insert(0, original[0])
+        else:
+            result[0] = original[0]
+        if distance(result[-1], original[-1]) > 0.0001:
+            result.append(original[-1])
+        else:
+            result[-1] = original[-1]
+        return result
+
+    def show_cad_path_toolkit(self) -> None:
+        ribbon = self.selected_motion_ribbon()
+        guide_ids = self.field.selected_guide_ids()
+        dot_ids = self.ordered_dot_ids(self.field.selected_dot_ids())
+        if ribbon is not None:
+            target_description = f"motion ribbon '{ribbon.name}'"
+            target_kind = "ribbon"
+        elif guide_ids:
+            target_description = f"{len(guide_ids)} selected construction guide(s)"
+            target_kind = "guides"
+        elif dot_ids:
+            target_description = f"{len(dot_ids)} selected marcher path(s)"
+            target_kind = "dots"
+        else:
+            QMessageBox.information(
+                self,
+                "CAD Path Toolkit",
+                "Select a motion ribbon, construction guide, or marcher path first.",
+            )
+            return
+        dialog = CadPathDialog(target_description, self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        operation = str(dialog.operation.currentData())
+        value_a = dialog.value_a.value()
+        value_b = dialog.value_b.value()
+        iterations = dialog.iterations.value()
+        if target_kind == "guides":
+            before = deepcopy(self.project)
+            selected_guides = [guide for guide in self.project.guides if guide.id in set(guide_ids)]
+            if operation == "join":
+                if len(selected_guides) < 2:
+                    QMessageBox.information(self, "CAD Join", "Select at least two construction guides.")
+                    return
+                joined = cad_join(
+                    [guide_path(guide) for guide in selected_guides],
+                    tolerance=max(0.0, value_a),
+                )
+                primary = selected_guides[0]
+                primary.guide_type = "polyline"
+                primary.points = joined
+                removed = {guide.id for guide in selected_guides[1:]}
+                self.project.guides = [guide for guide in self.project.guides if guide.id not in removed]
+            elif operation == "split":
+                if not selected_guides:
+                    return
+                primary = selected_guides[0]
+                first, second = cad_split(guide_path(primary), value_a)
+                primary.guide_type = "polyline"
+                primary.points = first
+                if second:
+                    duplicate = deepcopy(primary)
+                    duplicate.id = f"guide-{uuid4().hex[:10]}"
+                    duplicate.name = f"{primary.name} Split"
+                    duplicate.points = second
+                    self.project.guides.append(duplicate)
+            else:
+                for guide in selected_guides:
+                    guide.points = self.apply_cad_path_operation(
+                        guide_path(guide), operation, value_a, value_b, iterations
+                    )
+                    guide.guide_type = "polyline"
+            after = deepcopy(self.project)
+            self.apply_project_snapshot(before)
+            self.undo_stack.push(ProjectSnapshotCommand(self, before, after, f"CAD {operation.title()} Guides"))
+            return
+
+        before_sets = deepcopy(self.project.sets)
+        before_index = self.set_index
+        before_count = self.current_count
+        if target_kind == "ribbon" and ribbon is not None:
+            if operation == "join":
+                QMessageBox.information(self, "CAD Join", "Join is available when two or more construction guides are selected.")
+                return
+            original = sample_motion_ribbon(ribbon, 32)
+            if operation == "split":
+                first, second = cad_split(original, value_a)
+                first = cad_simplify(first, 0.3)
+                second = cad_simplify(second, 0.3)
+                processed = [*first, *second[1:]] if second else first
+            else:
+                processed = self.apply_cad_path_operation(
+                    original, operation, value_a, value_b, iterations
+                )
+                processed = self.preserve_transition_path_endpoints(original, processed, operation)
+                processed = cad_simplify(processed, 0.3)
+            ribbon.nodes = path_to_bezier_nodes(processed)
+            self.apply_motion_ribbon_plan(ribbon)
+        else:
+            if operation == "join":
+                QMessageBox.information(self, "CAD Join", "Individual marcher transitions remain independent; create a Group Motion Ribbon to join them.")
+                return
+            starts = self.current_transition_start_positions()
+            drill_set = self.current_set()
+            for dot_id in dot_ids:
+                if dot_id not in starts or dot_id not in drill_set.dot_positions:
+                    continue
+                original = [starts[dot_id], *drill_set.path_anchors.get(dot_id, []), drill_set.dot_positions[dot_id]]
+                processed = self.apply_cad_path_operation(original, operation, value_a, value_b, iterations)
+                processed = self.preserve_transition_path_endpoints(original, processed, operation)
+                drill_set.path_anchors[dot_id] = processed[1:-1]
+                drill_set.path_controls.pop(dot_id, None)
+                drill_set.count_positions.pop(dot_id, None)
+        self.set_count(self.current_count, seek_audio=False)
+        self.push_set_snapshot(before_sets, before_index, before_count, f"CAD {operation.title()} Paths")
+        if target_kind == "ribbon":
+            self.show_motion_ribbon_editor(self.selected_motion_ribbon())
+        else:
+            self.refresh_selected_paths()
 
     def center_selection(self) -> None:
         ids, positions = self.selected_positions()
@@ -9151,6 +10813,7 @@ class MainWindow(QMainWindow):
             "theme": self.settings.value("appearance/theme", "dark"),
             "dot_symbol": self.field.dot_symbol if hasattr(self.field, "dot_symbol") else "",
             "colors": {dot.id: dot.color for dot in self.project.dots},
+            "surface": self.project.surface.to_json(),
         }
         return hashlib.sha1(json.dumps(payload, sort_keys=True, default=str).encode("utf-8")).hexdigest()
 
@@ -9167,39 +10830,21 @@ class MainWindow(QMainWindow):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         margin = 4
         field_rect = QRectF(margin, margin, pixmap.width() - margin * 2, pixmap.height() - margin * 2)
-        painter.setPen(QPen(QColor(tokens["border_color"]), 1))
-        painter.setBrush(QColor(palette["field_fill"]))
-        painter.drawRoundedRect(field_rect, 3, 3)
-        endzone_width = field_rect.width() * (10 / (FIELD_HALF_WIDTH_YARDS * 2))
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QColor(palette["endzone_fill"]))
-        painter.drawRect(QRectF(field_rect.left(), field_rect.top(), endzone_width, field_rect.height()))
-        painter.drawRect(QRectF(field_rect.right() - endzone_width, field_rect.top(), endzone_width, field_rect.height()))
-        painter.setPen(QPen(QColor(palette.get("minor", palette.get("yard", "#8b96a4"))), 0.45))
-        for yard in range(-50, 51, 5):
-            x = field_rect.center().x() + (yard / 60.0) * (field_rect.width() / 2)
-            painter.drawLine(QPointF(x, field_rect.top()), QPointF(x, field_rect.bottom()))
-        painter.setPen(QPen(QColor(palette.get("yard", palette.get("heavy", "#66717a"))), 0.7))
-        for yard in range(-50, 51, 10):
-            x = field_rect.center().x() + (yard / 60.0) * (field_rect.width() / 2)
-            painter.drawLine(QPointF(x, field_rect.top()), QPointF(x, field_rect.bottom()))
-        painter.setPen(QPen(QColor(palette.get("hash", "#20262d")), 0.65, Qt.PenStyle.DotLine))
-        for y_value in (-17.8, 17.8):
-            y = field_rect.center().y() - (y_value / FIELD_HALF_HEIGHT_YARDS) * (field_rect.height() / 2)
-            painter.drawLine(QPointF(field_rect.left(), y), QPointF(field_rect.right(), y))
+        draw_surface_preview(painter, field_rect, self.project.surface, palette)
         drill_set = self.project.sets[set_index]
         for prop_state in drill_set.prop_positions.values():
-            x = field_rect.center().x() + (float(prop_state.get("x", 0)) / FIELD_HALF_WIDTH_YARDS) * (field_rect.width() / 2)
-            y = field_rect.center().y() - (float(prop_state.get("y", 0)) / FIELD_HALF_HEIGHT_YARDS) * (field_rect.height() / 2)
-            width = max(2.0, float(prop_state.get("width", 3)) / (FIELD_HALF_WIDTH_YARDS * 2) * field_rect.width())
-            height = max(2.0, float(prop_state.get("height", 3)) / (FIELD_HALF_HEIGHT_YARDS * 2) * field_rect.height())
+            point = field_to_rect(field_rect, self.project.surface, float(prop_state.get("x", 0)), float(prop_state.get("y", 0)))
+            x, y = point.x(), point.y()
+            raw_width, raw_height = size_to_rect(field_rect, self.project.surface, float(prop_state.get("width", 3)), float(prop_state.get("height", 3)))
+            width = max(2.0, raw_width)
+            height = max(2.0, raw_height)
             painter.setPen(QPen(QColor(tokens["border_color"]), 0.5))
             painter.setBrush(QColor(229, 57, 53, 155))
             painter.drawRoundedRect(QRectF(x - width / 2, y - height / 2, width, height), 1.5, 1.5)
         for dot_id, position in drill_set.dot_positions.items():
             dot = self.project.dot_by_id(dot_id)
-            x = field_rect.center().x() + (position[0] / FIELD_HALF_WIDTH_YARDS) * (field_rect.width() / 2)
-            y = field_rect.center().y() - (position[1] / FIELD_HALF_HEIGHT_YARDS) * (field_rect.height() / 2)
+            point = field_to_rect(field_rect, self.project.surface, position[0], position[1])
+            x, y = point.x(), point.y()
             painter.setBrush(QColor(dot.color if dot else "#e53935"))
             painter.setPen(QPen(QColor(tokens["background_color"]), 0.35))
             painter.drawEllipse(QPointF(x, y), 1.25, 1.25)
@@ -9214,6 +10859,9 @@ class MainWindow(QMainWindow):
         self._populating_sets = True
         self.set_list.blockSignals(True)
         self.set_list.clear()
+        if hasattr(self, "toolbar_set_selector"):
+            self.toolbar_set_selector.blockSignals(True)
+            self.toolbar_set_selector.clear()
         thumbnails = self.set_thumbnails_enabled()
         for index, drill_set in enumerate(self.project.sets):
             tempo = self.project.active_tempo(index)
@@ -9228,6 +10876,11 @@ class MainWindow(QMainWindow):
             item.setData(Qt.ItemDataRole.UserRole, index)
             item.setToolTip(f"{drill_set.name}: counts {drill_set.start_count}-{drill_set.end_count}, {tempo:g} BPM")
             self.set_list.addItem(item)
+            if hasattr(self, "toolbar_set_selector"):
+                self.toolbar_set_selector.addItem(
+                    f"{drill_set.name} · {drill_set.start_count}-{drill_set.end_count}",
+                    index,
+                )
         if hasattr(self, "multi_set_start"):
             for spin in (self.multi_set_start, self.multi_set_end):
                 spin.blockSignals(True)
@@ -9235,8 +10888,12 @@ class MainWindow(QMainWindow):
                 spin.blockSignals(False)
         self.set_list.setCurrentRow(self.set_index)
         self.set_list.blockSignals(False)
+        if hasattr(self, "toolbar_set_selector"):
+            self.toolbar_set_selector.setCurrentIndex(self.set_index)
+            self.toolbar_set_selector.blockSignals(False)
         self._populating_sets = False
         self.filter_set_list()
+        self.refresh_motion_ribbon_list()
 
     def change_set(self, index: int) -> None:
         if index < 0:
@@ -9246,11 +10903,26 @@ class MainWindow(QMainWindow):
         if mapped_index < 0 or mapped_index >= len(self.project.sets):
             return
         self.set_index = mapped_index
+        if hasattr(self, "toolbar_set_selector") and self.toolbar_set_selector.currentIndex() != mapped_index:
+            self.toolbar_set_selector.blockSignals(True)
+            self.toolbar_set_selector.setCurrentIndex(mapped_index)
+            self.toolbar_set_selector.blockSignals(False)
+        self.active_motion_ribbon_id = ""
+        self._motion_ribbon_drag_before_sets = None
+        self.field.set_motion_path_editing(False)
         self.current_count = self.current_set().start_count
         self.sync_timeline()
         self.set_count(self.current_count, seek_audio=True)
         self.sync_inspector()
         self.schedule_live_conflict_analysis()
+
+    def change_set_from_toolbar(self, index: int) -> None:
+        if index < 0 or getattr(self, "_populating_sets", False):
+            return
+        if hasattr(self, "set_list"):
+            self.set_list.setCurrentRow(index)
+        else:
+            self.change_set(index)
 
     def filter_set_list(self) -> None:
         if not hasattr(self, "set_list"):
@@ -9329,12 +11001,18 @@ class MainWindow(QMainWindow):
                 dot_id: dict(keyframes)
                 for dot_id, keyframes in source.count_positions.items()
             },
+            count_facings={
+                dot_id: dict(keyframes)
+                for dot_id, keyframes in source.count_facings.items()
+            },
             move_timings={
                 dot_id: dict(timing)
                 for dot_id, timing in source.move_timings.items()
             },
             transition=source.transition,
             movement_styles=dict(source.movement_styles),
+            continuity=deepcopy(source.continuity),
+            motion_ribbons=deepcopy(source.motion_ribbons),
         )
         self.project.sets.insert(self.set_index + 1, copied)
         self.set_index += 1
@@ -9450,6 +11128,7 @@ class MainWindow(QMainWindow):
         self.count_label.setText(f"Count {self.current_count:.2f}")
         self.refresh_markers()
         self.refresh_transition_timeline()
+        self.refresh_specialized_design()
 
     def refresh_transition_timeline(self, *_args) -> None:
         if not hasattr(self, "transition_timeline"):
@@ -9508,6 +11187,7 @@ class MainWindow(QMainWindow):
     ) -> None:
         start_count, end_count = playback_bounds_for_set(self.project, self.set_index)
         self.current_count = max(start_count, min(count, end_count))
+        self.field.set_reference_set_index(self.set_index)
         self.field.set_positions(interpolate_project(self.project, self.set_index, self.current_count))
         self.field.set_facings(interpolate_dot_facings(self.project, self.set_index, self.current_count))
         self.field.set_prop_states(interpolate_props(self.project, self.set_index, self.current_count))
@@ -9527,8 +11207,11 @@ class MainWindow(QMainWindow):
             self.waveform.set_position_ms(self.audio_position_for_count(self.set_index, self.current_count))
         if refresh_paths:
             self.refresh_selected_paths()
+        self.refresh_measurements()
         if hasattr(self, "minimap"):
             self.minimap.update()
+        if hasattr(self, "choreography_timeline"):
+            self.choreography_timeline.set_current_count(self.current_count)
 
     def play(self) -> None:
         if self.play_timer.isActive():
@@ -9807,6 +11490,7 @@ class MainWindow(QMainWindow):
             drill_set = self.project.sets[index]
             for dot_id in ids:
                 drill_set.dot_facings[dot_id] = facing
+                drill_set.count_facings.pop(dot_id, None)
         self.set_count(self.current_count, seek_audio=False)
         self.sync_facing_controls()
         self.push_set_snapshot(before_sets, before_index, before_count, "Set Marcher Facing")
@@ -9826,6 +11510,7 @@ class MainWindow(QMainWindow):
                 drill_set.dot_facings[dot_id] = self.normalize_facing(
                     dot_facing_at_set(self.project, index, dot_id) + delta_degrees
                 )
+                drill_set.count_facings.pop(dot_id, None)
         self.set_count(self.current_count, seek_audio=False)
         self.sync_facing_controls()
         self.push_set_snapshot(before_sets, before_index, before_count, "Rotate Marcher Facing")
@@ -10349,7 +12034,8 @@ class MainWindow(QMainWindow):
             for item in self.field.dot_items.values():
                 item.setSelected(item.dot_id == dot.id)
         self.coordinate_entry.clear()
-        self.statusBar().showMessage(f"{dot.name} moved to {format_drill_coordinate(*position)[0]}, {format_drill_coordinate(*position)[1]}", 2600)
+        coordinate = format_surface_coordinate(self.project.surface, *position)
+        self.statusBar().showMessage(f"{dot.name} moved to {coordinate[0]}, {coordinate[1]}", 2600)
 
     def parse_coordinate_entry(self, text: str) -> tuple[str, tuple[float, float]]:
         normalized = re.sub(r"\s+", " ", text.strip().lower().replace("infront", "in front"))
@@ -10360,6 +12046,10 @@ class MainWindow(QMainWindow):
         if not match:
             raise ValueError('Start with a marcher label, like "T1 on 45 s2".')
         label = match.group("label")
+        direct_x = re.fullmatch(r"x\s*([+-]?[0-9]+(?:\.[0-9]+)?)\s*(?:yd|yards?)?", match.group("yard"))
+        direct_y = re.fullmatch(r"y\s*([+-]?[0-9]+(?:\.[0-9]+)?)\s*(?:yd|yards?)?", right)
+        if direct_x and direct_y:
+            return label, (float(direct_x.group(1)), float(direct_y.group(1)))
         x = self.parse_yardline_text(match.group("yard"))
         y = self.parse_hash_text(right)
         return label, (x, y)
@@ -10392,11 +12082,11 @@ class MainWindow(QMainWindow):
     def parse_hash_text(self, text: str) -> float:
         normalized = text.strip().lower().replace("of ", "")
         references = {
-            "fs": -FIELD_HALF_HEIGHT_YARDS,
-            "fh": FRONT_HASH_YARDS,
+            "fs": -self.project.surface.half_height,
+            "fh": self.project.surface.front_hash_yards,
             "mid": 0.0,
-            "bh": BACK_HASH_YARDS,
-            "bs": FIELD_HALF_HEIGHT_YARDS,
+            "bh": self.project.surface.back_hash_yards,
+            "bs": self.project.surface.half_height,
         }
         on_match = re.match(r"on\s+(?P<ref>fs|fh|mid|bh|bs)", normalized)
         if on_match:
@@ -10520,7 +12210,7 @@ class MainWindow(QMainWindow):
                 self.dot_layer.setText(dot.layer)
                 self.dot_x.setText(f"{position[0]:.2f}")
                 self.dot_y.setText(f"{position[1]:.2f}")
-                yard_text, hash_text = format_drill_coordinate(position[0], position[1])
+                yard_text, hash_text = format_surface_coordinate(self.project.surface, position[0], position[1])
                 self.dot_yardline.setText(yard_text)
                 self.dot_hash.setText(hash_text)
 
@@ -10672,7 +12362,8 @@ class MainWindow(QMainWindow):
                 self.warning_list.addItem(
                     f"TIMELINE | {entry.set_name} | Count {entry.count:.2f} | "
                     f"{entry.total} conflict(s): spacing {entry.spacing_conflicts}, "
-                    f"speed {entry.speed_conflicts}, crossing {entry.crossing_conflicts} | "
+                    f"speed {entry.speed_conflicts}, crossing {entry.crossing_conflicts}, "
+                    f"no-go {entry.no_go_conflicts} | "
                     f"worst {entry.worst_spacing:.2f} yd, fastest {entry.fastest_yards_per_count:.2f} yd/count"
                 )
             for warning in all_warnings:
@@ -10701,51 +12392,78 @@ class MainWindow(QMainWindow):
         worker.start()
         self.statusBar().showMessage("Path analysis running in background", 2200)
 
-    def auto_plan_selected_paths(self) -> None:
-        target_index = self.path_display_set_index()
-        if target_index is None:
-            target_index = self.set_index if self.set_index > 0 else 1 if len(self.project.sets) > 1 else 0
-        if target_index <= 0:
-            QMessageBox.information(self, "Auto Plan Paths", "Add a moving set before auto-planning paths.")
+    def optimize_selected_spot_assignment(self) -> None:
+        selected = [dot_id for dot_id in self.ordered_dot_ids(self.field.selected_dot_ids()) if not self.is_dot_locked(dot_id)]
+        if len(selected) < 2:
+            QMessageBox.information(
+                self,
+                "Optimize Spot Assignment",
+                "Select at least two unlocked marchers in the destination form.",
+            )
             return
-        selected = self.field.selected_dot_ids()
-        anchors_added = auto_plan_paths(
+        targets = [self.current_set().dot_positions[dot_id] for dot_id in selected]
+        assignment = collision_aware_assignment_for_project(
             self.project,
-            target_index,
+            self.set_index,
             selected,
+            targets,
             min_spacing=self.min_spacing.value(),
+            max_yards_per_count=self.max_yards_per_count.value(),
+        )
+        before_quality = project_assignment_quality(
+            self.project,
+            self.set_index,
+            selected,
+            targets,
+            list(range(len(selected))),
+            min_spacing=self.min_spacing.value(),
+            max_yards_per_count=self.max_yards_per_count.value(),
+        )
+        after_quality = project_assignment_quality(
+            self.project,
+            self.set_index,
+            selected,
+            targets,
+            assignment,
+            min_spacing=self.min_spacing.value(),
+            max_yards_per_count=self.max_yards_per_count.value(),
+        )
+        changed = sum(target_index != index for index, target_index in enumerate(assignment))
+        if not changed:
+            self.statusBar().showMessage(
+                "No safer spot reassignment was found without changing the destination picture.",
+                4000,
+            )
+            self.schedule_live_conflict_analysis()
+            return
+        before = self.current_positions()
+        after = dict(before)
+        after.update(
+            {
+                dot_id: targets[assignment[index]]
+                for index, dot_id in enumerate(selected)
+            }
+        )
+        self.undo_stack.push(
+            MoveDotsCommand(
+                self,
+                self.set_index,
+                before,
+                after,
+                "Optimize Spot Assignment",
+            )
         )
         self.refresh_selected_paths()
-        if hasattr(self, "warning_list"):
-            self.warning_list.clear()
-            timeline_entries = build_conflict_timeline(
-                self.project,
-                target_index,
-                min_spacing=self.min_spacing.value(),
-                max_yards_per_count=self.max_yards_per_count.value(),
-                dot_ids=selected or None,
-            )
-            for entry in timeline_entries[:80]:
-                self.warning_list.addItem(
-                    f"TIMELINE | {entry.set_name} | Count {entry.count:.2f} | "
-                    f"{entry.total} conflict(s): spacing {entry.spacing_conflicts}, "
-                    f"speed {entry.speed_conflicts}, crossing {entry.crossing_conflicts}"
-                )
-            warnings = detect_path_warnings(
-                self.project,
-                target_index,
-                min_spacing=self.min_spacing.value(),
-                max_yards_per_count=self.max_yards_per_count.value(),
-                dot_ids=selected or None,
-                warning_limit=120,
-            )
-            for warning in warnings:
-                self.warning_list.addItem(
-                    f"{warning.severity.upper()} | {warning.set_name} | "
-                    f"Count {warning.count:.2f} | {warning.message}"
-            )
-        self.statusBar().showMessage(f"Auto-planned {anchors_added} path anchors", 3000)
         self.schedule_live_conflict_analysis()
+        self.statusBar().showMessage(
+            f"Reassigned {changed} marcher(s) while preserving every form spot: "
+            f"collisions {before_quality.collisions}→{after_quality.collisions}, "
+            f"crossings {before_quality.crossings}→{after_quality.crossings}.",
+            5200,
+        )
+
+    def auto_plan_selected_paths(self) -> None:
+        self.optimize_selected_spot_assignment()
 
     def clear_selected_paths(self) -> None:
         target_index = self.path_display_set_index()
@@ -10770,6 +12488,7 @@ class MainWindow(QMainWindow):
                     drill_set.path_anchors.pop(dot_id, None)
                     drill_set.path_controls.pop(dot_id, None)
                     drill_set.count_positions.pop(dot_id, None)
+                    drill_set.count_facings.pop(dot_id, None)
             self.set_count(self.current_count, seek_audio=False)
             self.push_set_snapshot(before_sets, before_index, before_count, "Ripple Clear Selected Paths")
             self.statusBar().showMessage(f"Cleared paths across {len(scoped_indices)} set(s), {removed} point(s)", 3000)
@@ -10824,6 +12543,7 @@ class MainWindow(QMainWindow):
         self.update_field_hud_visibility()
         self.refresh_selected_paths()
         self.refresh_transition_timeline()
+        self.refresh_measurements()
 
     def path_display_set_index(self) -> int | None:
         if self.play_timer.isActive():

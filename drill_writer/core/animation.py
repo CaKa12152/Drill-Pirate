@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from math import cos, pi
+from math import atan2, cos, degrees, hypot, pi
 
 from drill_writer.core.models import DrillProject, DrillSet, Prop, Transition, prop_default_state
 
@@ -63,6 +63,18 @@ def interpolate_dot_facings(project: DrillProject, set_index: int, count: float)
         start = dot_facing_at_set(project, previous_index, dot.id) if current_index > 0 else 0.0
         end = dot_facing_at_set(project, current_index, dot.id)
         motion_start_count, motion_end_count = motion_window_for_dot(current, dot.id)
+        keyframes = current.count_facings.get(dot.id, {})
+        if keyframes:
+            facings[dot.id] = keyframed_facing_value(
+                start,
+                end,
+                keyframes,
+                count,
+                motion_start_count,
+                motion_end_count,
+                current.transition,
+            )
+            continue
         if count <= motion_start_count:
             facings[dot.id] = start
             continue
@@ -72,6 +84,41 @@ def interpolate_dot_facings(project: DrillProject, set_index: int, count: float)
         progress = ease((count - motion_start_count) / max(0.0001, motion_end_count - motion_start_count), current.transition)
         facings[dot.id] = normalize_facing_degrees(start + shortest_angle_delta(start, end) * progress)
     return facings
+
+
+def keyframed_facing_value(
+    start: float,
+    end: float,
+    keyframes: dict[float, float],
+    count: float,
+    start_count: float,
+    end_count: float,
+    transition: Transition,
+) -> float:
+    timeline: list[tuple[float, float]] = [(float(start_count), normalize_facing_degrees(start))]
+    for key_count, facing in sorted(keyframes.items()):
+        normalized_count = max(float(start_count), min(float(key_count), float(end_count)))
+        normalized_facing = normalize_facing_degrees(facing)
+        if timeline and abs(timeline[-1][0] - normalized_count) <= 0.000001:
+            timeline[-1] = (normalized_count, normalized_facing)
+        else:
+            timeline.append((normalized_count, normalized_facing))
+    normalized_end = normalize_facing_degrees(end)
+    if timeline and abs(timeline[-1][0] - float(end_count)) <= 0.000001:
+        timeline[-1] = (float(end_count), timeline[-1][1])
+    else:
+        timeline.append((float(end_count), normalized_end))
+    if count <= timeline[0][0]:
+        return timeline[0][1]
+    if count >= timeline[-1][0]:
+        return timeline[-1][1]
+    for index in range(len(timeline) - 1):
+        count_a, facing_a = timeline[index]
+        count_b, facing_b = timeline[index + 1]
+        if count <= count_b:
+            progress = ease((float(count) - count_a) / max(0.0001, count_b - count_a), transition)
+            return normalize_facing_degrees(facing_a + shortest_angle_delta(facing_a, facing_b) * progress)
+    return timeline[-1][1]
 
 
 def distance(a: tuple[float, float], b: tuple[float, float]) -> float:
@@ -348,6 +395,36 @@ def interpolate_props(project: DrillProject, set_index: int, count: float) -> di
         start = previous.prop_positions.get(prop.id, prop_default_state(prop)) if previous else prop_default_state(prop)
         end = current.prop_positions.get(prop.id, prop_default_state(prop))
         states[prop.id] = interpolate_prop_state(prop, start, end, progress)
+    if project.prop_attachments:
+        from drill_writer.core.specialized_design import apply_prop_attachments
+
+        dot_positions = interpolate_project(project, set_index, count)
+        dot_facings = interpolate_dot_facings(project, set_index, count)
+        if any(
+            attachment.enabled
+            and attachment.rotation_behavior == "direction_of_travel"
+            and attachment.start_count <= count <= attachment.end_count
+            for attachment in project.prop_attachments
+        ):
+            previous_count = max(float(current.start_count), float(count) - 0.05)
+            previous_positions = interpolate_project(project, set_index, previous_count)
+            for attachment in project.prop_attachments:
+                if attachment.rotation_behavior != "direction_of_travel":
+                    continue
+                leader_id = attachment.leader_dot_id or (attachment.dot_ids[0] if attachment.dot_ids else "")
+                if leader_id not in dot_positions or leader_id not in previous_positions:
+                    continue
+                dx = dot_positions[leader_id][0] - previous_positions[leader_id][0]
+                dy = dot_positions[leader_id][1] - previous_positions[leader_id][1]
+                if hypot(dx, dy) > 0.0001:
+                    dot_facings[leader_id] = degrees(atan2(dx, -dy)) % 360.0
+        states = apply_prop_attachments(
+            project,
+            count,
+            dot_positions,
+            dot_facings,
+            states,
+        )
     return states
 
 

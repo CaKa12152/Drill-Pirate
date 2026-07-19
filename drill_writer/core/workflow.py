@@ -5,8 +5,16 @@ from math import atan2, cos, radians, sin, tan
 from typing import Iterable
 
 from drill_writer.core.analysis import segments_intersect, transition_start_positions
-from drill_writer.core.animation import distance, interpolate_project, interpolate_props
-from drill_writer.core.assignment import greedy_nearest_assignment, hungarian_minimum_assignment, minimum_cost_target_assignment, ordered_targets
+from drill_writer.core.animation import distance, interpolate_project, interpolate_props, motion_window_for_dot
+from drill_writer.core.assignment import (
+    AssignmentQuality,
+    collision_aware_target_assignment,
+    evaluate_assignment_quality,
+    greedy_nearest_assignment,
+    hungarian_minimum_assignment,
+    minimum_cost_target_assignment,
+    ordered_targets,
+)
 from drill_writer.core.models import DrillProject, DrillSet, Marker
 from drill_writer.core.timing import local_tempo, set_index_for_count
 
@@ -127,9 +135,13 @@ def transition_candidates(
     assignments.append(("follow_leader", "Follow leader", follow_leader_assignment(starts, targets)))
 
     base_assignments = [assignment for _key, _label, assignment in assignments]
-    lowest_collision = min(
-        (improve_assignment(starts, targets, assignment, min_spacing) for assignment in base_assignments),
-        key=lambda assignment: score_assignment(starts, [targets[index] for index in assignment], min_spacing).weighted_score,
+    lowest_collision = collision_aware_assignment_for_project(
+        project,
+        set_index,
+        valid_ids,
+        targets,
+        min_spacing=min_spacing,
+        initial_assignments=base_assignments,
     )
     assignments.append(("lowest_collision", "Lowest collision risk", lowest_collision))
 
@@ -137,12 +149,25 @@ def transition_candidates(
     for key, label, assignment in assignments:
         assigned_targets = [targets[index] for index in assignment]
         positions = dict(zip(valid_ids, assigned_targets))
+        quality = project_assignment_quality(
+            project,
+            set_index,
+            valid_ids,
+            targets,
+            assignment,
+            min_spacing=min_spacing,
+        )
         candidates.append(
             TransitionCandidate(
                 key=key,
                 label=label,
                 positions=positions,
-                score=score_assignment(starts, assigned_targets, min_spacing),
+                score=AssignmentScore(
+                    total_distance=quality.total_distance,
+                    maximum_distance=quality.maximum_distance,
+                    crossings=quality.crossings,
+                    spacing_conflicts=quality.collisions,
+                ),
             )
         )
     return sorted(candidates, key=lambda candidate: candidate.score.weighted_score)
@@ -154,19 +179,130 @@ def assignment_for_mode(
     dot_ids: list[str],
     targets: list[Point],
     mode: str,
+    min_spacing: float = 1.25,
+    max_yards_per_count: float = 4.0,
 ) -> dict[str, Point]:
+    valid_ids = [dot_id for dot_id in dot_ids if project.dot_by_id(dot_id)]
+    if len(valid_ids) != len(targets) or not valid_ids:
+        return dict(zip(dot_ids, targets))
+    if mode in {"automatic", "lowest_collision"}:
+        assignment = collision_aware_assignment_for_project(
+            project,
+            set_index,
+            valid_ids,
+            targets,
+            min_spacing=min_spacing,
+            max_yards_per_count=max_yards_per_count,
+        )
+        return {
+            dot_id: targets[assignment[index]]
+            for index, dot_id in enumerate(valid_ids)
+        }
     candidates = transition_candidates(project, set_index, dot_ids, targets)
     if not candidates:
         return dict(zip(dot_ids, targets))
-    if mode in {"automatic", "lowest_collision"}:
-        desired = "lowest_collision"
-    elif mode in {"section_aware", "section"}:
+    if mode in {"section_aware", "section"}:
         desired = "section"
     elif mode in {"preserve_ranks", "rank"}:
         desired = "rank"
     else:
         desired = mode
     return next((candidate.positions for candidate in candidates if candidate.key == desired), candidates[0].positions)
+
+
+def collision_aware_assignment_for_project(
+    project: DrillProject,
+    set_index: int,
+    dot_ids: list[str],
+    targets: list[Point],
+    *,
+    min_spacing: float = 1.25,
+    max_yards_per_count: float = 4.0,
+    initial_assignments: list[list[int]] | None = None,
+) -> list[int]:
+    starts_by_id = transition_start_positions(project, set_index)
+    starts = [starts_by_id.get(dot_id, targets[index]) for index, dot_id in enumerate(dot_ids)]
+    windows, durations, obstacles = collision_motion_context(project, set_index, dot_ids)
+    return collision_aware_target_assignment(
+        starts,
+        targets,
+        min_spacing=min_spacing,
+        motion_windows=windows,
+        move_durations=durations,
+        max_yards_per_count=max_yards_per_count,
+        transition=project.sets[set_index].transition.value if 0 <= set_index < len(project.sets) else "linear",
+        obstacles=obstacles,
+        initial_assignments=initial_assignments,
+    )
+
+
+def project_assignment_quality(
+    project: DrillProject,
+    set_index: int,
+    dot_ids: list[str],
+    targets: list[Point],
+    assignment: list[int],
+    *,
+    min_spacing: float = 1.25,
+    max_yards_per_count: float = 4.0,
+) -> AssignmentQuality:
+    starts_by_id = transition_start_positions(project, set_index)
+    starts = [starts_by_id.get(dot_id, targets[index]) for index, dot_id in enumerate(dot_ids)]
+    windows, durations, obstacles = collision_motion_context(project, set_index, dot_ids)
+    return evaluate_assignment_quality(
+        starts,
+        targets,
+        assignment,
+        min_spacing=min_spacing,
+        motion_windows=windows,
+        move_durations=durations,
+        max_yards_per_count=max_yards_per_count,
+        transition=project.sets[set_index].transition.value if 0 <= set_index < len(project.sets) else "linear",
+        obstacles=obstacles,
+    )
+
+
+def collision_motion_context(
+    project: DrillProject,
+    set_index: int,
+    dot_ids: list[str],
+) -> tuple[list[tuple[float, float]], list[float], list[tuple[Point, Point, tuple[float, float]]]]:
+    if not project.sets or not 0 <= set_index < len(project.sets):
+        return [(0.0, 1.0)] * len(dot_ids), [999.0] * len(dot_ids), []
+    drill_set = project.sets[set_index]
+    set_start = float(drill_set.start_count)
+    set_end = float(drill_set.end_count)
+    set_span = max(0.0001, set_end - set_start)
+    starts_by_id = transition_start_positions(project, set_index)
+    ends_by_id = drill_set.dot_positions
+
+    def normalized_window(dot_id: str) -> tuple[tuple[float, float], float]:
+        move_start, move_end = motion_window_for_dot(drill_set, dot_id)
+        return (
+            (
+                max(0.0, min(1.0, (move_start - set_start) / set_span)),
+                max(0.0, min(1.0, (move_end - set_start) / set_span)),
+            ),
+            max(0.0001, move_end - move_start),
+        )
+
+    windows: list[tuple[float, float]] = []
+    durations: list[float] = []
+    for dot_id in dot_ids:
+        window, duration = normalized_window(dot_id)
+        windows.append(window)
+        durations.append(duration)
+
+    selected = set(dot_ids)
+    obstacles: list[tuple[Point, Point, tuple[float, float]]] = []
+    for dot in project.dots:
+        if dot.id in selected:
+            continue
+        start = starts_by_id.get(dot.id, (dot.x, dot.y))
+        end = ends_by_id.get(dot.id, start)
+        window, _duration = normalized_window(dot.id)
+        obstacles.append((start, end, window))
+    return windows, durations, obstacles
 
 
 def grouped_assignment(

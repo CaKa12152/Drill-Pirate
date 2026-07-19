@@ -17,7 +17,8 @@ from PySide6.QtGui import QColor, QFont, QFontDatabase, QImage, QPageLayout, QPa
 
 from drill_writer.core.analysis import detect_path_warnings
 from drill_writer.core.animation import interpolate_dot_facings, interpolate_project, interpolate_props, motion_window_for_dot
-from drill_writer.core.coordinates import format_drill_coordinate
+from drill_writer.core.coordinates import format_surface_coordinate
+from drill_writer.core.design_tools import continuity_for_dot, continuity_summary
 from drill_writer.core.models import DrillProject
 from drill_writer.core.project_io import BACKUP_DIR_NAME, save_project
 from drill_writer.ui.field_view import FieldView
@@ -200,7 +201,8 @@ def draw_field_panel(
     caption: str = "",
 ) -> None:
     field_rect = panel_rect.adjusted(10, 10, -10, -28 if caption else -10)
-    field_aspect = 120 / 53.333
+    surface = field_view.surface_definition()
+    field_aspect = surface.width_yards / surface.height_yards
     target_width = field_rect.width()
     target_height = target_width / field_aspect
     if target_height > field_rect.height():
@@ -295,10 +297,16 @@ def movement_style_export_label(style: object) -> str:
 def move_instruction_export_label(drill_set, dot_id: str) -> str:
     style = movement_style_export_label(drill_set.movement_styles.get(dot_id))
     move_start, move_end = motion_window_for_dot(drill_set, dot_id)
-    if abs(move_start - float(drill_set.start_count)) < 0.0001 and abs(move_end - float(drill_set.end_count)) < 0.0001:
-        return style
-    timing = f"Move {move_start:g}-{move_end:g}"
-    return timing if style == "Normal" else f"{style}; {timing}"
+    parts: list[str] = []
+    if abs(move_start - float(drill_set.start_count)) >= 0.0001 or abs(move_end - float(drill_set.end_count)) >= 0.0001:
+        parts.append(f"Move {move_start:g}-{move_end:g}")
+    if style != "Normal":
+        parts.append(style)
+    for instruction in continuity_for_dot(drill_set.continuity, dot_id):
+        parts.append(
+            f"{instruction.start_count:g}-{instruction.end_count:g}: {continuity_summary(instruction)}"
+        )
+    return "; ".join(parts) or "Normal"
 
 
 def filtered_dots(project: DrillProject, options: PrintTemplateOptions | None = None):
@@ -327,11 +335,12 @@ def set_export_prop_states(project: DrillProject, set_index: int) -> dict[str, d
 
 
 def field_scene_source(field_view: FieldView) -> QRectF:
+    surface = field_view.surface_definition()
     return QRectF(
-        -60 * field_view.scale_factor,
-        -26.6665 * field_view.scale_factor,
-        120 * field_view.scale_factor,
-        53.333 * field_view.scale_factor,
+        -surface.half_width * field_view.scale_factor,
+        -surface.half_height * field_view.scale_factor,
+        surface.width_yards * field_view.scale_factor,
+        surface.height_yards * field_view.scale_factor,
     )
 
 
@@ -471,7 +480,7 @@ def export_dot_book_pdf(
             rows: list[list[str]] = []
             for set_index, drill_set in enumerate(project.sets):
                 x, y = export_positions_by_set[set_index].get(dot.id, (dot.x, dot.y))
-                yard_text, hash_text = format_drill_coordinate(x, y)
+                yard_text, hash_text = format_surface_coordinate(project.surface, x, y)
                 rows.append(
                     [
                         drill_set.name,
@@ -513,9 +522,9 @@ def export_dot_book_pdf(
                 widths = [
                     table_width * 0.16,
                     table_width * 0.10,
-                    table_width * 0.25,
-                    table_width * 0.25,
-                    table_width * 0.12,
+                    table_width * 0.21,
+                    table_width * 0.21,
+                    table_width * 0.20,
                     table_width * 0.12,
                 ]
                 draw_clean_table(painter, table_rect, headers, rows, widths, row_height=24 if options.compact else 30)
@@ -712,13 +721,14 @@ def export_coordinate_csv(output_path: Path, project: DrillProject) -> None:
                 "movement_style",
                 "move_start_count",
                 "move_end_count",
+                "continuity",
                 "transition",
             ]
         )
         for dot in project.dots:
             for set_index, drill_set in enumerate(project.sets):
                 x, y = export_positions_by_set[set_index].get(dot.id, (dot.x, dot.y))
-                yard_text, hash_text = format_drill_coordinate(x, y)
+                yard_text, hash_text = format_surface_coordinate(project.surface, x, y)
                 move_start, move_end = motion_window_for_dot(drill_set, dot.id)
                 facing = export_facings_by_set[set_index].get(dot.id, 0.0)
                 writer.writerow(
@@ -742,6 +752,10 @@ def export_coordinate_csv(output_path: Path, project: DrillProject) -> None:
                         movement_style_export_label(drill_set.movement_styles.get(dot.id)),
                         f"{move_start:g}",
                         f"{move_end:g}",
+                        " | ".join(
+                            f"{instruction.start_count:g}-{instruction.end_count:g}: {continuity_summary(instruction)}"
+                            for instruction in continuity_for_dot(drill_set.continuity, dot.id)
+                        ),
                         drill_set.transition.value,
                     ]
                 )
@@ -766,7 +780,7 @@ def export_coordinate_summary_pdf(
     for set_index, drill_set in enumerate(project.sets):
         for dot in dots:
             x, y = export_positions_by_set[set_index].get(dot.id, (dot.x, dot.y))
-            yard_text, hash_text = format_drill_coordinate(x, y)
+            yard_text, hash_text = format_surface_coordinate(project.surface, x, y)
             rows.append(
                 [
                     drill_set.name,

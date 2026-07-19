@@ -46,6 +46,8 @@ Ctrl+Shift+P
 | Rehearse Workspace | `Ctrl+Alt+3` |
 | Print Workspace | `Ctrl+Alt+4` |
 | Focus Field | `Ctrl+Alt+5` |
+| Music Design Workspace | `Ctrl+Alt+6` |
+| Specialized Design Workspace | `Ctrl+Alt+7` |
 
 ## Roster and Sets
 
@@ -54,6 +56,7 @@ Ctrl+Shift+P
 | Add Marcher | `Ctrl+M` |
 | Delete Selected | `Del` |
 | Import Prop Image | `Ctrl+Alt+I` |
+| Open Specialized Design Studio | `Ctrl+Shift+F12` |
 | Add Set | `Ctrl+Alt+S` |
 | Remove Set | `Ctrl+Alt+Backspace` |
 | Copy Current Set | `Ctrl+Alt+C` |
@@ -113,10 +116,16 @@ Ctrl+Shift+P
 | --- | --- |
 | Toggle Snap Align | `Ctrl+Alt+N` |
 | Analyze Paths | `Ctrl+Alt+A` |
-| Auto Plan Selected Paths | `Ctrl+Alt+R` |
+| Optimize Selected Spot Assignment | `Ctrl+Alt+R` |
 | Clear Selected Paths | `Ctrl+Alt+Shift+R` |
 | Set Count Keyframe | `Ctrl+Alt+K` |
-| Follow-Leader Conveyor | `Ctrl+Alt+F` |
+| Follow the Leader | `Ctrl+Alt+F` |
+| Group Motion Ribbon | `Ctrl+Shift+F1` |
+| Edit Group Path Handles | `Ctrl+Shift+F2` |
+| Continuity Designer | `Ctrl+Shift+F3` |
+| Construction Guides | `Ctrl+Shift+F4` |
+| CAD Path Toolkit | `Ctrl+Shift+F5` |
+| Formation Morph | `Ctrl+Shift+F12` |
 | Fit Form to Selected Prop | `Ctrl+Alt+Shift+X` |
 | Smart Transition Composer | `Ctrl+Alt+Shift+C` |
 | Section-Aware Form Fit | `Ctrl+Alt+Shift+J` |

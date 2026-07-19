@@ -141,6 +141,7 @@ Stores every set and all set-specific positions/timing/path data.
       "path_anchors": {},
       "path_controls": {},
       "count_positions": {},
+      "count_facings": {},
       "move_timings": {
         "dot001": {
           "start": 5.0,
@@ -148,6 +149,8 @@ Stores every set and all set-specific positions/timing/path data.
         }
       },
       "movement_styles": {},
+      "continuity": [],
+      "motion_ribbons": [],
       "transition": "linear"
     }
   ]
@@ -168,8 +171,11 @@ Set fields:
 | `path_anchors` | Red path anchor points per performer. |
 | `path_controls` | Bezier tangent control data per performer. |
 | `count_positions` | Per-count keyframe overrides. |
+| `count_facings` | Per-count facing keyframes used for turning visuals and direction-of-travel facing. |
 | `move_timings` | Optional per-performer movement windows inside the set. Omitted performers move for the full set. |
 | `movement_styles` | Set-specific movement style metadata. |
+| `continuity` | Count-ranged performer instructions for step size, travel direction, body/horn facing, and written notes. |
+| `motion_ribbons` | Shared Bézier route nodes, member IDs, facing behavior, and sampling precision for group transitions. |
 | `transition` | `linear`, `ease_in_out`, or `curved`. |
 
 ## `show.json`
@@ -179,8 +185,8 @@ Stores show-level data that does not belong to only one set.
 ```json
 {
   "title": "My Show",
-  "version": 2,
-  "schema_version": 2,
+  "version": 6,
+  "schema_version": 6,
   "markers": [
     {
       "count": 12.0,
@@ -195,6 +201,10 @@ Stores show-level data that does not belong to only one set.
       "active": true
     }
   ],
+  "guides": [],
+  "imported_score": null,
+  "music_phrases": [],
+  "storyboard": [],
   "timing_events": [
     {
       "event_type": "anchor",
@@ -211,14 +221,41 @@ Stores show-level data that does not belong to only one set.
 
 Timing event types include anchors, tempo changes, ritardandos, fermatas, and pickup-related timing data.
 
+Music-design fields:
+
+| Field | Meaning |
+| --- | --- |
+| `imported_score` | MusicXML/MIDI source metadata, measures, meter, tempo changes, rehearsal marks, and import warnings. |
+| `music_phrases` | Editable phrase ranges, measure references, intensity, rehearsal marks, and design notes. |
+| `storyboard` | Production scenes with count ranges, movement names, visual pacing, notes, and colors. |
+
+Specialized-design fields:
+
+| Field | Meaning |
+| --- | --- |
+| `surface` | Surface type, dimensions, hash/grid configuration, route points, colors, and marking toggles. |
+| `choreography` | Count-ranged performer choreography, tosses, equipment changes, and production notes. |
+| `prop_attachments` | Count-ranged carry/push/rotate relationships between props and performers. |
+| `physical_limits` | Performer-specific movement, turn, toss, recovery, and prop-carry overrides. |
+
+## Large-Show Workflow Data
+
+Large-show features are stored in the backward-compatible `workflow` object in `show.json`. Current keys include:
+
+- `hierarchical_groups`: nested group records with parent IDs, marcher IDs, and lock state.
+- `linked_formations`: master/instance group relationships and repeated/mirrored mode.
+- `formation_variations`: named set snapshots containing positions, facings, paths, timing windows, and movement styles.
+
+These records do not replace the canonical marcher or set data. Detaching a linked formation only disables future propagation; it does not move marchers or delete coordinates.
+
 ## Schema Version
 
 Drill Pirate writes the current project schema into `show.json`.
 
 ```json
 {
-  "version": 2,
-  "schema_version": 2
+  "version": 6,
+  "schema_version": 6
 }
 ```
 

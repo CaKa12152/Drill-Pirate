@@ -34,7 +34,7 @@ This page is a full reference of the major Drill Pirate features currently repre
 | Feature | Description |
 | --- | --- |
 | Dockable panels | Tools, inspector, list, and timeline panels can dock, float, close, and reattach. |
-| Workspace presets | Design, Forms, Rehearse, Print, and Focus Field layouts, with Focus Field keeping condensed panels visible. |
+| Workspace presets | Design, Forms, Rehearse, Print, Focus Field, Music, and Specialized layouts, with Focus Field keeping condensed panels visible. |
 | Command palette | Search and run commands from the keyboard. |
 | Shortcut editor | Search commands and assign custom keyboard shortcuts. |
 | Dark/light/custom themes | Switch themes and customize app background, panels, inputs, buttons, text, borders, accent, selection, and font size. |
@@ -53,6 +53,8 @@ This page is a full reference of the major Drill Pirate features currently repre
 | Drill coordinates | Converts internal coordinates to performer-readable drill sheet language. |
 | Selection overlays | Shows selected performers, ghosts, previews, paths, and handles. |
 | Prop rendering | Displays scalable imported prop images. |
+| Custom performance surfaces | Uses project-defined football fields, college/high-school/custom hashes, indoor floors, staging surfaces, and parade routes. |
+| Surface-aware coordinates | Football projects use yardline/hash language; indoor and staging projects use centered X/Y; parade projects use station and route-side offset. |
 
 ## Marchers
 
@@ -86,6 +88,21 @@ This page is a full reference of the major Drill Pirate features currently repre
 | Set-based prop movement | Props store per-set state like marchers. |
 | Preview/export support | Props appear in home previews and printed field images. |
 | Fit form to prop | Scales selected marchers to fit the selected prop footprint. |
+| Performer prop attachments | Links props to selected performers over count ranges for carrying, pushing, and rotating, including direction-of-travel rotation. |
+
+## Specialized Design
+
+| Feature | Description |
+| --- | --- |
+| Specialized workspace | Dedicated compact launcher and four-page studio under `Tools > Specialized Design`. |
+| Surface presets | College football, high-school football, indoor floor, parade route, and staging presets with custom dimensions, grids, colors, and markings. |
+| Parade route editor | Editable and reorderable route control points plus a configurable route corridor. |
+| Guard choreography tracks | Count-based choreography, toss, spin, dance/body, and equipment-change events for one or many performers. |
+| Choreography timeline | Dedicated bottom timeline and studio lane view with a live count playhead. |
+| Prop attachments | Carry, push, or rotate props with performer groups, a leader/handle, local offsets, and rotation behavior. |
+| Instrument-aware limits | Default profiles for general performers, low brass, tubas/sousaphones, battery, and guard. |
+| Performer overrides | Per-performer travel, backward, lateral, turn-rate, toss, recovery, and prop-carry limits. |
+| Specialized warnings | Detects physical-limit violations, toss/recovery risk, movement outside the surface, and parade-route departures. |
 
 ## Selection
 
@@ -130,6 +147,19 @@ This page is a full reference of the major Drill Pirate features currently repre
 | Reload audio | Re-run audio load/waveform analysis. |
 | Audio devices | Choose Windows Default or a specific connected output. |
 
+## Music and Show Design
+
+| Feature | Description |
+| --- | --- |
+| MusicXML/MXL import | Imports score titles, composers, written measures, pickups, meter changes, tempos, rehearsal marks, and structural barlines. |
+| MIDI import | Imports standard MIDI format 0/1 tempo maps, time signatures, markers, cue points, and generated measures without requiring Python plugins or external software. |
+| Phrase detection | Uses rehearsal marks, meter changes, barlines, and configurable measure grouping to create editable musical phrases. |
+| Phrase set planner | Generates count-accurate multi-set plans aligned to measure endings while preserving existing authored forms by default. |
+| Transition planning | Offers preserve, gentle, dynamic, and maximum-response profiles; authored transitions are protected when meaningful travel already exists. |
+| Storyboard | Stores scenes, movements, count ranges, visual pacing, production notes, and color coding independently of performers. |
+| Automated suggestions | Compares phrase intensity and rehearsal structure with existing form travel, then explains recommended holds, impacts, expansions, rotations, or preserved transitions. |
+| Score timing synchronization | Adds score-derived tempo, meter, and rehearsal markers idempotently to the project timing map. |
+
 ## Formation Tools
 
 | Tool | Description |
@@ -158,15 +188,20 @@ This page is a full reference of the major Drill Pirate features currently repre
 | Live previews | Formation tools show ghosts and travel lines before applying. |
 | Contextual controls | Only the active tool's settings are shown. |
 | On-field handles | Drag tool handles directly on the field when supported. |
-| Stable dot ordering | Tools try to preserve local selected order to avoid chaotic remapping. |
-| Deterministic assignment | Ordered form tools preserve performer order and rotate/reverse closed shapes to minimize travel. |
+| Stable identity transforms | Scale, rotate, warp, and mirror keep each performer attached to the transformed version of their own spot. |
+| Collision-safe generated forms | Lines, arcs, curves, shapes, scatter layouts, SVG imports, and list-based plugin forms globally reassign performers while preserving the exact target coordinate set. |
 | Assignment strategies | Choose automatic, shortest travel, section-aware, rank/file preserving, clockwise, counterclockwise, follow-leader, or lowest-conflict matching. |
 | Smart transition composer | Compare complete assignment candidates with total travel, longest move, crossing, spacing, and weighted conflict scores before applying. |
 | Section-aware fitting | Keeps sections and ranks spatially related while assigning performers to SVG and complex-form targets. |
 | Global SVG assignment | SVG imports use global minimum-distance matching so one nearby dot does not steal another dot's best target. |
 | Center selected | Moves selected formation to the field center. |
 | Rotate selected | Rotates selected form as a group. |
-| Follow-leader conveyor | Builds ordered motion around an outline instead of direct cross-form travel. |
+| Follow the Leader | Builds fixed-spacing shared-route motion for open lines, closed loops, SVG/plugin forms, rows, files, or sections, with smooth/sharp complex turns, forward/reverse travel, sub-count path keys, and optional direction-of-travel facing. |
+| Group Motion Ribbon | Edits an entire rank or section as one curved ribbon with shared on-field Bézier nodes/tangents, parallel lane previews, synchronized sub-count paths, and optional travel-facing. |
+| Formation Morph | Blends forms while preserving exact endpoints, section/rank relationships, intervals, and neighboring structure. |
+| Continuity Designer | Assigns step size, direction, slide/crab/backward/mark-time/halt/visual instructions, body/horn facing, and written notes by count range. |
+| Construction Guides | Adds persistent draggable lines, circles, arcs, centers, diagonals, grids, rulers, and collision-aware no-go regions. |
+| CAD Path Toolkit | Joins, splits, trims, extends, offsets, simplifies, smooths, reverses, and fillets guides, ribbons, or marcher paths. |
 | Fit to prop | Scales selected formation to a selected prop footprint. |
 | Opening positions | Capture the current field view as the Set 1 starting form without changing Set 1 endpoints. |
 | Quick workflow | Select same section, invert selection, select moving marchers, copy sets, and carry selected dots forward. |
@@ -197,7 +232,7 @@ This page is a full reference of the major Drill Pirate features currently repre
 | Path analysis | Warns for close spacing, crossing paths, and high travel speed. |
 | Conflict timeline | Samples counts through each transition and summarizes conflict-heavy moments. |
 | Large-show crossings | Crossing checks run on shows up to the 400+ dot range with segment broad-phase filtering. |
-| Auto-plan paths | Adds basic anchors for selected paths; results should be reviewed. |
+| Collision-safe spot assignment | Preserves the exact destination picture while globally reassigning marchers to its spots using synchronized spacing, crossing, speed, movement-window, and obstacle costs. It does not add path bends. |
 
 ## Visibility and Large Shows
 
@@ -284,7 +319,7 @@ This page is a full reference of the major Drill Pirate features currently repre
 
 ## Current Alpha Limits
 
-- Auto-planning is not yet a full multi-performer collision-avoidance solver.
+- Collision-safe assignment optimizes fixed destination pictures; manually authored Bezier routes remain user-controlled and are validated by path analysis rather than automatically rewritten.
 - Constraint tools are useful but not equivalent to commercial CAD-style constraint solving.
 - Movement styles are set metadata and printed communication; they are not yet a full biomechanics engine.
 - Printed packets exist but still need deeper customization for different staff/performer formats.

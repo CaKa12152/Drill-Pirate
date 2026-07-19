@@ -228,4 +228,8 @@ def describe_timing_event(event: TimingEvent) -> str:
         return f"Fermata {event.milliseconds / 1000:.2f}s at count {event.count:g}"
     if event.event_type == "pickup":
         return f"Pickup offset {event.milliseconds / 1000:.2f}s"
+    if event.event_type == "meter":
+        return event.label or f"Meter change at count {event.count:g}"
+    if event.label:
+        return f"{event.label} at count {event.count:g}"
     return f"{event.event_type} at count {event.count:g}"

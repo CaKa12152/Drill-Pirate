@@ -542,7 +542,8 @@ class ConflictHeatmapWidget(QWidget):
         if entry:
             self.setToolTip(
                 f"Count {entry.count:.2f}: {entry.total} conflicts — spacing {entry.spacing_conflicts}, "
-                f"speed {entry.speed_conflicts}, crossings {entry.crossing_conflicts}"
+                f"speed {entry.speed_conflicts}, crossings {entry.crossing_conflicts}, "
+                f"no-go {entry.no_go_conflicts}"
             )
         super().mouseMoveEvent(event)
 
