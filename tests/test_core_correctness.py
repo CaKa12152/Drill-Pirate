@@ -9,7 +9,13 @@ from pathlib import Path
 
 from drill_writer.core.analysis import auto_plan_paths, build_conflict_timeline, detect_path_warnings
 from drill_writer.core.animation import interpolate_dot_facings, interpolate_project
-from drill_writer.core.assignment import minimum_cost_target_assignment, ordered_targets
+from drill_writer.core.assignment import (
+    collision_aware_target_assignment,
+    evaluate_assignment_quality,
+    minimum_cost_target_assignment,
+    minimum_synchronous_distance,
+    ordered_targets,
+)
 from drill_writer.core.constraints import make_relative_metadata, solve_constraints
 from drill_writer.core.coordinates import BACK_HASH_YARDS, FRONT_HASH_YARDS, format_drill_coordinate
 from drill_writer.core.diagnostics import export_bug_report_bundle
@@ -30,7 +36,7 @@ from drill_writer.core.project_io import (
 from drill_writer.core.tools import bezier_curve_positions, circle_positions, distance, elliptical_arc_positions, freeform_curve_positions, path_length, rectangle_positions, sampled_spline_path, solid_paths_positions, star_positions, warped_positions
 from drill_writer.core.timing import audio_ms_for_set_count, set_count_for_audio_ms, set_index_for_count
 from drill_writer.core.updater import ReleaseAsset, checksum_asset_urls, choose_windows_asset, verify_downloaded_asset, write_windows_zip_update_script
-from drill_writer.core.workflow import TransformParameters, generate_sets_from_markers, ripple_set_indices, transform_positions, transition_candidates
+from drill_writer.core.workflow import TransformParameters, assignment_for_mode, generate_sets_from_markers, ripple_set_indices, transform_positions, transition_candidates
 from drill_writer.core.large_show import (
     CleanupOptions,
     cleanup_formation,
@@ -60,6 +66,130 @@ class CoordinateAuditTests(unittest.TestCase):
         )
         self.assertEqual(format_drill_coordinate(0, -25), ("On 50", "2.75 steps behind FS"))
         self.assertEqual(format_drill_coordinate(0, 3), ("On 50", "4.75 steps behind Mid"))
+
+
+class CollisionAwareAssignmentTests(unittest.TestCase):
+    def test_reassigns_crossing_transition_without_changing_target_picture(self) -> None:
+        starts = [(-5.0, -1.0), (-5.0, 1.0)]
+        targets = [(5.0, 1.0), (5.0, -1.0)]
+        assignment = collision_aware_target_assignment(starts, targets, move_durations=[8.0, 8.0])
+        before = evaluate_assignment_quality(starts, targets, [0, 1], move_durations=[8.0, 8.0])
+        after = evaluate_assignment_quality(starts, targets, assignment, move_durations=[8.0, 8.0])
+        self.assertEqual(assignment, [1, 0])
+        self.assertEqual(after.collisions, 0)
+        self.assertLess(after.collisions, before.collisions)
+        self.assertCountEqual([targets[index] for index in assignment], targets)
+
+    def test_staggered_crossing_is_not_misreported_as_a_collision(self) -> None:
+        closest = minimum_synchronous_distance(
+            (-5.0, 0.0),
+            (5.0, 0.0),
+            (0.0, 0.45),
+            (0.0, -5.0),
+            (0.0, 5.0),
+            (0.55, 1.0),
+        )
+        self.assertGreater(closest, 1.25)
+
+    def test_eased_staggered_timing_uses_playback_curve(self) -> None:
+        first_start = (-5.3779, 0.2743)
+        first_target = (6.0805, 5.6914)
+        second_start = (-1.9606, -7.3131)
+        second_target = (-5.6339, 5.6678)
+        first_window = (0.3883, 0.7937)
+        second_window = (0.3665, 0.5635)
+        linear = minimum_synchronous_distance(
+            first_start,
+            first_target,
+            first_window,
+            second_start,
+            second_target,
+            second_window,
+            "linear",
+        )
+        eased = minimum_synchronous_distance(
+            first_start,
+            first_target,
+            first_window,
+            second_start,
+            second_target,
+            second_window,
+            "ease_in_out",
+        )
+        self.assertGreater(linear, 1.25)
+        self.assertLess(eased, 1.25)
+
+    def test_stationary_obstacle_changes_destination_ownership(self) -> None:
+        starts = [(-5.0, -3.0), (-5.0, 3.0)]
+        targets = [(5.0, -3.0), (5.0, 3.0)]
+        windows = [(0.0, 0.45), (0.55, 1.0)]
+        obstacles = [((0.0, -3.0), (0.0, -3.0), (0.0, 1.0))]
+        assignment = collision_aware_target_assignment(
+            starts,
+            targets,
+            motion_windows=windows,
+            move_durations=[4.0, 4.0],
+            obstacles=obstacles,
+        )
+        before = evaluate_assignment_quality(
+            starts,
+            targets,
+            [0, 1],
+            motion_windows=windows,
+            move_durations=[4.0, 4.0],
+            obstacles=obstacles,
+        )
+        after = evaluate_assignment_quality(
+            starts,
+            targets,
+            assignment,
+            motion_windows=windows,
+            move_durations=[4.0, 4.0],
+            obstacles=obstacles,
+        )
+        self.assertLess(after.collisions, before.collisions)
+        self.assertCountEqual([targets[index] for index in assignment], targets)
+
+    def test_dense_form_assignment_preserves_all_slots_and_reduces_conflicts(self) -> None:
+        count = 120
+        columns = 12
+        starts = [
+            ((index % columns - columns / 2) * 1.7, (index // columns - 5) * 1.7)
+            for index in range(count)
+        ]
+        targets = rectangle_positions(count, (8.0, 2.0), 46.0, 18.0, filled=True)
+        baseline = list(range(count))
+        assignment = collision_aware_target_assignment(
+            starts,
+            targets,
+            move_durations=[16.0] * count,
+        )
+        before = evaluate_assignment_quality(starts, targets, baseline, move_durations=[16.0] * count)
+        after = evaluate_assignment_quality(starts, targets, assignment, move_durations=[16.0] * count)
+        self.assertLessEqual(after.collisions, before.collisions)
+        self.assertEqual(after.collisions, 0)
+        self.assertCountEqual([targets[index] for index in assignment], targets)
+
+    def test_project_assignment_does_not_edit_manual_paths(self) -> None:
+        dots = [Dot("a", "A", -5.0, -1.0), Dot("b", "B", -5.0, 1.0)]
+        drill_set = DrillSet(
+            "Set 1",
+            1,
+            8,
+            dot_positions={"a": (5.0, 1.0), "b": (5.0, -1.0)},
+            path_anchors={"a": [(0.0, 4.0)]},
+        )
+        project = DrillProject(ProjectMetadata("Collision Test", 160, 8, "4/4"), dots=dots, sets=[drill_set])
+        before_paths = json.dumps(drill_set.path_anchors, sort_keys=True)
+        positions = assignment_for_mode(
+            project,
+            0,
+            ["a", "b"],
+            [(5.0, 1.0), (5.0, -1.0)],
+            "lowest_collision",
+        )
+        self.assertCountEqual(positions.values(), [(5.0, 1.0), (5.0, -1.0)])
+        self.assertEqual(json.dumps(drill_set.path_anchors, sort_keys=True), before_paths)
 
 
 class ExportEncoderTests(unittest.TestCase):

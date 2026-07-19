@@ -1,188 +1,155 @@
-# Roadmap and Production-Readiness Notes
+# Drill Pirate Roadmap
 
-Drill Pirate is an alpha application. It has a working editing/export foundation, but commercial drill-writing software needs more depth in several areas.
+Drill Pirate is currently **Alpha v2.7.0**. It already supports complete show creation, advanced formation design, synchronized playback, specialized performance tracking, printing, video export, plugins, project recovery, and in-app updates. The remaining roadmap focuses on reliability, validation, collaboration, and release operations rather than adding disconnected tools.
 
-## Highest Priority
+## Current Product Baseline
 
-### Collision Avoidance
+### Design and Motion
 
-Current state:
+- Set-based and per-count performer movement with editable movement windows.
+- Lines, curves, arcs, circles, blocks, polygons, stars, spirals, scatter forms, SVG forms, and plugin-provided forms.
+- Unified transform controls, rotation, scaling, warping, mirroring, arrays, parallel forms, rank/file generation, and live symmetry.
+- Group Motion Ribbons, shared path handles, Formation Morph, and a CAD path toolkit.
+- Follow the Leader across open paths, closed forms, corners, curves, and complex outlines, with optional direction-of-travel facing.
+- Global destination assignment that preserves the target formation while minimizing travel, spacing conflicts, crossings, and unnecessary performer swaps.
+- Collision, crossing-path, travel-speed, stride, and performer-limit analysis with timeline warnings.
+- Constraints for lines, arcs, blocks, pivots, intervals, sections, and neighboring relationships.
+- Construction guides, measurement overlays, annotations, no-go regions, and reference layers.
 
-- Path analysis warns about close spacing, crossing paths, high travel speed, and sampled conflict timeline counts.
-- Generated forms use global collision-safe destination ownership while preserving the exact target coordinate set.
-- Assignment evaluates synchronized minimum spacing, crossing risk, speed, per-marcher movement windows, and unselected marcher obstacles.
-- A 400-marcher assignment uses a scalable auction solver and cached interactive results.
+### Music and Show Planning
 
-Remaining depth:
+- Audio-clock playback, waveform scrubbing, hit markers, tempo events, ritardandos, fermatas, pickup offsets, and multiple audio versions.
+- MusicXML and MIDI import with measures, tempos, and rehearsal marks.
+- Phrase-based set generation, automated set suggestions, and transition planning.
+- Storyboard planning for movements, scenes, production notes, and visual pacing.
+- Continuity instructions, movement style, facing, horn direction, choreography, and equipment events by count range.
 
-- Better validation and editing assistance for manually authored Bezier routes.
-- Clearer suggested fixes when fixed start and destination pictures make a conflict mathematically unavoidable.
-- Biomechanical stride and direction-change modeling beyond yards-per-count warnings.
+### Specialized Production
 
-### Intelligent Path Planning
+- Configurable football fields, high-school and college hashes, indoor floors, parade routes, and custom staging surfaces.
+- Guard equipment and choreography tracks, including tosses and equipment changes.
+- Movable props, performer attachments, carrying/pushing/rotation behavior, and an in-app prop designer.
+- Front ensemble and drum-major stand placement.
+- Performer-specific physical limits and instrument-aware movement warnings.
 
-Current state:
+### Workflow and Interface
 
-- Ordered formation tools preserve performer order and closed forms rotate/reverse targets to reduce travel.
-- Users can add anchors and Bezier handles.
-- Follow-leader conveyor supports ordered outline movement.
+- Responsive Home project library with search, previews, recovery cards, and plugin management.
+- Workspace profiles, detachable docks, layout reset/restore, command palette, shortcut editor, favorites, macros, and radial tools.
+- Searchable roster, selection sets, hierarchical groups, section locking, multi-set editing, bulk properties, and keyboard drill entry.
+- Responsive editor context bar, standard menu organization, workflow-ordered design pages, and dark/light themes.
+- Set thumbnails, minimap, preview cache, background analysis, and lazy project preview loading.
 
-Production target:
+### Data, Export, and Extensibility
 
-- Assignment optimization that minimizes total travel and avoids role swaps.
-- Multi-agent route planning.
-- Preserve form intervals during transitions.
-- Avoid velocity spikes.
-- Let the user choose between shortest path, section-preserving path, and follow-leader path.
+- Versioned project schemas, migrations, atomic saves, versioned autosave backups, recovery, and Restore Previous Save.
+- Crash logs and one-click bug-report bundles with project and environment diagnostics.
+- MP4 export with background progress, cancellation, quality options, audio, and optional title card.
+- Drill sheets, staff packets, section packets, dot books, coordinate summaries, CSV, project ZIP, print preview, and batch profiles.
+- Versioned plugin API, compatibility gating, trust and permission prompts, plugin isolation, examples, and diagnostics.
+- Stable/beta update channels, release notes, checksum verification, ZIP validation, failed-update rollback, and skip/ignore controls.
 
-### Playback Reliability
+## Alpha to Beta Priorities
 
-Current state:
+### P0 — Reliability and Data Confidence
 
-- Audio-backed playback, waveform scrubbing, timing-map anchors, and markers exist.
+- Add long-running playback soak tests at 200, 300, 400, and 500 performers.
+- Add fixture-based regression projects for large SVG forms, Follow the Leader, props, choreography, tempo maps, and custom surfaces.
+- Expand save/load and migration tests across every previously published project schema.
+- Stress-test autosave recovery during interrupted writes, low disk space, and damaged JSON files.
+- Add deterministic export tests for every PDF, CSV, ZIP, and MP4 profile.
+- Audit all user-facing failures so they produce actionable dialogs instead of silent failures or console-only messages.
 
-Production target:
+### P0 — Drill Correctness
 
-- More robust audio device recovery.
-- Higher-confidence frame scheduling under heavy load.
-- Better diagnostics for dropped frames.
-- Optional render cache for complex shows.
+- Improve conflict explanations when fixed start and destination pictures make a collision unavoidable.
+- Add guided repair options that preview destination swaps before applying them.
+- Strengthen validation for manually edited Bezier paths and group motion ribbons.
+- Add biomechanical turn-rate, backward-march, equipment, prop, and direction-change modeling beyond simple yards-per-count limits.
+- Audit coordinate rounding and every printed coordinate against real dot-book expectations.
+- Add reference test cases for side-to-side, front/back hash, yard-line, end-zone, indoor, and parade coordinates.
 
-## Drill-Writing Depth
+### P0 — Playback and Audio
 
-### Per-Count Editing
+- Improve frame scheduling diagnostics and expose dropped-frame counters.
+- Add automatic quality reduction or render caching when a show exceeds the real-time performance budget.
+- Expand Windows audio-device recovery testing for disconnects, default-device changes, Bluetooth latency, and device invalidation.
+- Add waveform and playback tests for long files, compressed files, variable bitrate, and unusual sample rates.
+- Verify pause, seek, loop, tempo-map changes, and set boundaries under sustained UI load.
 
-Current state:
+### P1 — User Validation
 
-- Count keyframes can store per-count positions.
+- Publish a structured Beta test plan covering creation, editing, playback, printing, updating, recovery, and plugins.
+- Add an optional first-run diagnostics check for graphics, audio output, write permissions, and FFmpeg capability.
+- Add opt-in anonymous reliability metrics or a simpler in-app test-report workflow.
+- Track reproducible issues by project schema, app version, Windows version, GPU, audio device, and plugin set.
+- Define Beta-blocking severity levels and a public known-issues list.
 
-Production target:
+## Beta Development Priorities
 
-- Full per-count editor with clearer graph/timeline visualization.
-- Per-count prop states.
-- Better continuity editing.
-- Velocity graph and easing editor.
+### Collaboration and Review
 
-### Constraint Solving
+- Add comments and review notes attached to sets, counts, performers, paths, and storyboard scenes.
+- Add project comparison and change summaries between saved versions.
+- Add safer formation, timing-map, prop, and continuity transfer between projects.
+- Explore read-only review packages for staff without the full editor.
+- Investigate optional cloud backup and team sharing without making online access mandatory.
 
-Current state:
+### Music and Rehearsal
 
-- Line, pivot, arc, and block constraints exist and apply during movement.
+- Add a dedicated beat-grid and tempo-map editor.
+- Add synchronized audio stems and stem mute/solo controls.
+- Improve automatic beat, impact, phrase, and rehearsal-mark detection.
+- Add section-only playback, performer lookup, rehearsal loops, and configurable slow-motion presets.
+- Add mobile-friendly performer charts and rehearsal packages.
 
-Production target:
+### Printing and Performer Materials
 
-- Real constraint solver.
-- Keep selected marchers in a line/arc/grid during edits.
-- Pivot constraints.
-- Maintain fixed interval while scaling/rotating.
-- Constraints visible and editable in the UI.
+- Expand template customization for headers, branding, field crop, coordinate wording, and continuity placement.
+- Add individual performer packet batching with section-specific instructions and equipment notes.
+- Add instructor packets combining conflicts, continuity, storyboard notes, and rehearsal priorities.
+- Add print-template presets that can be shared between projects and users.
+- Continue visual audits for common printers, page sizes, and duplex workflows.
 
-### Formation Library
+### Plugin Ecosystem
 
-Current state:
+- Freeze and document a Beta plugin API compatibility policy.
+- Add plugin signing metadata and publisher identity.
+- Add a curated plugin gallery with update discovery and compatibility filtering.
+- Explore stronger process isolation for untrusted or resource-intensive plugins.
+- Add automated plugin conformance tests for compiled Windows releases.
 
-- Lines, curves, arcs, circles, rectangles, spirals, blocks, scatter, mirror, SVG shapes, plugin tools.
+## Commercial-Use Requirements
 
-Production target:
+Drill Pirate should not be described as commercially production-ready until all of the following are complete:
 
-- More built-in common drill forms.
-- Letters and symbols.
-- Better SVG cleanup and corner spacing.
-- Custom shape library.
-- Reusable formation presets.
+- Signed Windows installer with repair, uninstall, rollback, and optional portable installation.
+- Automated release CI producing reproducible builds, checksums, release notes, and smoke-test results.
+- Supported upgrade path across every public project schema and release channel.
+- Documented support policy, response expectations, privacy policy, and security reporting process.
+- Formal license and third-party dependency notices included in the application and distribution.
+- Crash-free playback and editing targets established from sustained Beta usage.
+- Verified export accuracy across staff packets, performer materials, coordinate CSV, project ZIP, and MP4.
+- Accessibility pass for keyboard navigation, focus visibility, contrast, scaling, and screen readers.
+- Performance certification for defined minimum and recommended hardware.
+- A published compatibility matrix for Windows versions, audio formats, FFmpeg versions, and graphics hardware.
 
-## Music and Rehearsal
+## Longer-Term Opportunities
 
-### Audio Synchronization
+- Native macOS package after Windows reliability targets are met.
+- Tablet-focused rehearsal and performer companion experience.
+- Cloud collaboration and project history as optional services.
+- Marketplace distribution for reviewed plugins, templates, and formation libraries.
+- Hardware-accelerated field rendering and export for extremely large productions.
+- Interchange formats for other drill, music, CAD, and production-planning tools.
 
-Current state:
+## Release Discipline
 
-- Timing anchors, tempo events, ritardandos, fermatas, pickup offsets, waveform, markers, multiple audio versions.
+Every public release should:
 
-Production target:
-
-- Beat-grid editor.
-- Measure-number lane.
-- Tempo map visualization.
-- Better automatic beat/hit detection.
-- Multiple synchronized audio stems.
-
-### Rehearsal Tools
-
-Current state:
-
-- Loop current set, count finder, movement styles, markers.
-
-Production target:
-
-- Section-only playback.
-- Performer lookup mode.
-- Slow-motion presets.
-- Repeat count ranges.
-- Rehearsal notes by set and section.
-- Mobile-friendly performer charts.
-
-## Printing and Export
-
-Current state:
-
-- MP4, project ZIP, drill sheet PDF, dot book PDF, staff packet PDF, coordinate CSV.
-
-Production target:
-
-- Fully customizable dot-book templates.
-- Section-only packets.
-- Instructor packets with notes and warnings.
-- Continuity sheets.
-- Performer coordinate summaries.
-- Print preview.
-- Batch export profiles.
-
-## Plugin Ecosystem
-
-Current state:
-
-- Trusted folder plugins.
-- Python runtime bundled in the EXE.
-- Plugins can add UI, commands, styles, and custom form tools.
-
-Production target:
-
-- Versioned plugin API and compatibility warnings.
-- Permission/trust prompts for activation.
-- Plugin error isolation and diagnostics console.
-- Example plugin gallery covering form tools, themes, exports, rehearsal helpers, and panel extensions.
-- Future: plugin signing and marketplace distribution.
-- Better developer diagnostics.
-
-## Distribution and Operations
-
-Current state:
-
-- PyInstaller Windows build.
-- GitHub release updater.
-- Release-log popup.
-
-Production target:
-
-- Signed installer.
-- Auto-update rollback.
-- Crash reporting.
-- Portable and installer builds.
-- macOS package.
-- Automated release CI.
-- Regression test suite.
-
-## Commercial-Use Bar
-
-Before calling Drill Pirate commercially production-ready, the project should have:
-
-- Strong automated test coverage for project save/load.
-- Robust collision/path assignment validation.
-- Reliable playback on large shows.
-- Signed Windows installer.
-- Crash reports or diagnostic bundles.
-- Clear license file.
-- Formal support/reporting process.
-- Backward-compatible project migration tests.
-- User documentation kept in sync with releases.
+1. Update the application version and all release-facing documentation.
+2. Update this roadmap to move completed work into the product baseline.
+3. Run the full automated test suite and UI smoke tests.
+4. Launch the packaged executable and verify Home, project loading, playback, Settings, plugins, and export dialogs.
+5. Publish the release ZIP and matching SHA-256 checksum.
+6. Include a clear changelog, known issues, and tester focus areas on GitHub Releases.
