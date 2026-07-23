@@ -3,10 +3,11 @@ from __future__ import annotations
 from enum import Enum
 from math import atan2, cos, degrees, hypot, pi, radians, sin
 from pathlib import Path
+from time import perf_counter
 from typing import Callable
 
 from PySide6.QtCore import QPointF, QRectF, Qt, Signal
-from PySide6.QtGui import QAction, QColor, QFont, QPainter, QPainterPath, QPen, QPixmap, QTransform
+from PySide6.QtGui import QAction, QColor, QFont, QPainter, QPainterPath, QPen, QPixmap, QPolygonF, QTransform
 from PySide6.QtWidgets import (
     QGraphicsEllipseItem,
     QGraphicsItem,
@@ -22,11 +23,29 @@ from PySide6.QtWidgets import (
 )
 
 from drill_writer.core.design_tools import guide_measurement_label, guide_path
+from drill_writer.core.drill_grid import (
+    DrillGridSettings,
+    grid_axis_values,
+    snap_position_mapping,
+)
 from drill_writer.core.models import ConstructionGuide, Dot, DrillProject, Prop, SurfaceDefinition, prop_default_state
 from drill_writer.core.specialized_design import normalized_surface
 from drill_writer.core.tools import path_length
 from drill_writer.core.workflow import TransformParameters, selection_center, transform_positions
-from drill_writer.ui.appearance import draw_dot_symbol, generated_prop_pixmap, normalize_dot_symbol, preferred_dot_symbol
+from drill_writer.ui.appearance import (
+    FIELD_DOT_OUTLINE_YARDS,
+    FIELD_DOT_RADIUS_YARDS,
+    draw_dot_symbol,
+    generated_prop_pixmap,
+    normalize_dot_symbol,
+    preferred_dot_symbol,
+)
+from drill_writer.ui.field_logo import (
+    field_logo_dimensions_yards,
+    field_logo_enabled,
+    field_logo_opacity,
+    field_logo_pixmap,
+)
 from drill_writer.ui.theme import normalize_field_mode
 
 
@@ -57,21 +76,21 @@ class EditorTool(str, Enum):
 
 
 class DotItem(QGraphicsEllipseItem):
-    def __init__(self, dot: Dot, scale: float, symbol: str) -> None:
-        radius = 0.34 * scale
+    def __init__(self, dot: Dot, scale: float, symbol: str, label_color: str = "#1c2430") -> None:
+        radius = FIELD_DOT_RADIUS_YARDS * scale
         super().__init__(-radius, -radius, radius * 2, radius * 2)
         self.dot_id = dot.id
         self.symbol = normalize_dot_symbol(symbol)
         self.facing_degrees = 0.0
         self.scale_factor = scale
         self.setBrush(QColor(dot.color))
-        self.setPen(QPen(QColor("#1d2128"), 0.08 * scale))
+        self.setPen(QPen(QColor("#1d2128"), FIELD_DOT_OUTLINE_YARDS * scale))
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsSelectable, True)
         self.setFlag(QGraphicsItem.GraphicsItemFlag.ItemIsMovable, True)
         self.setZValue(10)
         self.label = QGraphicsTextItem(dot.name, self)
         self.label.setFont(QFont("Arial", 8))
-        self.label.setDefaultTextColor(QColor("#1c2430"))
+        self.label.setDefaultTextColor(QColor(label_color))
         self.label.setScale(0.085 * scale)
         self.label.setPos(radius + 0.08 * scale, -radius - 0.04 * scale)
 
@@ -106,12 +125,14 @@ class DotSymbolPreviewItem(QGraphicsEllipseItem):
         symbol: str,
         outline_color: QColor,
         outline_width: float,
+        rotation_degrees: float = 0.0,
     ) -> None:
         super().__init__(-radius, -radius, radius * 2, radius * 2)
         self.symbol = normalize_dot_symbol(symbol)
         self.preview_color = color
         self.outline_color = outline_color
         self.outline_width = outline_width
+        self.rotation_degrees = float(rotation_degrees)
         self.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
         self.setZValue(9)
 
@@ -122,6 +143,7 @@ class DotSymbolPreviewItem(QGraphicsEllipseItem):
             self.rect().width() / 2,
             self.preview_color,
             self.symbol,
+            rotation_degrees=self.rotation_degrees,
             outline_color=self.outline_color,
             outline_width=self.outline_width,
         )
@@ -303,7 +325,28 @@ class PathTangentItem(QGraphicsEllipseItem):
         self.setZValue(27)
 
 
+class DrillGridPointsItem(QGraphicsItem):
+    def __init__(self, points: QPolygonF, bounds: QRectF, color: QColor) -> None:
+        super().__init__()
+        self.points = points
+        self.bounds = bounds
+        self.color = color
+        self.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+        self.setZValue(-18)
+
+    def boundingRect(self) -> QRectF:  # type: ignore[override]
+        return self.bounds
+
+    def paint(self, painter: QPainter, _option, _widget=None) -> None:  # type: ignore[override]
+        pen = QPen(self.color, 1.35)
+        pen.setCosmetic(True)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        painter.setPen(pen)
+        painter.drawPoints(self.points)
+
+
 class FieldView(QGraphicsView):
+    frame_painted = Signal(float)
     selection_changed = Signal(list)
     dot_moved = Signal(str, float, float)
     dots_moved = Signal(dict)
@@ -356,8 +399,14 @@ class FieldView(QGraphicsView):
         self.show_labels = True
         self.show_ghosts = True
         self.preview_items: list[QGraphicsItem] = []
+        self.ghost_items: list[QGraphicsItem] = []
+        self._ghost_positions: dict[str, tuple[float, float]] = {}
+        self._ghost_facings: dict[str, float] = {}
         self.path_items: list[QGraphicsItem] = []
         self.snap_items: list[QGraphicsItem] = []
+        self.drill_grid_items: list[QGraphicsItem] = []
+        self.drafting_grid_items: list[QGraphicsItem] = []
+        self.drill_grid = DrillGridSettings()
         self.snap_enabled = False
         self.snap_threshold = 0.85
         self.visible_section = "All"
@@ -367,6 +416,8 @@ class FieldView(QGraphicsView):
         self.locked_dot_ids: set[str] = set()
         self.dot_symbol = preferred_dot_symbol()
         self.field_mode = "white"
+        self.show_field_logo = field_logo_enabled()
+        self.field_logo_item: QGraphicsPixmapItem | None = None
         self._formation_callback: Callable[[EditorTool], None] | None = None
         self._pan_start: QPointF | None = None
         self._drag_start_positions: dict[str, tuple[float, float]] = {}
@@ -400,8 +451,35 @@ class FieldView(QGraphicsView):
         self._lasso_points: list[QPointF] = []
         self._lasso_item: QGraphicsPathItem | None = None
         self._lasso_additive = False
+        self.playback_quality = "full"
+        self.last_paint_duration_ms = 0.0
         self.scene.selectionChanged.connect(self.update_transform_gizmo)
         self.draw_field()
+
+    def paintEvent(self, event) -> None:  # type: ignore[override]
+        started = perf_counter()
+        super().paintEvent(event)
+        self.last_paint_duration_ms = (perf_counter() - started) * 1000.0
+        self.frame_painted.emit(self.last_paint_duration_ms)
+
+    def set_playback_quality(self, quality: str, performer_count: int = 0) -> None:
+        normalized = quality if quality in {"full", "balanced", "performance"} else "full"
+        if normalized == self.playback_quality and normalized != "full":
+            return
+        self.playback_quality = normalized
+        if normalized == "full":
+            hints = QPainter.RenderHint.Antialiasing | QPainter.RenderHint.SmoothPixmapTransform
+            suppress_labels = False
+        elif normalized == "balanced":
+            hints = QPainter.RenderHint.Antialiasing
+            suppress_labels = performer_count >= 320
+        else:
+            hints = QPainter.RenderHint(0)
+            suppress_labels = performer_count >= 180
+        self.setRenderHints(hints)
+        for item in self.dot_items.values():
+            item.label.setVisible(self.show_labels and not suppress_labels)
+        self.viewport().update()
 
     def set_canvas_theme(self, mode: str) -> None:
         self.setBackgroundBrush(QColor("#eef2f7" if mode == "light" else "#111318"))
@@ -443,7 +521,43 @@ class FieldView(QGraphicsView):
                 item = self.guide_items.get(guide_id)
                 if item:
                     item.setSelected(True)
+            self.rebuild_ghosts()
         self.selection_changed.emit(self.selected_dot_ids())
+
+    def set_field_logo_visible(self, visible: bool) -> None:
+        self.show_field_logo = bool(visible)
+        if self.field_logo_item is not None:
+            self.field_logo_item.setVisible(self.show_field_logo)
+        self.viewport().update()
+
+    def refresh_field_logo(self) -> None:
+        if self.field_logo_item is not None:
+            self.scene.removeItem(self.field_logo_item)
+            self.field_logo_item = None
+        surface = self.surface_definition()
+        if surface.surface_type == "parade":
+            self.viewport().update()
+            return
+        logo = field_logo_pixmap(self.field_mode)
+        logo_width_yards, logo_height_yards = field_logo_dimensions_yards(surface, logo)
+        if logo.isNull() or logo_width_yards <= 0 or logo_height_yards <= 0:
+            self.viewport().update()
+            return
+        logo_scale = min(
+            logo_width_yards * self.scale_factor / logo.width(),
+            logo_height_yards * self.scale_factor / logo.height(),
+        )
+        self.field_logo_item = self.scene.addPixmap(logo)
+        self.field_logo_item.setTransformationMode(Qt.TransformationMode.SmoothTransformation)
+        self.field_logo_item.setScale(logo_scale)
+        self.field_logo_item.setPos(
+            -logo.width() * logo_scale / 2,
+            -logo.height() * logo_scale / 2,
+        )
+        self.field_logo_item.setOpacity(field_logo_opacity(self.field_mode))
+        self.field_logo_item.setZValue(-21)
+        self.field_logo_item.setVisible(self.show_field_logo)
+        self.viewport().update()
 
     def field_palette(self) -> dict[str, str]:
         if self.field_mode == "inverted":
@@ -463,6 +577,8 @@ class FieldView(QGraphicsView):
                 "label": "#f7f9fc",
                 "label_muted": "#d8e0ea",
                 "label_heavy": "#ffffff",
+                "performer_label": "#ffffff",
+                "tool_label": "#ffffff",
                 "bench": "#eef3f8",
             }
         if self.field_mode == "grass":
@@ -482,6 +598,8 @@ class FieldView(QGraphicsView):
                 "label": "#ffffff",
                 "label_muted": "#ecf8eb",
                 "label_heavy": "#ffffff",
+                "performer_label": "#ffffff",
+                "tool_label": "#ffffff",
                 "bench": "#f1fff0",
             }
         return {
@@ -500,6 +618,8 @@ class FieldView(QGraphicsView):
             "label": "#3f464c",
             "label_muted": "#333a40",
             "label_heavy": "#05070a",
+            "performer_label": "#1c2430",
+            "tool_label": "#111318",
             "bench": "#565f66",
         }
 
@@ -518,6 +638,7 @@ class FieldView(QGraphicsView):
         }
         self.dot_symbol = normalized
         self.rebuild_dots()
+        self.rebuild_ghosts()
         if current_positions:
             self.set_positions(current_positions)
         if current_facings:
@@ -596,6 +717,75 @@ class FieldView(QGraphicsView):
         if not enabled:
             self.clear_snap_guides()
 
+    def set_drill_grid(self, settings: DrillGridSettings) -> None:
+        self.drill_grid = DrillGridSettings.from_json(settings.to_json())
+        show_drafting_grid = not (self.drill_grid.enabled and self.drill_grid.show_overlay)
+        for item in self.drafting_grid_items:
+            item.setVisible(show_drafting_grid)
+        self.clear_drill_grid_overlay()
+        self.draw_drill_grid_overlay(self.surface_definition())
+        if not self.drill_grid.enabled:
+            self.clear_snap_guides()
+        self.viewport().update()
+
+    def clear_drill_grid_overlay(self) -> None:
+        for item in self.drill_grid_items:
+            if item.scene() is self.scene:
+                self.scene.removeItem(item)
+        self.drill_grid_items.clear()
+
+    def draw_drill_grid_overlay(self, surface: SurfaceDefinition) -> None:
+        if not self.drill_grid.enabled or not self.drill_grid.show_overlay:
+            return
+        x_values = grid_axis_values(
+            -surface.half_width,
+            surface.half_width,
+            self.drill_grid.origin_x,
+            self.drill_grid.spacing_x,
+        )
+        y_values = grid_axis_values(
+            -surface.half_height,
+            surface.half_height,
+            self.drill_grid.origin_y,
+            self.drill_grid.spacing_y,
+        )
+        if self.drill_grid.display_style == "points":
+            color = QColor("#d5b8ff" if self.field_mode in {"grass", "inverted"} else "#7651d8")
+            color.setAlpha(118 if self.field_mode in {"grass", "inverted"} else 92)
+            points = QPolygonF(
+                [self.field_to_scene(x, y) for x in x_values for y in y_values]
+            )
+            bounds = QRectF(
+                -surface.half_width * self.scale_factor,
+                -surface.half_height * self.scale_factor,
+                surface.width_yards * self.scale_factor,
+                surface.height_yards * self.scale_factor,
+            )
+            item = DrillGridPointsItem(points, bounds, color)
+            self.scene.addItem(item)
+            self.drill_grid_items.append(item)
+            return
+        vertical_path = QPainterPath()
+        horizontal_path = QPainterPath()
+        for x in x_values:
+            vertical_path.moveTo(self.field_to_scene(x, -surface.half_height))
+            vertical_path.lineTo(self.field_to_scene(x, surface.half_height))
+        for y in y_values:
+            horizontal_path.moveTo(self.field_to_scene(-surface.half_width, y))
+            horizontal_path.lineTo(self.field_to_scene(surface.half_width, y))
+
+        color = QColor("#c49cff" if self.field_mode in {"grass", "inverted"} else "#7651d8")
+        color.setAlpha(82 if self.field_mode in {"grass", "inverted"} else 64)
+        pen = QPen(color, 1.0)
+        pen.setCosmetic(True)
+        for path in (vertical_path, horizontal_path):
+            item = QGraphicsPathItem(path)
+            item.setPen(pen)
+            item.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+            item.setZValue(-18)
+            self.scene.addItem(item)
+            self.drill_grid_items.append(item)
+
     def set_locked_filters(
         self,
         sections: set[str],
@@ -649,6 +839,7 @@ class FieldView(QGraphicsView):
             section_visible = self.visible_section == "All"
             layer_visible = self.visible_layer == "All" or prop.layer == self.visible_layer
             item.setVisible(section_visible and layer_visible)
+        self.rebuild_ghosts()
 
     def set_formation_callback(self, callback: Callable[[EditorTool], None]) -> None:
         self._formation_callback = callback
@@ -680,6 +871,27 @@ class FieldView(QGraphicsView):
             if isinstance(item, ConstructionGuideItem)
         ]
 
+    def drill_grid_reference_rows(self) -> tuple[float, ...]:
+        if self.project is None or self.project.surface.surface_type != "football":
+            return ()
+        surface = self.project.surface
+        if surface.hash_style == "none":
+            return ()
+        return float(surface.front_hash_yards), float(surface.back_hash_yards)
+
+    def snap_drill_grid_point(self, point: tuple[float, float]) -> tuple[float, float]:
+        return self.drill_grid.snap_point(point, reference_y=self.drill_grid_reference_rows())
+
+    def snap_drill_grid_positions(
+        self,
+        positions: dict[str, tuple[float, float]],
+    ) -> dict[str, tuple[float, float]]:
+        return snap_position_mapping(
+            positions,
+            self.drill_grid,
+            reference_y=self.drill_grid_reference_rows(),
+        )
+
     def normalized_item(self, item: QGraphicsItem | None) -> QGraphicsItem | None:
         if isinstance(item, (QGraphicsTextItem, QGraphicsPixmapItem)) and isinstance(
             item.parentItem(),
@@ -706,6 +918,61 @@ class FieldView(QGraphicsView):
                 item.setPos(self.field_to_scene(*position))
         if self._active_transform_handle is None:
             self.update_transform_gizmo()
+
+    def set_ghosts_visible(self, visible: bool) -> None:
+        self.show_ghosts = bool(visible)
+        for item in self.ghost_items:
+            item.setVisible(self.show_ghosts)
+        if self.show_ghosts and not self.ghost_items and self._ghost_positions:
+            self.rebuild_ghosts()
+        self.viewport().update()
+
+    def set_ghost_positions(
+        self,
+        positions: dict[str, tuple[float, float]],
+        facings: dict[str, float] | None = None,
+    ) -> None:
+        self._ghost_positions = dict(positions)
+        self._ghost_facings = dict(facings or {})
+        self.rebuild_ghosts()
+
+    def clear_ghosts(self, *, reset: bool = True) -> None:
+        for item in self.ghost_items:
+            if item.scene() is self.scene:
+                self.scene.removeItem(item)
+        self.ghost_items.clear()
+        if reset:
+            self._ghost_positions.clear()
+            self._ghost_facings.clear()
+
+    def rebuild_ghosts(self) -> None:
+        self.clear_ghosts(reset=False)
+        if not self.show_ghosts or not self.project or not self._ghost_positions:
+            return
+        radius = FIELD_DOT_RADIUS_YARDS * self.scale_factor
+        outline = QColor(self.field_palette()["performer_label"])
+        outline.setAlpha(120)
+        for dot in self.project.dots:
+            position = self._ghost_positions.get(dot.id)
+            if position is None:
+                continue
+            current_item = self.dot_items.get(dot.id)
+            if current_item is not None and not current_item.isVisible():
+                continue
+            color = QColor(dot.color or "#e53935")
+            color.setAlpha(78)
+            item = DotSymbolPreviewItem(
+                radius,
+                color,
+                self.dot_symbol,
+                outline,
+                FIELD_DOT_OUTLINE_YARDS * self.scale_factor,
+                rotation_degrees=self._ghost_facings.get(dot.id, 0.0),
+            )
+            item.setPos(self.field_to_scene(*position))
+            item.setZValue(5)
+            self.scene.addItem(item)
+            self.ghost_items.append(item)
 
     def set_facings(self, facings: dict[str, float]) -> None:
         for dot_id, facing in facings.items():
@@ -872,7 +1139,7 @@ class FieldView(QGraphicsView):
         self.clear_preview()
         preview_pen = QPen(QColor("#f7d154"), 0.14 * self.scale_factor, Qt.PenStyle.DashLine)
         preview_fill = QColor(247, 209, 84, 120)
-        radius = 0.42 * self.scale_factor
+        radius = FIELD_DOT_RADIUS_YARDS * self.scale_factor
         if self.active_tool == EditorTool.LINE and len(targets) > 1:
             target_points = list(targets.values())
             span_x = max(point[0] for point in target_points) - min(point[0] for point in target_points)
@@ -900,7 +1167,7 @@ class FieldView(QGraphicsView):
                 preview_fill,
                 self.dot_symbol,
                 QColor("#fff2a6"),
-                0.12 * self.scale_factor,
+                FIELD_DOT_OUTLINE_YARDS * self.scale_factor,
             )
             target_item.setPos(self.field_to_scene(*target))
             self.scene.addItem(target_item)
@@ -933,14 +1200,14 @@ class FieldView(QGraphicsView):
             self.scene.addItem(handle)
             self.add_preview_handle_label(handle, "anchor")
             self.preview_items.append(handle)
-        radius = 0.35 * self.scale_factor
+        radius = FIELD_DOT_RADIUS_YARDS * self.scale_factor
         for target in targets.values():
             target_item = DotSymbolPreviewItem(
                 radius,
                 QColor(247, 209, 84, 130),
                 self.dot_symbol,
                 QColor("#fff2a6"),
-                0.1 * self.scale_factor,
+                FIELD_DOT_OUTLINE_YARDS * self.scale_factor,
             )
             target_item.setPos(self.field_to_scene(*target))
             self.scene.addItem(target_item)
@@ -960,14 +1227,14 @@ class FieldView(QGraphicsView):
             item.setToolTip("Shared Follow-the-Leader route")
             self.scene.addItem(item)
             self.preview_items.append(item)
-        radius = 0.35 * self.scale_factor
+        radius = FIELD_DOT_RADIUS_YARDS * self.scale_factor
         for target in targets.values():
             target_item = DotSymbolPreviewItem(
                 radius,
                 QColor(247, 209, 84, 145),
                 self.dot_symbol,
                 QColor("#fff2a6"),
-                0.1 * self.scale_factor,
+                FIELD_DOT_OUTLINE_YARDS * self.scale_factor,
             )
             target_item.setPos(self.field_to_scene(*target))
             self.scene.addItem(target_item)
@@ -1068,7 +1335,7 @@ class FieldView(QGraphicsView):
             self.scene.addItem(item)
             self.preview_items.append(item)
         preview_pen = QPen(QColor("#f7d154"), 0.12 * self.scale_factor, Qt.PenStyle.DashLine)
-        radius = 0.35 * self.scale_factor
+        radius = FIELD_DOT_RADIUS_YARDS * self.scale_factor
         for dot_id, target in targets.items():
             start = starts.get(dot_id)
             if start:
@@ -1088,7 +1355,7 @@ class FieldView(QGraphicsView):
                 QColor(247, 209, 84, 135),
                 self.dot_symbol,
                 QColor("#fff2a6"),
-                0.1 * self.scale_factor,
+                FIELD_DOT_OUTLINE_YARDS * self.scale_factor,
             )
             target_item.setPos(self.field_to_scene(*target))
             self.scene.addItem(target_item)
@@ -1114,8 +1381,8 @@ class FieldView(QGraphicsView):
             "line_end": "end",
             "curve_bend": "bend",
             "curve_start": "start",
-            "curve_control_1": "curve",
-            "curve_control_2": "curve",
+            "curve_on_1": "curve",
+            "curve_on_2": "curve",
             "curve_end": "end",
             "arc_radius": "radius",
             "arc_width": "width",
@@ -1159,8 +1426,8 @@ class FieldView(QGraphicsView):
             "line_end",
             "curve_bend",
             "curve_start",
-            "curve_control_1",
-            "curve_control_2",
+            "curve_on_1",
+            "curve_on_2",
             "curve_end",
             "arc_sweep",
             "arc_start",
@@ -1180,7 +1447,7 @@ class FieldView(QGraphicsView):
         if not text:
             return
         label = QGraphicsTextItem(text, handle)
-        label.setDefaultTextColor(QColor("#111318"))
+        label.setDefaultTextColor(QColor(self.field_palette()["tool_label"]))
         label.setFont(QFont("Arial", 8, QFont.Weight.Bold))
         label.setScale(0.085 * self.scale_factor)
         label.setPos(0.8 * self.scale_factor, -1.6 * self.scale_factor)
@@ -1239,8 +1506,12 @@ class FieldView(QGraphicsView):
 
     def update_labels(self, enabled: bool) -> None:
         self.show_labels = enabled
+        suppress_labels = self.playback_quality == "performance" and len(self.dot_items) >= 180
+        suppress_labels = suppress_labels or (
+            self.playback_quality == "balanced" and len(self.dot_items) >= 320
+        )
         for item in self.dot_items.values():
-            item.label.setVisible(enabled)
+            item.label.setVisible(enabled and not suppress_labels)
 
     def rebuild_dots(self) -> None:
         for item in self.dot_items.values():
@@ -1249,9 +1520,18 @@ class FieldView(QGraphicsView):
         if not self.project:
             return
         for dot in self.project.dots:
-            item = DotItem(dot, self.scale_factor, self.dot_symbol)
+            item = DotItem(
+                dot,
+                self.scale_factor,
+                self.dot_symbol,
+                self.field_palette()["performer_label"],
+            )
             item.setPos(self.field_to_scene(dot.x, dot.y))
-            item.label.setVisible(self.show_labels)
+            suppress_labels = self.playback_quality == "performance" and len(self.project.dots) >= 180
+            suppress_labels = suppress_labels or (
+                self.playback_quality == "balanced" and len(self.project.dots) >= 320
+            )
+            item.label.setVisible(self.show_labels and not suppress_labels)
             locked = self.dot_locked(dot.id)
             item.setFlag(
                 QGraphicsItem.GraphicsItemFlag.ItemIsMovable,
@@ -1506,12 +1786,16 @@ class FieldView(QGraphicsView):
     def draw_field(self) -> None:
         self._tool_value_item = None
         self.scene.clear()
+        self.field_logo_item = None
         self.dot_items.clear()
         self.prop_items.clear()
         self.guide_items.clear()
         self.preview_items.clear()
+        self.ghost_items.clear()
         self.path_items.clear()
         self.snap_items.clear()
+        self.drill_grid_items.clear()
+        self.drafting_grid_items.clear()
         scale = self.scale_factor
         palette = self.field_palette()
         surface = self.surface_definition()
@@ -1581,6 +1865,7 @@ class FieldView(QGraphicsView):
 
         turf_pen = QPen(QColor(palette["field_border"]), 0.16 * scale)
         add_rect(-field_half_width, -field_half_height, field_half_width, field_half_height, turf_pen, QColor(palette["field_fill"]), -24)
+        self.refresh_field_logo()
         perimeter_pen = QPen(QColor(palette["perimeter"]), 0.08 * scale, Qt.PenStyle.DashLine)
         micro_pen = QPen(QColor(palette["micro"]), 0.018 * scale)
         minor_pen = QPen(QColor(palette["minor"]), 0.034 * scale)
@@ -1592,6 +1877,7 @@ class FieldView(QGraphicsView):
 
         if surface.surface_type == "football":
             playing_half_width = max(5.0, field_half_width - surface.endzone_depth_yards)
+            drill_grid_visible = self.drill_grid.enabled and self.drill_grid.show_overlay
             if surface.show_end_zones and surface.endzone_depth_yards > 0.01:
                 add_rect(-field_half_width, -field_half_height, -playing_half_width, field_half_height, yard_pen, QColor(palette["endzone_fill"]), -23)
                 add_rect(playing_half_width, -field_half_height, field_half_width, field_half_height, yard_pen, QColor(palette["endzone_fill"]), -23)
@@ -1600,11 +1886,29 @@ class FieldView(QGraphicsView):
             last_x = int(field_half_width)
             for yard in range(first_x, last_x):
                 if yard % 5 != 0:
-                    add_line(yard, -field_half_height, yard, field_half_height, micro_pen if yard % 2 else minor_pen, -19)
+                    drafting_line = add_line(
+                        yard,
+                        -field_half_height,
+                        yard,
+                        field_half_height,
+                        micro_pen if yard % 2 else minor_pen,
+                        -19,
+                    )
+                    drafting_line.setVisible(not drill_grid_visible)
+                    self.drafting_grid_items.append(drafting_line)
             horizontal_y = int(-field_half_height) + 1
             while horizontal_y < field_half_height:
                 if abs(horizontal_y - surface.front_hash_yards) > 0.08 and abs(horizontal_y - surface.back_hash_yards) > 0.08:
-                    add_line(-field_half_width, horizontal_y, field_half_width, horizontal_y, micro_pen, -20)
+                    drafting_line = add_line(
+                        -field_half_width,
+                        horizontal_y,
+                        field_half_width,
+                        horizontal_y,
+                        micro_pen,
+                        -20,
+                    )
+                    drafting_line.setVisible(not drill_grid_visible)
+                    self.drafting_grid_items.append(drafting_line)
                 horizontal_y += 1
             first_five = int(-field_half_width // 5) * 5
             last_five = int(field_half_width // 5) * 5
@@ -1654,14 +1958,33 @@ class FieldView(QGraphicsView):
                 add_label("COACHES AREA", 0, label_y, 7, palette["label_muted"], 0, QFont.Weight.Bold, -6)
         else:
             spacing = surface.grid_spacing_yards
+            drill_grid_visible = self.drill_grid.enabled and self.drill_grid.show_overlay
             vertical_count = min(1000, int(surface.width_yards / spacing))
             horizontal_count = min(1000, int(surface.height_yards / spacing))
             for index in range(1, vertical_count):
                 x = -field_half_width + index * spacing
-                add_line(x, -field_half_height, x, field_half_height, minor_pen if index % 5 else yard_pen, -19)
+                drafting_line = add_line(
+                    x,
+                    -field_half_height,
+                    x,
+                    field_half_height,
+                    minor_pen if index % 5 else yard_pen,
+                    -19,
+                )
+                drafting_line.setVisible(not drill_grid_visible)
+                self.drafting_grid_items.append(drafting_line)
             for index in range(1, horizontal_count):
                 y = -field_half_height + index * spacing
-                add_line(-field_half_width, y, field_half_width, y, minor_pen if index % 5 else yard_pen, -19)
+                drafting_line = add_line(
+                    -field_half_width,
+                    y,
+                    field_half_width,
+                    y,
+                    minor_pen if index % 5 else yard_pen,
+                    -19,
+                )
+                drafting_line.setVisible(not drill_grid_visible)
+                self.drafting_grid_items.append(drafting_line)
             add_line(-field_half_width, 0, field_half_width, 0, QPen(QColor(palette["center"]), 0.06 * scale, Qt.PenStyle.DashLine), -17)
             add_line(0, -field_half_height, 0, field_half_height, QPen(QColor(palette["center"]), 0.06 * scale, Qt.PenStyle.DashLine), -17)
             add_label(surface.name.upper(), 0, field_half_height + 3.0, 9, palette["label_heavy"], 0, QFont.Weight.Bold, -6)
@@ -1684,6 +2007,8 @@ class FieldView(QGraphicsView):
                 self.scene.addItem(route_center)
                 add_label("START", *surface.route_points[0], 8, palette["label_heavy"], 0, QFont.Weight.Bold, -6)
                 add_label("FINISH", *surface.route_points[-1], 8, palette["label_heavy"], 0, QFont.Weight.Bold, -6)
+
+        self.draw_drill_grid_overlay(surface)
 
         margin_x = 30 * scale if surface.surface_type == "football" else 8 * scale
         margin_y = 21 * scale if surface.surface_type == "football" else 8 * scale
@@ -1768,8 +2093,8 @@ class FieldView(QGraphicsView):
             "rotate_angle",
             "arc_start",
             "arc_end",
-            "curve_control_1",
-            "curve_control_2",
+            "curve_on_1",
+            "curve_on_2",
         }:
             origin = self.current_preview_pivot() or self.selected_center()
             angular = True
@@ -2164,6 +2489,8 @@ class FieldView(QGraphicsView):
                     modifiers,
                 )
                 transformed = transform_positions(self._gizmo_drag_start_positions, parameters)
+                if self.drill_grid.enabled:
+                    transformed = self.snap_drill_grid_positions(transformed)
                 for dot_id, position in transformed.items():
                     item = self.dot_items.get(dot_id)
                     if item:
@@ -2186,6 +2513,8 @@ class FieldView(QGraphicsView):
             self._last_drag_modifiers = modifiers
             cursor = self.scene_to_field(self.mapToScene(event.position().toPoint()))
             cursor = self.constrained_manual_point(item, cursor, modifiers)
+            if self.drill_grid.enabled:
+                cursor = self.snap_drill_grid_point(cursor)
             self._manual_drag_last_field = cursor
             item.setPos(self.field_to_scene(*cursor))
             kind = self.manual_item_kind(item)
@@ -2218,7 +2547,7 @@ class FieldView(QGraphicsView):
         super().mouseMoveEvent(event)
         if (
             self.active_tool == EditorTool.SELECT
-            and self.snap_enabled
+            and (self.snap_enabled or self.drill_grid.enabled)
             and self._drag_start_positions
         ):
             self.apply_snap_to_selected()
@@ -2354,7 +2683,7 @@ class FieldView(QGraphicsView):
             self.selection_changed.emit(self.selected_dot_ids())
             self.clear_snap_guides()
             return
-        if self.snap_enabled and self._drag_start_positions:
+        if (self.snap_enabled or self.drill_grid.enabled) and self._drag_start_positions:
             self.apply_snap_to_selected()
         moved_positions: dict[str, tuple[float, float]] = {}
         for item in self.scene.selectedItems():
@@ -2440,9 +2769,38 @@ class FieldView(QGraphicsView):
             self.clear_snap_guides()
             return
 
+        if self.drill_grid.enabled:
+            current = {
+                item.dot_id: self.scene_to_field(item.pos())
+                for item in selected_items
+            }
+            snapped = self.snap_drill_grid_positions(current)
+            for dot_id, position in snapped.items():
+                item = self.dot_items.get(dot_id)
+                if item is not None:
+                    item.setPos(self.field_to_scene(*position))
+            self.clear_snap_guides()
+            guide_position = next(iter(snapped.values()))
+            self.show_snap_guide(
+                "vertical",
+                guide_position[0],
+                clear=False,
+                label=f"{self.drill_grid.preset_label} drill grid",
+            )
+            self.show_snap_guide("horizontal", guide_position[1], clear=False)
+            return
+
         selected_ids = {item.dot_id for item in selected_items}
         candidate_x: list[tuple[float, str]] = [(float(yard), "Yard line") for yard in range(-50, 55, 5)]
-        candidate_y: list[tuple[float, str]] = [(-20.0, "Front hash"), (0.0, "Field center"), (20.0, "Back hash")]
+        surface = self.project.surface if self.project is not None else None
+        candidate_y: list[tuple[float, str]] = [(0.0, "Field center")]
+        if surface is not None and surface.surface_type == "football" and surface.hash_style != "none":
+            candidate_y.extend(
+                [
+                    (float(surface.front_hash_yards), "Front hash"),
+                    (float(surface.back_hash_yards), "Back hash"),
+                ]
+            )
         other_x: list[float] = []
         other_y: list[float] = []
         for dot_id, item in self.dot_items.items():
@@ -2588,7 +2946,7 @@ class FieldView(QGraphicsView):
                 "Alternating Selection",
                 "Toggle Measurements",
                 "Continuity Designer",
-                "Smart Transition Composer",
+                "Guided Destination Repair",
                 "Section-Aware Form Fit",
                 "Copy With Property Paintbrush",
                 "Paint Copied Properties",

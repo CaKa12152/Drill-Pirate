@@ -42,7 +42,14 @@ from drill_writer.core.project_io import (
     roster_count,
 )
 from drill_writer.resources import app_icon_path
-from drill_writer.ui.appearance import draw_dot_symbol, generated_prop_pixmap, normalize_dot_symbol, preferred_dot_symbol
+from drill_writer.ui.appearance import (
+    draw_dot_symbol,
+    generated_prop_pixmap,
+    normalize_dot_symbol,
+    preferred_dot_symbol,
+    scaled_field_dot_metrics,
+)
+from drill_writer.ui.field_logo import field_logo_enabled
 from drill_writer.ui.surface_preview import draw_surface_preview, field_to_rect, fitted_surface_rect, size_to_rect
 from drill_writer.ui.theme import normalize_field_mode, normalize_theme, theme_tokens
 
@@ -222,7 +229,9 @@ class FieldPreview(QWidget):
         self.project = project
         self.project_dir = project_dir
         self.dot_symbol = preferred_dot_symbol()
-        self.field_mode = normalize_field_mode(str(QSettings("OpenAI", "DrillWriter").value("appearance/field_mode", "white")))
+        settings = QSettings("OpenAI", "DrillWriter")
+        self.field_mode = normalize_field_mode(str(settings.value("appearance/field_mode", "white")))
+        self.show_field_logo = field_logo_enabled(settings)
         self.setMinimumSize(260, 132)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
 
@@ -232,6 +241,10 @@ class FieldPreview(QWidget):
 
     def set_field_mode(self, mode: str) -> None:
         self.field_mode = normalize_field_mode(mode)
+        self.update()
+
+    def set_field_logo_visible(self, visible: bool) -> None:
+        self.show_field_logo = bool(visible)
         self.update()
 
     def preview_palette(self) -> dict[str, str]:
@@ -291,7 +304,7 @@ class FieldPreview(QWidget):
                 mtimes.append(f"{filename}:{path.stat().st_mtime if path.exists() else 0}")
         payload = (
             f"{self.project_dir}|{'|'.join(mtimes)}|{self.field_mode}|"
-            f"{self.dot_symbol}|{self.width()}x{self.height()}"
+            f"{self.dot_symbol}|logo:{int(self.show_field_logo)}|{self.width()}x{self.height()}"
         )
         return hashlib.sha1(payload.encode("utf-8")).hexdigest()
 
@@ -310,13 +323,23 @@ class FieldPreview(QWidget):
             painter.drawRoundedRect(rect, 5, 5)
             self.draw_empty_field(painter, rect)
             return
-        draw_surface_preview(painter, rect, self.project.surface, palette)
+        draw_surface_preview(
+            painter,
+            rect,
+            self.project.surface,
+            palette,
+            self.field_mode,
+            self.show_field_logo,
+        )
 
         first_set = self.project.sets[0] if self.project.sets else None
         self.draw_props(painter, rect, first_set.prop_positions if first_set else {})
         positions = first_set.dot_positions if first_set else {}
-        dot_count = max(1, len(self.project.dots))
-        radius = max(0.75, min(1.55, 7 / (dot_count**0.5)))
+        pixels_per_yard = min(
+            rect.width() / max(1.0, self.project.surface.width_yards),
+            rect.height() / max(1.0, self.project.surface.height_yards),
+        )
+        radius, outline_width = scaled_field_dot_metrics(pixels_per_yard)
         for dot in self.project.dots:
             x, y = positions.get(dot.id, (dot.x, dot.y))
             screen = field_to_rect(rect, self.project.surface, x, y)
@@ -331,7 +354,7 @@ class FieldPreview(QWidget):
                 QColor(dot.color or "#e53935"),
                 self.dot_symbol,
                 rotation_degrees=dot_facing_at_set(self.project, 0, dot.id),
-                outline_width=0.42,
+                outline_width=outline_width,
             )
 
     def draw_props(self, painter: QPainter, rect: QRectF, states: dict[str, dict[str, float]]) -> None:
@@ -770,6 +793,16 @@ class StartupPage(QWidget):
     def apply_field_mode(self, mode: str) -> None:
         for preview in self.findChildren(FieldPreview):
             preview.set_field_mode(mode)
+
+    def apply_field_logo_visible(self, visible: bool) -> None:
+        FIELD_PREVIEW_CACHE.clear()
+        for preview in self.findChildren(FieldPreview):
+            preview.set_field_logo_visible(visible)
+
+    def apply_field_logo_appearance(self) -> None:
+        FIELD_PREVIEW_CACHE.clear()
+        for preview in self.findChildren(FieldPreview):
+            preview.update()
 
     def refresh_projects(self) -> None:
         while self.grid.count():

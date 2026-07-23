@@ -247,23 +247,31 @@ class SmartTransitionDialog(QDialog):
         super().__init__(parent)
         self.candidates = candidates
         self.preview_callback = preview_callback
-        self.setWindowTitle("Smart Transition Composer")
-        self.resize(760, 430)
+        self.setWindowTitle("Guided Destination Repair")
+        self.resize(1040, 560)
         layout = QVBoxLayout(self)
-        note = QLabel("Compare complete marcher assignments. Lower scores indicate less travel and fewer predicted conflicts.")
+        note = QLabel(
+            "Preview complete destination-owner swaps before applying them. Every option preserves the exact destination picture; "
+            "only the performers assigned to its spots change."
+        )
         note.setWordWrap(True)
         layout.addWidget(note)
-        self.table = QTableWidget(len(candidates), 6)
-        self.table.setHorizontalHeaderLabels(["Strategy", "Total yd", "Longest", "Crossings", "Spacing", "Score"])
+        self.table = QTableWidget(len(candidates), 9)
+        self.table.setHorizontalHeaderLabels(
+            ["Strategy", "Changed", "Total yd", "Longest", "Crossings", "Spacing", "Speed", "Min Space", "Score"]
+        )
         self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QTableWidget.SelectionMode.SingleSelection)
         for row, candidate in enumerate(candidates):
             values = (
-                candidate.label,
+                f"★ {candidate.label}" if candidate.recommended else candidate.label,
+                str(candidate.changed_marchers),
                 f"{candidate.score.total_distance:.1f}",
                 f"{candidate.score.maximum_distance:.1f}",
                 str(candidate.score.crossings),
                 str(candidate.score.spacing_conflicts),
+                str(candidate.score.speed_violations),
+                f"{candidate.score.minimum_spacing:.2f} yd" if candidate.score.minimum_spacing < 900 else "—",
                 f"{candidate.score.weighted_score:.1f}",
             )
             for column, value in enumerate(values):
@@ -271,8 +279,12 @@ class SmartTransitionDialog(QDialog):
         self.table.resizeColumnsToContents()
         self.table.itemSelectionChanged.connect(self.preview_selected)
         layout.addWidget(self.table)
+        self.details = QLabel()
+        self.details.setWordWrap(True)
+        self.details.setMinimumHeight(72)
+        layout.addWidget(self.details)
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Cancel | QDialogButtonBox.StandardButton.Apply)
-        buttons.button(QDialogButtonBox.StandardButton.Apply).setText("Apply Assignment")
+        buttons.button(QDialogButtonBox.StandardButton.Apply).setText("Apply Previewed Repair")
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
@@ -283,6 +295,22 @@ class SmartTransitionDialog(QDialog):
         candidate = self.selected_candidate()
         if candidate:
             self.preview_callback(candidate)
+            ownership = (
+                "; ".join(candidate.reassignment_details)
+                if candidate.reassignment_details
+                else "No destination ownership changes."
+            )
+            if candidate.changed_marchers > len(candidate.reassignment_details):
+                ownership += f"; and {candidate.changed_marchers - len(candidate.reassignment_details)} more."
+            improvement = (
+                f"Predicted conflict score improves by {candidate.improvement:.1f}."
+                if candidate.improvement > 0.01
+                else "This option does not improve the predicted conflict score over current ownership."
+            )
+            self.details.setText(
+                f"<b>{'Recommended. ' if candidate.recommended else ''}{candidate.label}</b> — "
+                f"{candidate.changed_marchers} marcher(s) reassigned. {improvement}<br>{ownership}"
+            )
 
     def selected_candidate(self) -> TransitionCandidate | None:
         row = self.table.currentRow()

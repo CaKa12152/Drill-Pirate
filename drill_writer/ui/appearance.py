@@ -7,6 +7,11 @@ from PySide6.QtCore import QSettings
 
 DOT_SYMBOL_SETTING = "ui/dot_symbol"
 DEFAULT_DOT_SYMBOL = "circle"
+EIGHT_TO_FIVE_STEP_YARDS = 5.0 / 8.0
+FIELD_DOT_RADIUS_YARDS = 0.235
+FIELD_DOT_OUTLINE_YARDS = 0.055
+FIELD_DOT_VISUAL_DIAMETER_YARDS = FIELD_DOT_RADIUS_YARDS * 2 + FIELD_DOT_OUTLINE_YARDS
+FIELD_DOT_GAP_AT_EIGHT_TO_FIVE_YARDS = EIGHT_TO_FIVE_STEP_YARDS - FIELD_DOT_VISUAL_DIAMETER_YARDS
 DOT_SYMBOL_OPTIONS: tuple[tuple[str, str], ...] = (
     ("circle", "Filled Circle"),
     ("hollow_circle", "Hollow Circle"),
@@ -34,6 +39,14 @@ def dot_symbol_label(symbol: object) -> str:
     return dict(DOT_SYMBOL_OPTIONS).get(normalized, "Filled Circle")
 
 
+def scaled_field_dot_metrics(pixels_per_yard: float) -> tuple[float, float]:
+    scale = max(0.01, float(pixels_per_yard))
+    return (
+        max(0.2, FIELD_DOT_RADIUS_YARDS * scale),
+        max(0.1, FIELD_DOT_OUTLINE_YARDS * scale),
+    )
+
+
 def draw_dot_symbol(
     painter: QPainter,
     center: QPointF,
@@ -49,8 +62,8 @@ def draw_dot_symbol(
     normalized = normalize_dot_symbol(symbol)
     fill = QColor(color)
     outline = QColor(outline_color)
-    radius = max(0.5, float(radius))
-    outline_width = max(0.35, float(outline_width))
+    radius = max(0.2, float(radius))
+    outline_width = max(0.1, float(outline_width))
     rect = QRectF(center.x() - radius, center.y() - radius, radius * 2, radius * 2)
 
     painter.save()
@@ -112,9 +125,9 @@ def draw_dot_symbol(
         painter.drawPath(path)
 
     if selected:
-        painter.setPen(QPen(QColor("#2f6fed"), max(0.7, outline_width * 1.5), Qt.PenStyle.DashLine))
+        painter.setPen(QPen(QColor("#2f6fed"), max(0.7, outline_width * 1.35), Qt.PenStyle.DashLine))
         painter.setBrush(Qt.BrushStyle.NoBrush)
-        painter.drawEllipse(rect.adjusted(-radius * 0.35, -radius * 0.35, radius * 0.35, radius * 0.35))
+        painter.drawEllipse(rect)
 
     painter.restore()
 

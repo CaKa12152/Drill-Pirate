@@ -18,3 +18,7 @@ def app_icon_path() -> Path:
 
 def app_icon_ico_path() -> Path:
     return resource_path("assets/app_icon.ico")
+
+
+def field_logo_path() -> Path:
+    return resource_path("assets/field_logo.png")

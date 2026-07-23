@@ -1,6 +1,9 @@
 from __future__ import annotations
 
-from PySide6.QtGui import QColor
+from pathlib import Path
+
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QColor, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QCheckBox,
     QColorDialog,
@@ -8,17 +11,21 @@ from PySide6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QDoubleSpinBox,
+    QFileDialog,
     QFormLayout,
     QGridLayout,
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QMessageBox,
     QPushButton,
+    QSlider,
     QTabWidget,
     QVBoxLayout,
     QWidget,
 )
 
+from drill_writer.resources import field_logo_path
 from drill_writer.ui.audio_devices import (
     DEFAULT_AUDIO_OUTPUT_DEVICE_ID,
     audio_device_id,
@@ -48,6 +55,12 @@ class PreferencesDialog(QDialog):
         current_field_mode: str = "white",
         current_appearance_tokens: dict[str, str] | None = None,
         parent: QWidget | None = None,
+        current_adaptive_playback: bool = True,
+        current_playback_cache: bool = True,
+        current_show_field_logo: bool = True,
+        current_field_logo_custom_path: str = "",
+        current_field_logo_opacity: float = 1.0,
+        current_field_logo_scale: float = 1.0,
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Settings")
@@ -102,6 +115,8 @@ class PreferencesDialog(QDialog):
             self.dot_symbol_combo.addItem(label, value)
         symbol_index = self.dot_symbol_combo.findData(normalize_dot_symbol(current_dot_symbol))
         self.dot_symbol_combo.setCurrentIndex(max(0, symbol_index))
+        self.field_logo_checkbox = QCheckBox("Show a logo at field center")
+        self.field_logo_checkbox.setChecked(bool(current_show_field_logo))
         note = QLabel("Changes apply immediately and are saved for the next launch.")
         note.setWordWrap(True)
         form.addRow("Appearance", self.theme_combo)
@@ -159,6 +174,70 @@ class PreferencesDialog(QDialog):
         appearance_layout.addStretch(1)
         tabs.addTab(appearance_tab, "Appearance")
 
+        field_logo_tab = QWidget()
+        field_logo_layout = QVBoxLayout(field_logo_tab)
+        field_logo_layout.setContentsMargins(16, 14, 16, 14)
+        field_logo_layout.setSpacing(10)
+        self.pending_field_logo_path = str(current_field_logo_custom_path or "").strip()
+        self.field_logo_uses_default = not bool(self.pending_field_logo_path)
+        self.field_logo_preview = QLabel()
+        self.field_logo_preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.field_logo_preview.setFixedHeight(170)
+        self.field_logo_preview.setMinimumWidth(260)
+        self.field_logo_preview.setStyleSheet("border: 1px solid palette(mid); border-radius: 6px;")
+        self.field_logo_source_label = QLabel()
+        self.field_logo_source_label.setWordWrap(True)
+        self.field_logo_source_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        upload_logo_button = QPushButton("Upload Image...")
+        upload_logo_button.clicked.connect(self.choose_field_logo)
+        default_logo_button = QPushButton("Use Drill Pirate Logo")
+        default_logo_button.clicked.connect(self.use_default_field_logo)
+        logo_button_row = QHBoxLayout()
+        logo_button_row.addWidget(upload_logo_button)
+        logo_button_row.addWidget(default_logo_button)
+        logo_button_row.addStretch(1)
+
+        logo_form = QFormLayout()
+        logo_form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
+        logo_form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+        self.field_logo_opacity_slider = QSlider(Qt.Orientation.Horizontal)
+        self.field_logo_opacity_slider.setRange(5, 100)
+        self.field_logo_opacity_slider.setValue(round(max(0.05, min(1.0, current_field_logo_opacity)) * 100))
+        self.field_logo_opacity_value = QLabel()
+        opacity_row = QWidget()
+        opacity_layout = QHBoxLayout(opacity_row)
+        opacity_layout.setContentsMargins(0, 0, 0, 0)
+        opacity_layout.addWidget(self.field_logo_opacity_slider, 1)
+        opacity_layout.addWidget(self.field_logo_opacity_value)
+        self.field_logo_size_slider = QSlider(Qt.Orientation.Horizontal)
+        self.field_logo_size_slider.setRange(25, 250)
+        self.field_logo_size_slider.setValue(round(max(0.25, min(2.5, current_field_logo_scale)) * 100))
+        self.field_logo_size_value = QLabel()
+        size_row = QWidget()
+        size_layout = QHBoxLayout(size_row)
+        size_layout.setContentsMargins(0, 0, 0, 0)
+        size_layout.addWidget(self.field_logo_size_slider, 1)
+        size_layout.addWidget(self.field_logo_size_value)
+        logo_form.addRow("Visibility", self.field_logo_checkbox)
+        logo_form.addRow("Opacity", opacity_row)
+        logo_form.addRow("Size", size_row)
+        logo_note = QLabel(
+            "Uploaded images are copied into Drill Pirate's app data and automatically adapt to "
+            "the Grass, White, and Inverted field modes. PNG images with transparency work best."
+        )
+        logo_note.setWordWrap(True)
+        field_logo_layout.addWidget(self.field_logo_preview)
+        field_logo_layout.addWidget(self.field_logo_source_label)
+        field_logo_layout.addLayout(logo_button_row)
+        field_logo_layout.addLayout(logo_form)
+        field_logo_layout.addWidget(logo_note)
+        field_logo_layout.addStretch(1)
+        tabs.addTab(field_logo_tab, "Field Logo")
+        self.field_logo_opacity_slider.valueChanged.connect(self.update_field_logo_values)
+        self.field_logo_size_slider.valueChanged.connect(self.update_field_logo_values)
+        self.update_field_logo_preview()
+        self.update_field_logo_values()
+
         devices_tab = QWidget()
         devices_layout = QVBoxLayout(devices_tab)
         devices_form = QFormLayout()
@@ -184,6 +263,31 @@ class PreferencesDialog(QDialog):
         devices_layout.addWidget(device_note)
         devices_layout.addStretch(1)
         tabs.addTab(devices_tab, "Devices")
+
+        performance_tab = QWidget()
+        performance_layout = QVBoxLayout(performance_tab)
+        performance_form = QFormLayout()
+        performance_form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
+        performance_form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+        self.adaptive_playback_checkbox = QCheckBox(
+            "Automatically reduce render detail when playback misses its frame budget"
+        )
+        self.adaptive_playback_checkbox.setChecked(bool(current_adaptive_playback))
+        self.playback_cache_checkbox = QCheckBox(
+            "Cache evaluated playback frames for loops and repeated previews"
+        )
+        self.playback_cache_checkbox.setChecked(bool(current_playback_cache))
+        performance_note = QLabel(
+            "Timing and audio remain authoritative. Adaptive mode only reduces visual detail and "
+            "nonessential panel refreshes; it never changes marcher positions or show timing."
+        )
+        performance_note.setWordWrap(True)
+        performance_form.addRow("Adaptive Quality", self.adaptive_playback_checkbox)
+        performance_form.addRow("Frame Cache", self.playback_cache_checkbox)
+        performance_layout.addLayout(performance_form)
+        performance_layout.addWidget(performance_note)
+        performance_layout.addStretch(1)
+        tabs.addTab(performance_tab, "Playback")
         self.refresh_audio_devices()
         self.search_input.textChanged.connect(self.filter_settings)
 
@@ -238,6 +342,9 @@ class PreferencesDialog(QDialog):
             "dots",
             "x",
             "shape",
+            "logo",
+            "center field",
+            "emblem",
         )
         device_terms = (
             "audio",
@@ -248,16 +355,35 @@ class PreferencesDialog(QDialog):
             "windows",
             "default",
         )
+        playback_terms = (
+            "playback",
+            "performance",
+            "adaptive",
+            "quality",
+            "cache",
+            "frame",
+            "fps",
+            "dropped",
+        )
+        logo_terms = ("logo", "center field", "emblem", "branding", "transparency", "opacity", "size")
+        if any(term in query or query in term for term in logo_terms):
+            self.tabs.setCurrentIndex(2)
+            self.search_status.setText("Showing matching settings in Field Logo.")
+            return
         if any(term in query or query in term for term in preferences_terms):
             appearance_terms = ("field", "white", "inverted", "grass", "custom", "color", "colors", "background", "panel", "accent", "font")
             self.tabs.setCurrentIndex(1 if any(term in query or query in term for term in appearance_terms) else 0)
             self.search_status.setText("Showing matching settings in General or Appearance.")
             return
         if any(term in query or query in term for term in device_terms):
-            self.tabs.setCurrentIndex(2)
+            self.tabs.setCurrentIndex(3)
             self.search_status.setText("Showing matching settings in Devices.")
             return
-        self.search_status.setText("No direct setting match. Try theme, update, audio, device, or output.")
+        if any(term in query or query in term for term in playback_terms):
+            self.tabs.setCurrentIndex(4)
+            self.search_status.setText("Showing matching settings in Playback.")
+            return
+        self.search_status.setText("No direct setting match. Try theme, audio, device, playback, cache, or quality.")
 
     def selected_theme(self) -> str:
         return normalize_theme(str(self.theme_combo.currentData() or "dark"))
@@ -284,6 +410,82 @@ class PreferencesDialog(QDialog):
 
     def selected_dot_symbol(self) -> str:
         return normalize_dot_symbol(self.dot_symbol_combo.currentData())
+
+    def selected_field_logo_visible(self) -> bool:
+        return self.field_logo_checkbox.isChecked()
+
+    def selected_field_logo_custom_path(self) -> str:
+        return "" if self.field_logo_uses_default else self.pending_field_logo_path
+
+    def selected_field_logo_opacity(self) -> float:
+        return self.field_logo_opacity_slider.value() / 100.0
+
+    def selected_field_logo_scale(self) -> float:
+        return self.field_logo_size_slider.value() / 100.0
+
+    def choose_field_logo(self) -> None:
+        start = self.pending_field_logo_path or str(Path.home() / "Pictures")
+        selected, _filter = QFileDialog.getOpenFileName(
+            self,
+            "Choose Center-Field Logo",
+            start,
+            "Images (*.png *.jpg *.jpeg *.bmp *.webp);;All Files (*)",
+        )
+        if not selected:
+            return
+        preview = QPixmap(selected)
+        if preview.isNull():
+            QMessageBox.warning(self, "Invalid Logo", "The selected file is not a supported or readable image.")
+            return
+        self.pending_field_logo_path = selected
+        self.field_logo_uses_default = False
+        self.update_field_logo_preview()
+
+    def use_default_field_logo(self) -> None:
+        self.pending_field_logo_path = ""
+        self.field_logo_uses_default = True
+        self.update_field_logo_preview()
+
+    def update_field_logo_preview(self) -> None:
+        source = field_logo_path() if self.field_logo_uses_default else Path(self.pending_field_logo_path)
+        preview = QPixmap(str(source))
+        if preview.isNull():
+            self.field_logo_preview.setText("Image preview unavailable")
+        else:
+            canvas = QPixmap(250, 160)
+            canvas.fill(Qt.GlobalColor.transparent)
+            size_multiplier = self.field_logo_size_slider.value() / 100.0
+            scaled = preview.scaled(
+                min(240, round(105 * size_multiplier)),
+                min(150, round(105 * size_multiplier)),
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            painter = QPainter(canvas)
+            painter.setOpacity(self.field_logo_opacity_slider.value() / 100.0)
+            painter.drawPixmap(
+                round((canvas.width() - scaled.width()) / 2),
+                round((canvas.height() - scaled.height()) / 2),
+                scaled,
+            )
+            painter.end()
+            self.field_logo_preview.setPixmap(canvas)
+        self.field_logo_source_label.setText(
+            "Current image: Drill Pirate default"
+            if self.field_logo_uses_default
+            else f"Current image: {source.name}\n{source}"
+        )
+
+    def update_field_logo_values(self) -> None:
+        self.field_logo_opacity_value.setText(f"{self.field_logo_opacity_slider.value()}%")
+        self.field_logo_size_value.setText(f"{self.field_logo_size_slider.value()}%")
+        self.update_field_logo_preview()
+
+    def selected_adaptive_playback(self) -> bool:
+        return self.adaptive_playback_checkbox.isChecked()
+
+    def selected_playback_cache(self) -> bool:
+        return self.playback_cache_checkbox.isChecked()
 
     def theme_changed(self) -> None:
         self.load_theme_defaults()
@@ -333,6 +535,18 @@ class PreferencesDialog(QDialog):
         field_handler = getattr(parent, "apply_field_mode", None)
         if callable(field_handler):
             self.call_parent_handler(field_handler, self.selected_field_mode())
+        field_logo_handler = getattr(parent, "apply_field_logo_visible", None)
+        if callable(field_logo_handler):
+            self.call_parent_handler(field_logo_handler, self.selected_field_logo_visible())
+        field_logo_appearance_handler = getattr(parent, "apply_field_logo_appearance", None)
+        if callable(field_logo_appearance_handler):
+            self.call_parent_handler(
+                field_logo_appearance_handler,
+                self.selected_field_logo_custom_path(),
+                self.field_logo_uses_default,
+                self.selected_field_logo_opacity(),
+                self.selected_field_logo_scale(),
+            )
         update_handler = getattr(parent, "apply_update_channel", None)
         if callable(update_handler):
             self.call_parent_handler(update_handler, self.selected_update_channel())
@@ -346,6 +560,13 @@ class PreferencesDialog(QDialog):
         if callable(audio_handler):
             self.current_audio_device_id = self.selected_audio_output_device_id()
             self.call_parent_handler(audio_handler, self.current_audio_device_id)
+        playback_handler = getattr(parent, "apply_playback_performance_settings", None)
+        if callable(playback_handler):
+            self.call_parent_handler(
+                playback_handler,
+                self.selected_adaptive_playback(),
+                self.selected_playback_cache(),
+            )
 
     def call_parent_handler(self, handler, *args) -> None:
         try:

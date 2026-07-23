@@ -7,6 +7,7 @@ import tempfile
 import traceback
 import base64
 import hashlib
+from time import perf_counter
 from uuid import uuid4
 from copy import deepcopy
 from dataclasses import dataclass
@@ -52,6 +53,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QApplication,
     QPushButton,
+    QPlainTextEdit,
     QProgressDialog,
     QScrollArea,
     QSizePolicy,
@@ -108,6 +110,7 @@ from drill_writer.core.design_tools import (
     plan_motion_ribbon,
     sample_motion_ribbon,
 )
+from drill_writer.core.drill_grid import DrillGridSettings, snap_position_mapping, snap_positions_to_grid
 from drill_writer.core.follow_leader import (
     FollowLeaderOptions,
     FollowLeaderPlan,
@@ -128,6 +131,7 @@ from drill_writer.core.large_show import (
     workflow_records as large_show_workflow_records,
 )
 from drill_writer.core.diagnostics import export_bug_report_bundle
+from drill_writer.core.user_errors import actionable_error_message
 from drill_writer.core.project_io import (
     list_project_backups,
     load_project,
@@ -136,6 +140,12 @@ from drill_writer.core.project_io import (
     safe_folder_name,
     save_project,
 )
+from drill_writer.core.audio_recovery import (
+    AudioRecoveryPolicy,
+    is_recoverable_audio_device_error,
+    recommended_audio_resume_delay_ms,
+)
+from drill_writer.core.playback import FrameScheduler, PlaybackFrameCache, PlaybackQuality
 from drill_writer.core.svg_import import load_svg_contours
 from drill_writer.core.specialized_design import surface_contains_point
 from drill_writer.core.timing import (
@@ -164,6 +174,7 @@ from drill_writer.core.tools import (
     bezier_curve_positions,
     circle_positions,
     centered_positions,
+    cubic_bezier_point,
     curve_positions,
     ellipse_positions,
     elliptical_arc_path,
@@ -205,10 +216,12 @@ from drill_writer.export.exporters import (
     render_mp4_frames,
 )
 from drill_writer.ui.pdf_preview import PdfPreviewDialog
+from drill_writer.ui.pdf_layout_designer import PdfLayoutDesignerDialog
 from drill_writer.ui.audio_devices import (
     AUDIO_OUTPUT_DEVICE_SETTING,
     DEFAULT_AUDIO_OUTPUT_DEVICE_ID,
     audio_device_id,
+    audio_output_devices,
     audio_output_for_id,
     audio_output_label_for_id,
     normalize_audio_output_device_id,
@@ -230,10 +243,13 @@ from drill_writer.ui.design_accelerators import (
     ReferenceAnnotationsDialog,
     SymmetryManagerDialog,
 )
+from drill_writer.ui.drill_grid import DrillGridDialog
+from drill_writer.ui.appearance import draw_dot_symbol, scaled_field_dot_metrics
 from drill_writer.ui.music_design import MusicDesignPanel, MusicDesignStudioDialog
 from drill_writer.ui.specialized_design import ChoreographyTimelineWidget, SpecializedDesignPanel, SpecializedDesignStudioDialog
 from drill_writer.ui.surface_preview import draw_surface_preview, field_to_rect, rect_to_field, size_to_rect
 from drill_writer.ui.field_view import EditorTool, FieldView
+from drill_writer.ui.field_logo import field_logo_enabled
 from drill_writer.ui.prop_designer import CreatedPropDesign, PropDesignerDialog
 from drill_writer.ui.theme import theme_tokens
 from drill_writer.ui.waveform import WaveformWidget
@@ -360,6 +376,19 @@ class ResponsivePanelWidget(QWidget):
     def minimumSizeHint(self) -> QSize:  # type: ignore[override]
         layout = self.layout()
         return layout.minimumSize() if layout is not None else super().minimumSizeHint()
+
+
+class CommitPlainTextEdit(QPlainTextEdit):
+    editingStarted = Signal()
+    editingFinished = Signal()
+
+    def focusInEvent(self, event) -> None:  # type: ignore[override]
+        super().focusInEvent(event)
+        self.editingStarted.emit()
+
+    def focusOutEvent(self, event) -> None:  # type: ignore[override]
+        super().focusOutEvent(event)
+        self.editingFinished.emit()
 
 
 class AdaptivePanelScrollArea(QScrollArea):
@@ -801,7 +830,14 @@ class FieldMiniMap(QWidget):
         painter.setPen(QColor(tokens["muted_text_color"]))
         painter.drawText(title_rect, Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft, "Minimap")
 
-        draw_surface_preview(painter, rect, self.window.project.surface, field_palette)
+        draw_surface_preview(
+            painter,
+            rect,
+            self.window.project.surface,
+            field_palette,
+            self.window.field.field_mode,
+            self.window.field.show_field_logo,
+        )
 
         drill_set = self.window.current_set() if self.window.project.sets else None
         if drill_set:
@@ -827,7 +863,11 @@ class FieldMiniMap(QWidget):
                 painter.drawRoundedRect(QRectF(point.x() - width / 2, point.y() - height / 2, width, height), 2, 2)
 
             selected_ids = set(self.window.field.selected_dot_ids())
-            painter.setPen(Qt.PenStyle.NoPen)
+            pixels_per_yard = min(
+                rect.width() / max(1.0, self.window.project.surface.width_yards),
+                rect.height() / max(1.0, self.window.project.surface.height_yards),
+            )
+            radius, outline_width = scaled_field_dot_metrics(pixels_per_yard)
             for dot in self.window.project.dots:
                 dot_item = self.window.field.dot_items.get(dot.id)
                 if dot_item is not None:
@@ -835,13 +875,17 @@ class FieldMiniMap(QWidget):
                 else:
                     x, y = drill_set.dot_positions.get(dot.id, (dot.x, dot.y))
                 screen = self.field_to_minimap(rect, x, y)
-                painter.setBrush(QColor(dot.color or "#e53935"))
-                radius = 2.7 if dot.id in selected_ids else 1.8
-                if dot.id in selected_ids:
-                    painter.setPen(QPen(QColor(tokens["accent_color"]), 1.1))
-                else:
-                    painter.setPen(Qt.PenStyle.NoPen)
-                painter.drawEllipse(screen, radius, radius)
+                draw_dot_symbol(
+                    painter,
+                    screen,
+                    radius,
+                    QColor(dot.color or "#e53935"),
+                    self.window.field.dot_symbol,
+                    rotation_degrees=dot_item.facing_degrees if dot_item is not None else 0.0,
+                    outline_color=QColor(tokens["background_color"]),
+                    outline_width=outline_width,
+                    selected=dot.id in selected_ids,
+                )
         visible = self.visible_field_rect(rect)
         painter.setPen(QPen(QColor(tokens["selection_color"]), 1.4))
         painter.setBrush(Qt.BrushStyle.NoBrush)
@@ -1273,6 +1317,7 @@ class MainWindow(QMainWindow):
         self.favorite_toolbar: QToolBar | None = None
         self._responsive_layout_bucket = ""
         self.thumbnail_cache: dict[str, QPixmap] = {}
+        self._ghost_set_index = -1
         self.analysis_worker: AnalysisWorker | None = None
         self.conflict_heatmap_worker: ConflictHeatmapWorker | None = None
         self.conflict_heatmap_generation = 0
@@ -1291,26 +1336,43 @@ class MainWindow(QMainWindow):
         self.tooltip_actions: list[QAction] = []
         self.dock_widgets: dict[str, QDockWidget] = {}
         self.undo_stack = QUndoStack(self)
+        self.playback_scheduler = FrameScheduler(
+            adaptive=self.settings.value("performance/adaptive_playback", True, type=bool)
+        )
+        self.playback_frame_cache: PlaybackFrameCache[tuple[dict, dict, dict]] = PlaybackFrameCache(
+            max_frames=720
+        )
+        self.playback_auxiliary_frame = 0
+        self._last_playback_diagnostics_update_ms = 0.0
         self.player = QMediaPlayer(self)
         self.audio_output = QAudioOutput(self)
+        self.audio_recovery_policy = AudioRecoveryPolicy()
+        self.audio_recovery_resume_requested = False
+        self.audio_recovery_position_ms = 0
         self.requested_audio_output_device_id = ""
         self.applied_audio_output_physical_id = ""
         self.audio_device_refresh_timer = QTimer(self)
         self.audio_device_refresh_timer.setSingleShot(True)
         self.audio_device_refresh_timer.setInterval(700)
-        self.audio_device_refresh_timer.timeout.connect(self.apply_saved_audio_output_device)
+        self.audio_device_refresh_timer.timeout.connect(self.recover_saved_audio_output_device)
         self.media_devices = QMediaDevices(self)
         self.media_devices.audioOutputsChanged.connect(self.schedule_audio_output_refresh)
         self.player.setAudioOutput(self.audio_output)
         self.apply_saved_audio_output_device()
         self.player.durationChanged.connect(self.audio_duration_changed)
         self.player.positionChanged.connect(self.audio_position_changed)
+        self.player.errorOccurred.connect(self.audio_playback_error)
+        self.audio_health_timer = QTimer(self)
+        self.audio_health_timer.setInterval(1000)
+        self.audio_health_timer.timeout.connect(self.check_audio_output_health)
+        self.audio_health_timer.start()
         self.play_timer = QTimer(self)
         self.play_timer.setInterval(16)
         self.play_timer.timeout.connect(self.tick_playback)
         self.playback_clock = QElapsedTimer()
         self.last_playback_audio_ms = 0
         self.autosave_timer = QTimer(self)
+        self._last_autosave_error = ""
         self.autosave_timer.setInterval(8000)
         self.autosave_timer.timeout.connect(self.autosave)
         self.autosave_timer.start()
@@ -1320,12 +1382,14 @@ class MainWindow(QMainWindow):
         self.resize(1500, 900)
         self.field = FieldView()
         self.field.set_project(self.project, self.project_dir)
+        self.field.set_drill_grid(self.drill_grid_settings())
         self.field.set_facings(self.facings_for_set())
         self.apply_field_renderer()
         self.field.selection_changed.connect(self.selection_changed)
         self.field.dot_moved.connect(self.dot_moved)
         self.field.dots_moved.connect(self.dots_moved)
         self.field.dots_drag_preview.connect(self.preview_live_symmetry)
+        self.field.dots_drag_preview.connect(self.preview_dot_coordinates)
         self.field.prop_moved.connect(self.prop_moved)
         self.field.props_moved.connect(self.props_moved)
         self.field.guide_moved.connect(self.move_construction_guide)
@@ -1433,6 +1497,8 @@ class MainWindow(QMainWindow):
         playback_menu.addAction(self.menu_action("Pause", self.pause))
         playback_menu.addAction(self.menu_action("Toggle Loop Current Set", self.toggle_loop_current_set, QKeySequence("Ctrl+L")))
         playback_menu.addAction(self.menu_action("Go To Count", self.focus_count_finder, QKeySequence("Ctrl+G")))
+        playback_menu.addSeparator()
+        playback_menu.addAction(self.menu_action("Reset Playback Diagnostics", self.reset_playback_diagnostics))
 
         settings_menu.addAction(self.menu_action("Preferences", self.open_preferences, QKeySequence("Ctrl+,")))
 
@@ -1580,6 +1646,18 @@ class MainWindow(QMainWindow):
             tool_actions.append(action)
         tools_menu.addSeparator()
         snap_action = self.menu_action("Toggle Snap Align", self.toggle_snap_align, QKeySequence("Ctrl+Alt+N"))
+        self.drill_grid_enable_action = self.menu_action(
+            "Enable Drill Grid Snapping",
+            self.set_drill_grid_enabled,
+            QKeySequence("Ctrl+Alt+Shift+N"),
+        )
+        self.drill_grid_enable_action.setCheckable(True)
+        self.drill_grid_enable_action.setChecked(self.drill_grid_settings().enabled)
+        drill_grid_configure_action = self.menu_action(
+            "Configure Drill Grid...",
+            self.show_drill_grid_dialog,
+            QKeySequence("Ctrl+Shift+G"),
+        )
         analyze_action = self.menu_action("Analyze Paths", self.analyze_paths, QKeySequence("Ctrl+Alt+A"))
         plan_action = self.menu_action(
             "Optimize Selected Spot Assignment",
@@ -1596,7 +1674,7 @@ class MainWindow(QMainWindow):
         cad_action = self.menu_action("CAD Path Toolkit...", self.show_cad_path_toolkit, QKeySequence("Ctrl+Shift+F5"))
         morph_action = self.menu_action("Formation Morph...", self.show_formation_morph, QKeySequence("Ctrl+Shift+F12"))
         fit_prop_action = self.menu_action("Fit Form to Selected Prop", self.fit_selected_form_to_prop, QKeySequence("Ctrl+Alt+Shift+X"))
-        composer_action = self.menu_action("Smart Transition Composer", self.show_smart_transition_composer, QKeySequence("Ctrl+Alt+Shift+C"))
+        composer_action = self.menu_action("Guided Destination Repair...", self.show_smart_transition_composer, QKeySequence("Ctrl+Alt+Shift+C"))
         section_fit_action = self.menu_action("Section-Aware Form Fit", self.apply_section_aware_form_fit, QKeySequence("Ctrl+Alt+Shift+J"))
         copy_properties_action = self.menu_action("Copy With Property Paintbrush", self.copy_property_brush, QKeySequence("Ctrl+Shift+C"))
         paint_properties_action = self.menu_action("Paint Copied Properties", self.paint_property_brush, QKeySequence("Ctrl+Shift+V"))
@@ -1608,7 +1686,9 @@ class MainWindow(QMainWindow):
         duplicate_mirror_action = self.menu_action("Duplicate Mirror To Next Set", self.duplicate_mirror_to_next_set, QKeySequence("Ctrl+Alt+Shift+D"))
         apply_preview_action = self.menu_action("Apply Current Preview", self.apply_current_preview, QKeySequence("Ctrl+Return"))
         clear_preview_action = self.menu_action("Clear Current Preview", self.clear_formation_preview, QKeySequence("Esc"))
-        tools_menu.addActions([snap_action, analyze_action, plan_action, clear_paths_action, keyframe_action, follow_action, motion_ribbon_action, group_handles_action, continuity_action, guides_action, cad_action, morph_action, fit_prop_action])
+        tools_menu.addActions([snap_action, self.drill_grid_enable_action, drill_grid_configure_action])
+        tools_menu.addSeparator()
+        tools_menu.addActions([analyze_action, plan_action, clear_paths_action, keyframe_action, follow_action, motion_ribbon_action, group_handles_action, continuity_action, guides_action, cad_action, morph_action, fit_prop_action])
         tools_menu.addSeparator()
         tools_menu.addActions([composer_action, section_fit_action, copy_properties_action, paint_properties_action, beat_sets_action, radial_action])
         quick_duplicate_menu = tools_menu.addMenu("Quick Duplicate/Transform")
@@ -1725,6 +1805,8 @@ class MainWindow(QMainWindow):
                 rotate_facing_right_action,
                 *tool_actions,
                 snap_action,
+                self.drill_grid_enable_action,
+                drill_grid_configure_action,
                 analyze_action,
                 plan_action,
                 clear_paths_action,
@@ -2373,7 +2455,15 @@ class MainWindow(QMainWindow):
                 command_id: action.shortcut().toString(QKeySequence.SequenceFormat.PortableText)
                 for command_id, action in self.command_actions.items()
             }
-            Path(path).write_text(json.dumps(data, indent=2), encoding="utf-8")
+            try:
+                Path(path).write_text(json.dumps(data, indent=2), encoding="utf-8")
+            except Exception as exc:
+                QMessageBox.warning(
+                    dialog,
+                    "Shortcut Export Failed",
+                    actionable_error_message("export keyboard shortcuts", exc, location=path),
+                )
+                return
             self.statusBar().showMessage("Keyboard shortcuts exported", 2400)
 
         def import_shortcuts() -> None:
@@ -2388,7 +2478,11 @@ class MainWindow(QMainWindow):
             try:
                 data = json.loads(Path(path).read_text(encoding="utf-8"))
             except Exception as exc:
-                QMessageBox.warning(dialog, "Import Failed", f"Could not read shortcuts: {exc}")
+                QMessageBox.warning(
+                    dialog,
+                    "Shortcut Import Failed",
+                    actionable_error_message("import keyboard shortcuts", exc, location=path),
+                )
                 return
             if not isinstance(data, dict):
                 QMessageBox.warning(dialog, "Import Failed", "Shortcut file must be a JSON object.")
@@ -2471,13 +2565,34 @@ class MainWindow(QMainWindow):
     def apply_saved_audio_output_device(self) -> None:
         self.apply_audio_output_device(self.saved_audio_output_device_id(), show_status=False)
 
-    def apply_audio_output_device(self, device_id: str, show_status: bool = True) -> None:
+    def recover_saved_audio_output_device(self) -> None:
+        self.schedule_audio_recovery("Windows audio outputs changed")
+
+    def replace_audio_output(self, device) -> None:
+        volume = self.audio_output.volume()
+        previous_output = self.audio_output
+        replacement = QAudioOutput(self)
+        replacement.setVolume(volume)
+        replacement.setDevice(device)
+        self.player.setAudioOutput(replacement)
+        self.audio_output = replacement
+        previous_output.deleteLater()
+
+    def apply_audio_output_device(
+        self,
+        device_id: str,
+        show_status: bool = True,
+        *,
+        force_recreate: bool = False,
+    ) -> bool:
+        if not force_recreate:
+            self.audio_recovery_policy.reset()
         normalized = normalize_audio_output_device_id(device_id)
         device = audio_output_for_id(normalized)
         if device.isNull():
             if show_status:
                 self.statusBar().showMessage("No audio output devices available", 3000)
-            return
+            return False
 
         target_physical_id = audio_device_id(device)
         current_device = self.audio_output.device()
@@ -2487,30 +2602,96 @@ class MainWindow(QMainWindow):
             current_physical_id == target_physical_id
             and self.applied_audio_output_physical_id == target_physical_id
         )
-        if already_requested and already_on_target:
+        if already_requested and already_on_target and not force_recreate:
             if show_status:
                 self.statusBar().showMessage(f"Audio output: {audio_output_label_for_id(normalized)}", 3000)
-            return
-        if current_physical_id == target_physical_id:
+            return True
+        if current_physical_id == target_physical_id and not force_recreate:
             self.requested_audio_output_device_id = normalized
             self.applied_audio_output_physical_id = target_physical_id
             if show_status:
                 self.statusBar().showMessage(f"Audio output: {audio_output_label_for_id(normalized)}", 3000)
-            return
+            return True
 
         was_playing = self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState
         position = self.player.position()
         if was_playing:
             self.player.pause()
-        self.audio_output.setDevice(device)
+        self.replace_audio_output(device)
         self.requested_audio_output_device_id = normalized
         self.applied_audio_output_physical_id = target_physical_id
         if self.player.source().isValid():
             self.player.setPosition(position)
         if was_playing:
-            QTimer.singleShot(80, self.player.play)
+            QTimer.singleShot(recommended_audio_resume_delay_ms(device.description()), self.player.play)
         if show_status:
             self.statusBar().showMessage(f"Audio output: {audio_output_label_for_id(normalized)}", 3000)
+        return True
+
+    def audio_playback_error(self, _error, message: str) -> None:
+        if is_recoverable_audio_device_error(message):
+            self.schedule_audio_recovery(message)
+            return
+        if message:
+            self.statusBar().showMessage(f"Audio playback error: {message}", 5000)
+
+    def schedule_audio_recovery(self, reason: str) -> None:
+        delay = self.audio_recovery_policy.schedule(reason)
+        if delay is None:
+            return
+        if self.play_timer.isActive() or self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
+            self.audio_recovery_resume_requested = True
+            self.audio_recovery_position_ms = max(self.player.position(), self.last_playback_audio_ms)
+            self.play_timer.stop()
+            self.player.pause()
+        elif not self.audio_recovery_resume_requested:
+            self.audio_recovery_position_ms = self.player.position()
+        self.statusBar().showMessage("Audio device changed; reconnecting safely…", 3000)
+        QTimer.singleShot(delay, self.recover_audio_output)
+
+    def recover_audio_output(self) -> None:
+        requested = self.saved_audio_output_device_id()
+        success = self.apply_audio_output_device(
+            requested,
+            show_status=False,
+            force_recreate=True,
+        )
+        self.audio_recovery_policy.completed(success)
+        if not success:
+            self.statusBar().showMessage("Audio output unavailable; waiting for Windows…", 4000)
+            QTimer.singleShot(500, lambda: self.schedule_audio_recovery("No usable audio output"))
+            return
+        if self.player.source().isValid():
+            self.player.setPosition(self.audio_recovery_position_ms)
+        resume = self.audio_recovery_resume_requested
+        self.audio_recovery_resume_requested = False
+        if resume:
+            device = self.audio_output.device()
+            delay = recommended_audio_resume_delay_ms(device.description() if not device.isNull() else "")
+            QTimer.singleShot(delay, self.resume_after_audio_recovery)
+        self.statusBar().showMessage(f"Audio output restored: {audio_output_label_for_id(requested)}", 3500)
+
+    def resume_after_audio_recovery(self) -> None:
+        if self.player.source().isValid():
+            self.player.play()
+        self.playback_clock.restart()
+        self.play_timer.start()
+
+    def check_audio_output_health(self) -> None:
+        requested = self.saved_audio_output_device_id()
+        target = audio_output_for_id(requested)
+        current = self.audio_output.device()
+        if target.isNull():
+            if not current.isNull():
+                return
+            self.schedule_audio_recovery("No Windows audio output is available")
+            return
+        target_id = audio_device_id(target)
+        current_id = "" if current.isNull() else audio_device_id(current)
+        available_ids = {audio_device_id(device) for device in audio_output_devices()}
+        current_missing = bool(current_id) and current_id not in available_ids
+        if current.isNull() or current_missing or target_id != current_id:
+            self.schedule_audio_recovery("Audio output disconnected or Windows default changed")
 
     def register_plugin_form_tool(
         self,
@@ -2655,7 +2836,7 @@ class MainWindow(QMainWindow):
             self.record_plugin_error(tool.plugin_id, f"{tool.name} failed while applying", traceback.format_exc())
             QMessageBox.warning(self, "Plugin Tool Failed", f"{tool.name} failed:\n{exc}")
             return
-        targets = self.normalize_plugin_targets(ids, result)
+        targets = self.snap_form_mapping_to_grid(self.normalize_plugin_targets(ids, result))
         if not targets:
             return
         self.apply_plugin_targets(tool.name, targets)
@@ -2902,6 +3083,13 @@ class MainWindow(QMainWindow):
         return True
 
     def apply_plugin_targets(self, name: str, targets: dict[str, tuple[float, float]]) -> None:
+        if self.editing_set_one_opening():
+            self.apply_opening_positions(
+                targets,
+                sync_unchanged_set_one_endpoints=True,
+                label=f"Plugin Tool: {name}",
+            )
+            return
         before = self.current_positions()
         after = dict(before)
         after.update(targets)
@@ -3442,6 +3630,22 @@ class MainWindow(QMainWindow):
         self.toolbar_set_selector.setMaximumWidth(250)
         self.toolbar_set_selector.currentIndexChanged.connect(self.change_set_from_toolbar)
         toolbar.addWidget(self.toolbar_set_selector)
+        toolbar.addSeparator()
+        self.drill_grid_toolbar_toggle = QToolButton()
+        self.drill_grid_toolbar_toggle.setCheckable(True)
+        self.drill_grid_toolbar_toggle.setMinimumWidth(86)
+        self.drill_grid_toolbar_toggle.setToolTip(
+            "Snap marcher movement, on-form preview handles, and generated formations to exact drill-step spacing."
+        )
+        self.drill_grid_toolbar_toggle.toggled.connect(self.set_drill_grid_enabled)
+        toolbar.addWidget(self.drill_grid_toolbar_toggle)
+        self.drill_grid_toolbar_configure = QToolButton()
+        self.drill_grid_toolbar_configure.setText("Grid Settings...")
+        self.drill_grid_toolbar_configure.setToolTip(
+            "Choose 8-to-5, 6-to-5, 12-to-5, 16-to-5, or a custom drill grid."
+        )
+        self.drill_grid_toolbar_configure.clicked.connect(self.show_drill_grid_dialog)
+        toolbar.addWidget(self.drill_grid_toolbar_configure)
         spacer = QWidget()
         spacer.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         toolbar.addWidget(spacer)
@@ -3454,6 +3658,7 @@ class MainWindow(QMainWindow):
         self.addToolBar(Qt.ToolBarArea.TopToolBarArea, favorites)
         self.favorite_toolbar = favorites
         self.refresh_favorites_toolbar()
+        self.sync_drill_grid_controls()
 
     def restore_ui_layout(self) -> None:
         state = self.settings.value("main_window/dock_state")
@@ -3797,7 +4002,7 @@ class MainWindow(QMainWindow):
         import_prop_button = QPushButton("Import")
         import_prop_button.clicked.connect(self.import_prop_image)
         design_prop_button = QPushButton("Design")
-        design_prop_button.setToolTip("Open the in-app prop designer to draw a prop from shapes.")
+        design_prop_button.setToolTip("Open Prop Studio for field-scaled layered prop design.")
         design_prop_button.clicked.connect(self.open_prop_designer)
         front_ensemble_button = QPushButton("Add Pit")
         front_ensemble_button.setToolTip("Add a movable front ensemble prop at the front sideline.")
@@ -3833,15 +4038,15 @@ class MainWindow(QMainWindow):
         prop_designer_tab = QWidget()
         designer_layout = QVBoxLayout(prop_designer_tab)
         designer_layout.setContentsMargins(8, 8, 8, 8)
-        designer_title = QLabel("Prop Designer")
+        designer_title = QLabel("Prop Studio")
         designer_title.setStyleSheet("font-size: 14px; font-weight: 750;")
         designer_note = QLabel(
-            "Draw field-ready props with rectangles, circles, lines, text, colors, exact yard sizing, "
-            "and anchor-based shape scaling. Saved designs become movable props in every set."
+            "Build field-ready props on a real-yard artboard with layers, images, text, pen and shape tools, "
+            "snapping, direct resize/rotation handles, undo history, and a live field-scale preview."
         )
         designer_note.setWordWrap(True)
         designer_note.setStyleSheet("color: #aeb7c8;")
-        open_designer_button = QPushButton("Open Prop Designer")
+        open_designer_button = QPushButton("Open Prop Studio")
         open_designer_button.clicked.connect(self.open_prop_designer)
         designer_layout.addWidget(designer_title)
         designer_layout.addWidget(designer_note)
@@ -3913,6 +4118,31 @@ class MainWindow(QMainWindow):
                 category_grid.addWidget(button, index // 2, index % 2)
                 self.tool_buttons[tool] = button
             tools_layout.addLayout(category_grid)
+        drill_grid_group = QGroupBox("Drill Grid & Snap")
+        drill_grid_layout = QVBoxLayout(drill_grid_group)
+        drill_grid_layout.setContentsMargins(8, 8, 8, 8)
+        drill_grid_layout.setSpacing(5)
+        drill_grid_row = QHBoxLayout()
+        self.drill_grid_panel_toggle = QCheckBox("Enable")
+        self.drill_grid_panel_toggle.setToolTip(
+            "Show an exact marching-step grid and snap marcher drags, on-form handles, and formation spots to it."
+        )
+        self.drill_grid_panel_toggle.toggled.connect(self.set_drill_grid_enabled)
+        drill_grid_row.addWidget(self.drill_grid_panel_toggle)
+        self.drill_grid_panel_status = QLabel()
+        self.drill_grid_panel_status.setObjectName("secondaryText")
+        drill_grid_row.addWidget(self.drill_grid_panel_status, 1)
+        drill_grid_configure = QPushButton("Configure...")
+        drill_grid_configure.setToolTip(
+            "Set standard 8-to-5 spacing or make a custom horizontal and vertical drill grid."
+        )
+        drill_grid_configure.clicked.connect(self.show_drill_grid_dialog)
+        drill_grid_row.addWidget(drill_grid_configure)
+        drill_grid_layout.addLayout(drill_grid_row)
+        drill_grid_hint = QLabel("Draggers and generated formation spots lock to unique grid points.")
+        drill_grid_hint.setWordWrap(True)
+        drill_grid_hint.setObjectName("secondaryText")
+        drill_grid_layout.addWidget(drill_grid_hint)
         follow_group = QGroupBox("Animate Formation")
         follow_layout = QVBoxLayout(follow_group)
         follow_layout.setContentsMargins(8, 8, 8, 8)
@@ -3935,8 +4165,9 @@ class MainWindow(QMainWindow):
         follow_shortcut_row.addWidget(follow_hint, 1)
         follow_shortcut_row.addWidget(follow_shortcut)
         follow_layout.addLayout(follow_shortcut_row)
-        formation_layout.addWidget(follow_group)
+        formation_layout.addWidget(drill_grid_group)
         formation_layout.addWidget(group)
+        formation_layout.addWidget(follow_group)
 
         self.tool_hint_label = QLabel(TOOL_HINTS[EditorTool.SELECT])
         self.tool_hint_label.setWordWrap(True)
@@ -4516,6 +4747,11 @@ class MainWindow(QMainWindow):
             "Keeps the current form exactly the same while reassigning which marcher owns each destination spot."
         )
         auto_plan_button.clicked.connect(self.optimize_selected_spot_assignment)
+        guided_repair_button = QPushButton("Guided Destination Repair...")
+        guided_repair_button.setToolTip(
+            "Compare destination swaps with live field previews, conflict scores, and an exact list of changed spot owners before applying."
+        )
+        guided_repair_button.clicked.connect(self.show_smart_transition_composer)
         clear_paths_button = QPushButton("Clear Selected Paths")
         clear_paths_button.clicked.connect(self.clear_selected_paths)
         cleanup_conflicts_button = QPushButton("Clean Selected Form")
@@ -4531,6 +4767,7 @@ class MainWindow(QMainWindow):
         analysis_form.addRow("Max Speed", self.max_yards_per_count)
         analysis_form.addRow(self.conflict_heatmap)
         analysis_form.addRow(analyze_button)
+        analysis_form.addRow(guided_repair_button)
         analysis_form.addRow(auto_plan_button)
         analysis_form.addRow(cleanup_conflicts_button)
         analysis_form.addRow(clear_paths_button)
@@ -4724,8 +4961,15 @@ class MainWindow(QMainWindow):
         labels = QCheckBox("Labels")
         labels.setChecked(True)
         labels.toggled.connect(self.field.update_labels)
-        ghost = QCheckBox("Ghost Previous Set")
-        ghost.setChecked(True)
+        self.ghost_previous_set = QCheckBox("Ghost Previous Set")
+        self.ghost_previous_set.setChecked(
+            self.settings.value("view/ghost_previous_set", True, type=bool)
+        )
+        self.ghost_previous_set.setToolTip(
+            "Shows the previous set as a faint, non-editable formation behind the current set."
+        )
+        self.ghost_previous_set.toggled.connect(self.set_ghosts_enabled)
+        self.field.set_ghosts_visible(self.ghost_previous_set.isChecked())
         self.show_minimap_checkbox = QCheckBox("Field Minimap")
         self.show_minimap_checkbox.setChecked(self.minimap_visible())
         self.show_minimap_checkbox.toggled.connect(self.set_minimap_visible)
@@ -4733,10 +4977,14 @@ class MainWindow(QMainWindow):
         self.show_field_hud_checkbox.setChecked(self.field_hud_enabled())
         self.show_field_hud_checkbox.setToolTip("Shows Apply/Clear only while a formation tool is active. Drag it to move.")
         self.show_field_hud_checkbox.toggled.connect(self.set_field_hud_enabled)
-        self.snap_align = QCheckBox("Snap Align")
+        self.snap_align = QCheckBox("Smart Alignment Guides")
+        self.snap_align.setToolTip(
+            "Temporarily align selections to yard lines, hashes, centers, and nearby marchers. "
+            "Use Drill Grid & Snap in the Forms tab for exact step intervals."
+        )
         self.snap_align.toggled.connect(self.field.set_snap_enabled)
         view_layout.addWidget(labels)
-        view_layout.addWidget(ghost)
+        view_layout.addWidget(self.ghost_previous_set)
         view_layout.addWidget(self.show_minimap_checkbox)
         view_layout.addWidget(self.show_field_hud_checkbox)
         view_layout.addWidget(self.snap_align)
@@ -5115,18 +5363,34 @@ class MainWindow(QMainWindow):
         self.set_tempo.setSuffix(" BPM")
         self.transition_combo = QComboBox()
         self.transition_combo.addItems([transition.value for transition in Transition])
+        self.set_director_notes = CommitPlainTextEdit()
+        self.set_director_notes.setPlaceholderText(
+            "Describe the visual, staging intent, production cue, or rehearsal focus for this set."
+        )
+        self.set_director_notes.setToolTip(
+            "Saved with this set and printed above its field chart in drill sheets and staff packets."
+        )
+        self.set_director_notes.setAccessibleName("Director's Notes")
+        self.set_director_notes.setTabChangesFocus(True)
+        self.set_director_notes.setMinimumHeight(84)
+        self.set_director_notes.setMaximumHeight(132)
         self.set_name.editingFinished.connect(self.update_set_details)
         self.set_start_count.valueChanged.connect(self.update_set_details)
         self.set_count_length.valueChanged.connect(self.update_set_length)
         self.set_end_count.valueChanged.connect(self.update_set_details)
         self.set_tempo.valueChanged.connect(self.update_set_details)
         self.transition_combo.currentTextChanged.connect(self.update_transition)
+        self.set_director_notes.editingStarted.connect(self.begin_set_director_notes_edit)
+        self.set_director_notes.textChanged.connect(self.preview_set_director_notes_edit)
+        self.set_director_notes.editingFinished.connect(self.finish_set_director_notes_edit)
         details_form.addRow("Name", self.set_name)
         details_form.addRow("Start", self.set_start_count)
         details_form.addRow("Counts", self.set_count_length)
         details_form.addRow("End", self.set_end_count)
         details_form.addRow("Tempo", self.set_tempo)
         details_form.addRow("Transition", self.transition_combo)
+        details_form.addRow(QLabel("Director's Notes"))
+        details_form.addRow(self.set_director_notes)
         set_layout.addWidget(details)
         multi_group = QGroupBox("Ripple Edit Scope")
         multi_form = QFormLayout(multi_group)
@@ -5222,6 +5486,7 @@ class MainWindow(QMainWindow):
         self.waveform.setMinimumHeight(64)
         self.waveform.set_project(self.project)
         self.waveform.position_selected.connect(self.seek_audio_position)
+        self.waveform.load_finished.connect(self.waveform_load_finished)
         audio_layout.addWidget(self.waveform)
         row = QHBoxLayout()
         self.count_label = QLabel("Count 1")
@@ -5237,6 +5502,18 @@ class MainWindow(QMainWindow):
         generate_sets_button.clicked.connect(self.show_beat_set_generator)
         row.addWidget(generate_sets_button)
         audio_layout.addLayout(row)
+        diagnostics_row = QHBoxLayout()
+        self.playback_diagnostics_label = QLabel("Playback diagnostics: ready")
+        self.playback_diagnostics_label.setObjectName("ToolHintLabel")
+        self.playback_diagnostics_label.setToolTip(
+            "Measured field frame rate, deadline misses, adaptive skips, render cost, and cache use."
+        )
+        reset_diagnostics_button = QPushButton("Reset Stats")
+        reset_diagnostics_button.setMaximumWidth(96)
+        reset_diagnostics_button.clicked.connect(self.reset_playback_diagnostics)
+        diagnostics_row.addWidget(self.playback_diagnostics_label, 1)
+        diagnostics_row.addWidget(reset_diagnostics_button)
+        audio_layout.addLayout(diagnostics_row)
         self.marker_table = QTableWidget(0, 2)
         self.marker_table.setHorizontalHeaderLabels(["Count", "Marker"])
         self.marker_table.setMinimumHeight(52)
@@ -5309,10 +5586,13 @@ class MainWindow(QMainWindow):
             self.player.setPosition(position)
             if was_playing:
                 self.player.play()
-        if hasattr(self, "waveform") and self.waveform.samples:
-            self.statusBar().showMessage("Audio waveform reloaded", 2200)
-        elif hasattr(self, "waveform") and self.waveform.load_error:
-            self.statusBar().showMessage(self.waveform.load_error, 4000)
+        self.statusBar().showMessage("Reloading waveform in the background…", 2200)
+
+    def waveform_load_finished(self, success: bool, message: str) -> None:
+        if success:
+            self.statusBar().showMessage(message or "Audio waveform loaded", 2600)
+        else:
+            self.statusBar().showMessage(message or "Audio waveform could not be loaded", 5000)
 
     def audio_duration_changed(self, duration_ms: int) -> None:
         if hasattr(self, "waveform"):
@@ -5764,6 +6044,42 @@ class MainWindow(QMainWindow):
             for key, point in self.curve_handles.items()
         }
 
+    def curve_on_form_handles(self, offset_x: float, offset_y: float) -> dict[str, tuple[float, float]]:
+        handles = self.offset_curve_handles(offset_x, offset_y)
+        start = handles["curve_start"]
+        control_1 = handles["curve_control_1"]
+        control_2 = handles["curve_control_2"]
+        end = handles["curve_end"]
+        return {
+            "curve_start": start,
+            "curve_on_1": cubic_bezier_point(start, control_1, control_2, end, 1 / 3),
+            "curve_on_2": cubic_bezier_point(start, control_1, control_2, end, 2 / 3),
+            "curve_end": end,
+        }
+
+    def set_curve_on_form_points(
+        self,
+        point_1: tuple[float, float],
+        point_2: tuple[float, float],
+    ) -> None:
+        start = self.curve_handles["curve_start"]
+        end = self.curve_handles["curve_end"]
+        coefficient_11 = 4 / 9
+        coefficient_12 = 2 / 9
+        coefficient_21 = 2 / 9
+        coefficient_22 = 4 / 9
+        determinant = coefficient_11 * coefficient_22 - coefficient_12 * coefficient_21
+        endpoint_weights = ((8 / 27, 1 / 27), (1 / 27, 8 / 27))
+        controls: list[tuple[float, float]] = []
+        for coordinate in range(2):
+            value_1 = point_1[coordinate] - endpoint_weights[0][0] * start[coordinate] - endpoint_weights[0][1] * end[coordinate]
+            value_2 = point_2[coordinate] - endpoint_weights[1][0] * start[coordinate] - endpoint_weights[1][1] * end[coordinate]
+            control_1 = (value_1 * coefficient_22 - coefficient_12 * value_2) / determinant
+            control_2 = (coefficient_11 * value_2 - coefficient_21 * value_1) / determinant
+            controls.append((control_1, control_2))
+        self.curve_handles["curve_control_1"] = (controls[0][0], controls[1][0])
+        self.curve_handles["curve_control_2"] = (controls[0][1], controls[1][1])
+
     def arc_point(
         self,
         center_x: float,
@@ -5871,6 +6187,54 @@ class MainWindow(QMainWindow):
             self.project.workflow[key] = values
         return values
 
+    def drill_grid_settings(self) -> DrillGridSettings:
+        payload = self.project.workflow.get("drill_grid", {})
+        return DrillGridSettings.from_json(payload if isinstance(payload, dict) else {})
+
+    def update_drill_grid_settings(self, settings: DrillGridSettings, label: str) -> None:
+        before = deepcopy(self.project.workflow)
+        after = deepcopy(before)
+        after["drill_grid"] = settings.to_json()
+        if before == after:
+            self.sync_drill_grid_controls()
+            return
+        self.undo_stack.push(WorkflowMetadataCommand(self, before, after, label))
+
+    def set_drill_grid_enabled(self, enabled: bool) -> None:
+        settings = self.drill_grid_settings()
+        settings.enabled = bool(enabled)
+        self.update_drill_grid_settings(settings, "Toggle Drill Grid")
+
+    def show_drill_grid_dialog(self, *_args) -> None:
+        dialog = DrillGridDialog(self.drill_grid_settings(), self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            self.sync_drill_grid_controls()
+            return
+        self.update_drill_grid_settings(dialog.selected_settings(), "Configure Drill Grid")
+
+    def sync_drill_grid_controls(self) -> None:
+        settings = self.drill_grid_settings()
+        self.field.set_drill_grid(settings)
+        toggle_controls = (
+            getattr(self, "drill_grid_panel_toggle", None),
+            getattr(self, "drill_grid_toolbar_toggle", None),
+            getattr(self, "drill_grid_enable_action", None),
+        )
+        for control in toggle_controls:
+            if control is None:
+                continue
+            control.blockSignals(True)
+            control.setChecked(settings.enabled)
+            control.blockSignals(False)
+        if hasattr(self, "drill_grid_panel_status"):
+            self.drill_grid_panel_status.setText(settings.description)
+        if hasattr(self, "drill_grid_toolbar_toggle"):
+            self.drill_grid_toolbar_toggle.setText(
+                f"Grid {settings.preset_label}" if settings.enabled else "Grid Off"
+            )
+        if hasattr(self, "drill_grid_toolbar_configure"):
+            self.drill_grid_toolbar_configure.setText(f"{settings.preset_label} Settings...")
+
     def load_global_library(self, key: str) -> dict[str, Any]:
         raw = self.settings.value(f"workflow/{key}", "{}")
         if not raw:
@@ -5951,6 +6315,7 @@ class MainWindow(QMainWindow):
         self.field.clear_preview()
         self.field.clear_paths()
         self.field.set_project(self.project, self.project_dir)
+        self.sync_drill_grid_controls()
         self.populate_sets()
         self.sync_timeline()
         self.set_count(self.current_count, seek_audio=False)
@@ -6439,7 +6804,7 @@ class MainWindow(QMainWindow):
     def show_smart_transition_composer(self) -> None:
         ids = self.ordered_dot_ids(self.field.selected_dot_ids())
         if len(ids) < 2:
-            QMessageBox.information(self, "Smart Transition Composer", "Select at least two marchers whose destination slots should be reassigned.")
+            QMessageBox.information(self, "Guided Destination Repair", "Select at least two marchers whose destination slots should be reassigned.")
             return
         targets = [self.current_set().dot_positions[dot_id] for dot_id in ids]
         candidates = transition_candidates(self.project, self.set_index, ids, targets)
@@ -6458,7 +6823,8 @@ class MainWindow(QMainWindow):
         if accepted and candidate:
             self.apply_assignment_candidate(candidate.positions, f"Transition: {candidate.label}")
             self.statusBar().showMessage(
-                f"Applied {candidate.label}: {candidate.score.total_distance:.1f} yd total, {candidate.score.crossings} crossing(s)",
+                f"Applied {candidate.label}: {candidate.changed_marchers} owner change(s), "
+                f"{candidate.score.spacing_conflicts} spacing conflict(s), {candidate.score.crossings} crossing(s)",
                 3200,
             )
         else:
@@ -7298,6 +7664,7 @@ class MainWindow(QMainWindow):
         self,
         positions: dict[str, tuple[float, float]],
         sync_unchanged_set_one_endpoints: bool = False,
+        label: str = "Edit Opening Positions",
     ) -> None:
         if not positions:
             return
@@ -7334,7 +7701,7 @@ class MainWindow(QMainWindow):
             before_sets,
             before_dot_selection,
             before_prop_selection,
-            "Edit Opening Positions",
+            label,
         )
 
     def capture_opening_positions_from_current_view(self) -> None:
@@ -7616,8 +7983,8 @@ class MainWindow(QMainWindow):
             id=self.next_prop_id(),
             name=design.name,
             image_file=design.image_file,
-            x=0.0,
-            y=-31.5,
+            x=design.x,
+            y=design.y,
             width=design.width,
             height=design.height,
             rotation=0.0,
@@ -8117,6 +8484,7 @@ class MainWindow(QMainWindow):
         self.field.clear_preview()
         self.field.clear_paths()
         self.field.set_project(self.project, self.project_dir)
+        self.sync_drill_grid_controls()
         for item in self.field.scene.selectedItems():
             item.setSelected(False)
         for dot_id in dot_selection or []:
@@ -8162,6 +8530,7 @@ class MainWindow(QMainWindow):
         self.field.clear_preview()
         self.field.clear_paths()
         self.field.set_project(self.project, self.project_dir)
+        self.sync_drill_grid_controls()
         for dot_id, item in self.field.dot_items.items():
             item.setSelected(dot_id in selected_ids)
         self.populate_sets()
@@ -8179,12 +8548,16 @@ class MainWindow(QMainWindow):
 
     def apply_workflow_metadata(self, workflow: dict[str, Any]) -> None:
         self.project.workflow = deepcopy(workflow)
+        self.formation_assignment_cache.clear()
+        self.sync_drill_grid_controls()
         self.refresh_selection_sets()
         self.refresh_lock_controls()
         self.apply_locks_to_field()
         self.refresh_visibility_filters()
         self.refresh_selected_paths()
         self.schedule_live_conflict_analysis()
+        if self.field.active_tool != EditorTool.SELECT:
+            self.update_formation_preview()
 
     def normalized_count_key(self, count: float | None = None) -> float:
         return round(self.current_count if count is None else count, 2)
@@ -8294,7 +8667,7 @@ class MainWindow(QMainWindow):
 
     def formation_targets(self, tool: EditorTool) -> dict[str, tuple[float, float]]:
         if tool == EditorTool.PLUGIN_FORM:
-            return self.plugin_formation_targets()
+            return self.snap_form_mapping_to_grid(self.plugin_formation_targets())
         ids, positions = self.selected_positions()
         if len(ids) < 2 and tool not in (EditorTool.SCATTER, EditorTool.MIRROR):
             return {}
@@ -8513,6 +8886,7 @@ class MainWindow(QMainWindow):
             new_positions = positions_along_path(path, len(ids))
         else:
             return {}
+        new_positions = self.snap_form_positions_to_grid(new_positions)
         preserve_order = tool in {
             EditorTool.SCALE,
             EditorTool.ROTATE,
@@ -8535,6 +8909,31 @@ class MainWindow(QMainWindow):
             new_positions,
             preserve_order=preserve_order,
             closed_order=closed_order,
+        )
+
+    def snap_form_positions_to_grid(
+        self,
+        positions: list[tuple[float, float]],
+    ) -> list[tuple[float, float]]:
+        if not self.field.drill_grid.enabled:
+            return positions
+        return snap_positions_to_grid(
+            positions,
+            self.field.drill_grid,
+            unique=True,
+            reference_y=self.field.drill_grid_reference_rows(),
+        )
+
+    def snap_form_mapping_to_grid(
+        self,
+        positions: dict[str, tuple[float, float]],
+    ) -> dict[str, tuple[float, float]]:
+        if not positions or not self.field.drill_grid.enabled:
+            return positions
+        return snap_position_mapping(
+            positions,
+            self.field.drill_grid,
+            reference_y=self.field.drill_grid_reference_rows(),
         )
 
     def assign_targets_to_marchers(
@@ -8663,7 +9062,7 @@ class MainWindow(QMainWindow):
         if tool == EditorTool.CURVE:
             if not self.curve_handles:
                 self.initialize_curve_tool(positions)
-            handles.update(self.offset_curve_handles(offset_x, offset_y))
+            handles.update(self.curve_on_form_handles(offset_x, offset_y))
             return handles
         if tool == EditorTool.FREE_CURVE:
             if len(self.free_curve_anchors) != int(self.free_curve_anchor_count.value()):
@@ -8726,8 +9125,8 @@ class MainWindow(QMainWindow):
             )
             angle = self.rotation_degrees.value() * pi / 180
             handles["rotate_angle"] = (
-                pivot[0] + offset_x + cos(angle) * radius * 1.18,
-                pivot[1] + offset_y + sin(angle) * radius * 1.18,
+                pivot[0] + offset_x + cos(angle) * radius,
+                pivot[1] + offset_y + sin(angle) * radius,
             )
             return handles
         if tool == EditorTool.WARP:
@@ -8836,7 +9235,7 @@ class MainWindow(QMainWindow):
             self.preview_transform_pivot = (x - offset_x, y - offset_y)
         elif kind == "curve_bend":
             self.curve_bend.setValue(y - center_y)
-        elif kind in {"curve_start", "curve_control_1", "curve_control_2", "curve_end"}:
+        elif kind in {"curve_start", "curve_end"}:
             if not self.curve_handles:
                 self.initialize_curve_tool(positions)
             self.curve_handles[kind] = (x - offset_x, y - offset_y)
@@ -8852,6 +9251,22 @@ class MainWindow(QMainWindow):
                     center_x * 2 - x - offset_x,
                     center_y * 2 - y - offset_y,
                 )
+        elif kind in {"curve_on_1", "curve_on_2"}:
+            if not self.curve_handles:
+                self.initialize_curve_tool(positions)
+            on_form = self.curve_on_form_handles(0.0, 0.0)
+            point_1 = on_form["curve_on_1"]
+            point_2 = on_form["curve_on_2"]
+            dragged = (x - offset_x, y - offset_y)
+            if kind == "curve_on_1":
+                point_1 = dragged
+                if alt:
+                    point_2 = (base_center_x * 2 - dragged[0], base_center_y * 2 - dragged[1])
+            else:
+                point_2 = dragged
+                if alt:
+                    point_1 = (base_center_x * 2 - dragged[0], base_center_y * 2 - dragged[1])
+            self.set_curve_on_form_points(point_1, point_2)
         elif kind.startswith("free_curve_anchor:"):
             try:
                 index = int(kind.split(":", 1)[1])
@@ -9111,6 +9526,20 @@ class MainWindow(QMainWindow):
         after = dict(before)
         after.update(targets)
         self.remember_formation_edit_descriptor(targets, repeat_settings)
+        if self.editing_set_one_opening():
+            self.apply_opening_positions(
+                targets,
+                sync_unchanged_set_one_endpoints=True,
+                label=f"Apply {tool.value.title()}",
+            )
+            self.field.clear_preview()
+            self.preview_center_offset = (0.0, 0.0)
+            self.set_tool(EditorTool.SELECT)
+            self.refresh_selected_paths()
+            self.remember_repeat_action(
+                {"type": "formation", "settings": repeat_settings, "label": f"Apply {tool.value.title()}"}
+            )
+            return
         if len(self.selected_set_indices_for_edit()) > 1:
             self.apply_positions(after)
             self.field.clear_preview()
@@ -9293,7 +9722,7 @@ class MainWindow(QMainWindow):
         if name == "Save Selection Set":
             self.save_selection_set()
             return
-        if name == "Smart Transition Composer":
+        if name in {"Smart Transition Composer", "Guided Destination Repair"}:
             self.show_smart_transition_composer()
             return
         if name == "Section-Aware Form Fit":
@@ -10298,6 +10727,41 @@ class MainWindow(QMainWindow):
             if item:
                 item.setPos(self.field.field_to_scene(*position))
 
+    def preview_dot_coordinates(self, proposed: dict[str, tuple[float, float]]) -> None:
+        self.update_selected_coordinate_readout(proposed)
+
+    @staticmethod
+    def inspector_coordinate_text(value: float) -> str:
+        text = f"{float(value):.3f}".rstrip("0").rstrip(".")
+        return "0" if text in {"", "-0"} else text
+
+    def update_selected_coordinate_readout(
+        self,
+        positions: dict[str, tuple[float, float]] | None = None,
+    ) -> None:
+        if not hasattr(self, "dot_x"):
+            return
+        ids = self.field.selected_dot_ids()
+        if len(ids) != 1 or self.field.selected_prop_ids():
+            self.dot_yardline.setText("-")
+            self.dot_hash.setText("-")
+            return
+        dot_id = ids[0]
+        position = positions.get(dot_id) if positions else None
+        if position is None:
+            item = self.field.dot_items.get(dot_id)
+            if item is not None:
+                position = self.field.scene_to_field(item.pos())
+        if position is None:
+            position = self.current_set().dot_positions.get(dot_id, (0.0, 0.0))
+        if not self.dot_x.hasFocus():
+            self.dot_x.setText(self.inspector_coordinate_text(position[0]))
+        if not self.dot_y.hasFocus():
+            self.dot_y.setText(self.inspector_coordinate_text(position[1]))
+        yard_text, hash_text = format_surface_coordinate(self.project.surface, position[0], position[1])
+        self.dot_yardline.setText(yard_text)
+        self.dot_hash.setText(hash_text)
+
     def show_alternating_selection(self) -> None:
         current = self.field.selected_dot_ids()
         visible = [
@@ -10805,6 +11269,20 @@ class MainWindow(QMainWindow):
         if hasattr(self, "set_list"):
             self.populate_sets()
 
+    def apply_field_logo_visible(self, visible: bool) -> None:
+        self.field.set_field_logo_visible(visible)
+        self.thumbnail_cache.clear()
+        self.refresh_set_thumbnails()
+        if hasattr(self, "minimap"):
+            self.minimap.update()
+
+    def apply_field_logo_appearance(self) -> None:
+        self.field.refresh_field_logo()
+        self.thumbnail_cache.clear()
+        self.refresh_set_thumbnails()
+        if hasattr(self, "minimap"):
+            self.minimap.update()
+
     def set_thumbnail_cache_key(self, set_index: int) -> str:
         drill_set = self.project.sets[set_index]
         payload = {
@@ -10812,6 +11290,7 @@ class MainWindow(QMainWindow):
             "field_mode": getattr(self.field, "field_mode", "white"),
             "theme": self.settings.value("appearance/theme", "dark"),
             "dot_symbol": self.field.dot_symbol if hasattr(self.field, "dot_symbol") else "",
+            "field_logo": field_logo_enabled(self.settings),
             "colors": {dot.id: dot.color for dot in self.project.dots},
             "surface": self.project.surface.to_json(),
         }
@@ -10830,8 +11309,20 @@ class MainWindow(QMainWindow):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         margin = 4
         field_rect = QRectF(margin, margin, pixmap.width() - margin * 2, pixmap.height() - margin * 2)
-        draw_surface_preview(painter, field_rect, self.project.surface, palette)
+        draw_surface_preview(
+            painter,
+            field_rect,
+            self.project.surface,
+            palette,
+            self.field.field_mode,
+            self.field.show_field_logo,
+        )
         drill_set = self.project.sets[set_index]
+        pixels_per_yard = min(
+            field_rect.width() / max(1.0, self.project.surface.width_yards),
+            field_rect.height() / max(1.0, self.project.surface.height_yards),
+        )
+        dot_radius, dot_outline_width = scaled_field_dot_metrics(pixels_per_yard)
         for prop_state in drill_set.prop_positions.values():
             point = field_to_rect(field_rect, self.project.surface, float(prop_state.get("x", 0)), float(prop_state.get("y", 0)))
             x, y = point.x(), point.y()
@@ -10844,10 +11335,16 @@ class MainWindow(QMainWindow):
         for dot_id, position in drill_set.dot_positions.items():
             dot = self.project.dot_by_id(dot_id)
             point = field_to_rect(field_rect, self.project.surface, position[0], position[1])
-            x, y = point.x(), point.y()
-            painter.setBrush(QColor(dot.color if dot else "#e53935"))
-            painter.setPen(QPen(QColor(tokens["background_color"]), 0.35))
-            painter.drawEllipse(QPointF(x, y), 1.25, 1.25)
+            draw_dot_symbol(
+                painter,
+                point,
+                dot_radius,
+                QColor(dot.color if dot else "#e53935"),
+                self.field.dot_symbol,
+                rotation_degrees=dot_facing_at_set(self.project, set_index, dot_id),
+                outline_color=QColor(tokens["background_color"]),
+                outline_width=dot_outline_width,
+            )
         painter.end()
         self.thumbnail_cache[cache_key] = QPixmap(pixmap)
         if len(self.thumbnail_cache) > 160:
@@ -10874,7 +11371,12 @@ class MainWindow(QMainWindow):
                 ),
             )
             item.setData(Qt.ItemDataRole.UserRole, index)
-            item.setToolTip(f"{drill_set.name}: counts {drill_set.start_count}-{drill_set.end_count}, {tempo:g} BPM")
+            tooltip = f"{drill_set.name}: counts {drill_set.start_count}-{drill_set.end_count}, {tempo:g} BPM"
+            if drill_set.director_notes.strip():
+                note_preview = " ".join(drill_set.director_notes.split())
+                ellipsis = "..." if len(note_preview) > 180 else ""
+                tooltip += f"\nDirector's Notes: {note_preview[:180]}{ellipsis}"
+            item.setToolTip(tooltip)
             self.set_list.addItem(item)
             if hasattr(self, "toolbar_set_selector"):
                 self.toolbar_set_selector.addItem(
@@ -11052,6 +11554,28 @@ class MainWindow(QMainWindow):
         self.set_end_count.blockSignals(False)
         self.update_set_details()
 
+    def begin_set_director_notes_edit(self) -> None:
+        self._director_notes_edit_before = (
+            deepcopy(self.project.sets),
+            self.set_index,
+            self.current_count,
+        )
+
+    def preview_set_director_notes_edit(self) -> None:
+        if not self.project.sets:
+            return
+        self.current_set().director_notes = self.set_director_notes.toPlainText().strip()
+
+    def finish_set_director_notes_edit(self) -> None:
+        before = getattr(self, "_director_notes_edit_before", None)
+        self._director_notes_edit_before = None
+        if before is None:
+            return
+        before_sets, before_index, before_count = before
+        self.current_set().director_notes = self.set_director_notes.toPlainText().strip()
+        self.populate_sets()
+        self.push_set_snapshot(before_sets, before_index, before_count, "Edit Director's Notes")
+
     def update_set_details(self) -> None:
         before_sets = deepcopy(self.project.sets)
         before_index = self.set_index
@@ -11069,6 +11593,7 @@ class MainWindow(QMainWindow):
         drill_set.start_count = start
         drill_set.end_count = end
         drill_set.tempo = self.set_tempo.value() or None
+        drill_set.director_notes = self.set_director_notes.toPlainText().strip()
         if old_start != drill_set.start_count or old_end != drill_set.end_count:
             self.ripple_following_sets()
         self.current_count = max(drill_set.start_count, min(self.current_count, drill_set.end_count))
@@ -11094,6 +11619,7 @@ class MainWindow(QMainWindow):
             self.set_end_count,
             self.set_tempo,
             self.transition_combo,
+            self.set_director_notes,
         ):
             widget.blockSignals(True)
         self.set_name.setText(drill_set.name)
@@ -11102,6 +11628,7 @@ class MainWindow(QMainWindow):
         self.set_end_count.setValue(drill_set.end_count)
         self.set_tempo.setValue(drill_set.tempo or 0)
         self.transition_combo.setCurrentText(drill_set.transition.value)
+        self.set_director_notes.setPlainText(drill_set.director_notes)
         for widget in (
             self.set_name,
             self.set_start_count,
@@ -11109,6 +11636,7 @@ class MainWindow(QMainWindow):
             self.set_end_count,
             self.set_tempo,
             self.transition_combo,
+            self.set_director_notes,
         ):
             widget.blockSignals(False)
 
@@ -11184,13 +11712,22 @@ class MainWindow(QMainWindow):
         seek_audio: bool = False,
         update_waveform: bool = True,
         refresh_paths: bool = True,
+        playback_optimized: bool = False,
     ) -> None:
         start_count, end_count = playback_bounds_for_set(self.project, self.set_index)
         self.current_count = max(start_count, min(count, end_count))
         self.field.set_reference_set_index(self.set_index)
-        self.field.set_positions(interpolate_project(self.project, self.set_index, self.current_count))
-        self.field.set_facings(interpolate_dot_facings(self.project, self.set_index, self.current_count))
-        self.field.set_prop_states(interpolate_props(self.project, self.set_index, self.current_count))
+        positions, facings, prop_states = self.playback_frame_state(
+            self.set_index,
+            self.current_count,
+            use_cache=playback_optimized,
+        )
+        self.field.set_positions(positions)
+        self.field.set_facings(facings)
+        self.field.set_prop_states(prop_states)
+        self.update_selected_coordinate_readout(positions)
+        if not playback_optimized or self._ghost_set_index != self.set_index:
+            self.refresh_previous_set_ghosts()
         self.count_label.setText(f"Count {self.current_count:.2f}")
         if hasattr(self, "count_finder"):
             self.count_finder.blockSignals(True)
@@ -11207,15 +11744,83 @@ class MainWindow(QMainWindow):
             self.waveform.set_position_ms(self.audio_position_for_count(self.set_index, self.current_count))
         if refresh_paths:
             self.refresh_selected_paths()
-        self.refresh_measurements()
-        if hasattr(self, "minimap"):
-            self.minimap.update()
-        if hasattr(self, "choreography_timeline"):
-            self.choreography_timeline.set_current_count(self.current_count)
+        self.playback_auxiliary_frame += 1
+        auxiliary_stride = self.playback_scheduler.quality.auxiliary_stride if playback_optimized else 1
+        if not playback_optimized or self.playback_auxiliary_frame % auxiliary_stride == 0:
+            self.refresh_measurements()
+            if hasattr(self, "minimap"):
+                self.minimap.update()
+            if hasattr(self, "choreography_timeline"):
+                self.choreography_timeline.set_current_count(self.current_count)
+
+    def playback_frame_state(
+        self,
+        set_index: int,
+        count: float,
+        *,
+        use_cache: bool,
+    ) -> tuple[dict, dict, dict]:
+        cache_enabled = self.settings.value("performance/playback_cache", True, type=bool)
+        key = self.playback_frame_cache.key(set_index, count, self.playback_scheduler.quality)
+        if use_cache and cache_enabled:
+            cached = self.playback_frame_cache.get(key)
+            if cached is not None:
+                return cached
+        frame = (
+            interpolate_project(self.project, set_index, count),
+            interpolate_dot_facings(self.project, set_index, count),
+            interpolate_props(self.project, set_index, count),
+        )
+        if use_cache and cache_enabled:
+            self.playback_frame_cache.put(key, frame)
+        return frame
+
+    def reset_playback_diagnostics(self) -> None:
+        self.playback_scheduler.reset(perf_counter() * 1000.0)
+        self.playback_frame_cache.clear()
+        self.refresh_playback_diagnostics(force=True)
+
+    def refresh_playback_diagnostics(self, *, force: bool = False) -> None:
+        if not hasattr(self, "playback_diagnostics_label"):
+            return
+        now_ms = perf_counter() * 1000.0
+        if not force and now_ms - self._last_playback_diagnostics_update_ms < 250:
+            return
+        self._last_playback_diagnostics_update_ms = now_ms
+        snapshot = self.playback_scheduler.snapshot()
+        cache_total = self.playback_frame_cache.hits + self.playback_frame_cache.misses
+        cache_percent = int(round(self.playback_frame_cache.hits / cache_total * 100)) if cache_total else 0
+        self.playback_diagnostics_label.setText(
+            f"{snapshot.displayed_fps:4.1f} FPS  |  Dropped {snapshot.dropped_frames} "
+            f"(late {snapshot.missed_deadlines}, adaptive {snapshot.adaptive_skips})  |  "
+            f"{snapshot.average_render_ms:.1f} ms avg / {snapshot.p95_render_ms:.1f} p95  |  "
+            f"{snapshot.quality.label}  |  Cache {cache_percent}%"
+        )
+
+    def finish_playback_frame(self, render_started: float) -> None:
+        render_ms = (perf_counter() - render_started) * 1000.0
+        measured_ms = render_ms + max(0.0, self.field.last_paint_duration_ms)
+        self.playback_scheduler.record_render(measured_ms, perf_counter() * 1000.0)
+        quality = self.playback_scheduler.consume_quality_change()
+        if quality is not None:
+            self.field.set_playback_quality(quality.name.lower(), len(self.project.dots))
+            self.statusBar().showMessage(
+                f"Playback quality changed to {quality.label} to maintain real-time timing.",
+                3500,
+            )
+        self.refresh_playback_diagnostics()
 
     def play(self) -> None:
         if self.play_timer.isActive():
             return
+        self.audio_recovery_resume_requested = False
+        self.playback_scheduler.set_adaptive(
+            self.settings.value("performance/adaptive_playback", True, type=bool)
+        )
+        self.playback_scheduler.reset(perf_counter() * 1000.0)
+        self.playback_frame_cache.clear()
+        self.playback_auxiliary_frame = 0
+        self.field.set_playback_quality("full", len(self.project.dots))
         if self.player.source().isValid():
             self.last_playback_audio_ms = self.audio_position_for_count(self.set_index, self.current_count)
             self.player.setPosition(self.last_playback_audio_ms)
@@ -11226,13 +11831,17 @@ class MainWindow(QMainWindow):
         if self.player.source().isValid():
             self.player.play()
         self.refresh_selected_paths()
+        self.refresh_playback_diagnostics(force=True)
 
     def pause(self) -> None:
+        self.audio_recovery_resume_requested = False
         self.play_timer.stop()
         if self.player.source().isValid():
             self.player.pause()
+        self.field.set_playback_quality("full", len(self.project.dots))
         self.field.set_transform_gizmo_suspended(False)
         self.refresh_selected_paths()
+        self.refresh_playback_diagnostics(force=True)
 
     def toggle_playback(self) -> None:
         if self.play_timer.isActive():
@@ -11241,21 +11850,38 @@ class MainWindow(QMainWindow):
             self.play()
 
     def tick_playback(self) -> None:
+        callback_ms = perf_counter() * 1000.0
+        if not self.playback_scheduler.should_render(callback_ms):
+            self.refresh_playback_diagnostics()
+            return
+        render_started = perf_counter()
         if self.player.source().isValid():
             audio_position = self.player.position()
             if audio_position + 80 < self.last_playback_audio_ms:
                 audio_position = self.last_playback_audio_ms
             else:
                 self.last_playback_audio_ms = audio_position
+            self.playback_scheduler.record_audio_clock(audio_position)
+            loop_start_count, loop_end_count = playback_bounds_for_set(self.project, self.set_index)
+            loop_start_ms = self.audio_position_for_count(self.set_index, loop_start_count)
+            loop_end_ms = self.audio_position_for_count(self.set_index, loop_end_count)
+            if self.loop_current_set.isChecked() and audio_position >= max(loop_start_ms, loop_end_ms - 2):
+                self.current_count = loop_start_count
+                self.last_playback_audio_ms = loop_start_ms
+                self.playback_scheduler.record_audio_clock(loop_start_ms, seeking=True)
+                self.player.setPosition(loop_start_ms)
+                self.set_count(
+                    self.current_count,
+                    seek_audio=False,
+                    update_waveform=False,
+                    refresh_paths=False,
+                    playback_optimized=True,
+                )
+                self.finish_playback_frame(render_started)
+                return
             next_set_index, next_count = self.count_for_audio_position(audio_position)
             if hasattr(self, "waveform"):
                 self.waveform.set_position_ms(audio_position)
-            if self.loop_current_set.isChecked() and next_set_index != self.set_index:
-                self.current_count = self.current_set().start_count
-                self.last_playback_audio_ms = self.audio_position_for_count(self.set_index, self.current_count)
-                self.player.setPosition(self.last_playback_audio_ms)
-                self.set_count(self.current_count, seek_audio=False, update_waveform=False)
-                return
             if next_set_index != self.set_index:
                 self.set_index = next_set_index
                 self.current_count = next_count
@@ -11264,13 +11890,29 @@ class MainWindow(QMainWindow):
                 self.refresh_selected_paths()
             else:
                 self.current_count = next_count
-            self.set_count(self.current_count, seek_audio=False, update_waveform=False, refresh_paths=False)
+            last_set_index = max(0, len(self.project.sets) - 1)
+            _show_start, show_end_count = playback_bounds_for_set(self.project, last_set_index)
+            show_end_ms = self.audio_position_for_count(last_set_index, show_end_count)
+            reached_show_end = self.set_index == last_set_index and audio_position >= max(0, show_end_ms - 2)
+            if reached_show_end:
+                self.current_count = show_end_count
+            self.set_count(
+                self.current_count,
+                seek_audio=False,
+                update_waveform=False,
+                refresh_paths=False,
+                playback_optimized=True,
+            )
+            self.finish_playback_frame(render_started)
+            if reached_show_end:
+                self.pause()
             return
 
         tempo = self.project.active_tempo(self.set_index)
         elapsed_ms = self.playback_clock.restart() if self.playback_clock.isValid() else self.play_timer.interval()
-        elapsed_ms = max(1, min(elapsed_ms, 100))
+        elapsed_ms = max(1, elapsed_ms)
         self.current_count += (tempo / 60) * (elapsed_ms / 1000) * self.current_playback_rate()
+        reached_show_end = False
         _start_count, playback_end_count = playback_bounds_for_set(self.project, self.set_index)
         if self.current_count > playback_end_count:
             if self.loop_current_set.isChecked():
@@ -11279,15 +11921,24 @@ class MainWindow(QMainWindow):
                     self.last_playback_audio_ms = self.audio_position_for_count(self.set_index, self.current_count)
                     self.player.setPosition(self.last_playback_audio_ms)
             elif self.set_index + 1 < len(self.project.sets):
+                overflow = self.current_count - playback_end_count
                 self.set_index += 1
-                self.current_count = self.current_set().start_count
+                self.current_count = self.current_set().start_count + overflow
                 self.populate_sets()
                 self.sync_timeline()
                 self.refresh_selected_paths()
             else:
-                self.pause()
+                reached_show_end = True
                 self.current_count = self.current_set().end_count
-        self.set_count(self.current_count, seek_audio=False, refresh_paths=False)
+        self.set_count(
+            self.current_count,
+            seek_audio=False,
+            refresh_paths=False,
+            playback_optimized=True,
+        )
+        self.finish_playback_frame(render_started)
+        if reached_show_end:
+            self.pause()
 
     def current_playback_rate(self) -> float:
         if not hasattr(self, "playback_rate"):
@@ -11297,6 +11948,19 @@ class MainWindow(QMainWindow):
     def update_playback_rate(self) -> None:
         if self.player.source().isValid():
             self.player.setPlaybackRate(self.current_playback_rate())
+
+    def apply_playback_performance_settings(self, adaptive: bool, cache_enabled: bool) -> None:
+        self.playback_scheduler.set_adaptive(bool(adaptive))
+        if not cache_enabled:
+            self.playback_frame_cache.clear()
+        if not self.play_timer.isActive():
+            self.field.set_playback_quality("full", len(self.project.dots))
+        self.refresh_playback_diagnostics(force=True)
+        self.statusBar().showMessage(
+            f"Playback optimization: {'adaptive' if adaptive else 'full quality'}, "
+            f"cache {'on' if cache_enabled else 'off'}",
+            3000,
+        )
 
     def toggle_loop_current_set(self) -> None:
         self.loop_current_set.setChecked(not self.loop_current_set.isChecked())
@@ -12200,7 +12864,6 @@ class MainWindow(QMainWindow):
             self.dot_hash.setText("-")
         else:
             dot = self.project.dot_by_id(ids[0])
-            position = self.current_set().dot_positions.get(ids[0], (0, 0))
             if dot:
                 self.dot_name.setText(dot.name)
                 self.dot_section.setText(dot.section)
@@ -12208,11 +12871,7 @@ class MainWindow(QMainWindow):
                 self.dot_rank.setText(dot.rank)
                 self.dot_equipment.setText(dot.equipment)
                 self.dot_layer.setText(dot.layer)
-                self.dot_x.setText(f"{position[0]:.2f}")
-                self.dot_y.setText(f"{position[1]:.2f}")
-                yard_text, hash_text = format_surface_coordinate(self.project.surface, position[0], position[1])
-                self.dot_yardline.setText(yard_text)
-                self.dot_hash.setText(hash_text)
+                self.update_selected_coordinate_readout()
 
         prop_enabled = len(prop_ids) == 1 and not ids
         for widget in (
@@ -12281,6 +12940,26 @@ class MainWindow(QMainWindow):
             self.layer_filter.currentText() or "All",
         )
         self.apply_locks_to_field()
+
+    def set_ghosts_enabled(self, enabled: bool) -> None:
+        self.settings.setValue("view/ghost_previous_set", bool(enabled))
+        self.settings.sync()
+        self.field.set_ghosts_visible(bool(enabled))
+        self._ghost_set_index = -1
+        self.refresh_previous_set_ghosts()
+
+    def refresh_previous_set_ghosts(self) -> None:
+        if not self.field.show_ghosts or self.set_index <= 0 or not self.project.sets:
+            self.field.clear_ghosts()
+            self._ghost_set_index = self.set_index
+            return
+        previous_index = self.set_index - 1
+        previous_set = self.project.sets[previous_index]
+        self.field.set_ghost_positions(
+            previous_set.dot_positions,
+            self.facings_for_set(previous_index),
+        )
+        self._ghost_set_index = self.set_index
 
     def toggle_snap_align(self) -> None:
         self.snap_align.setChecked(not self.snap_align.isChecked())
@@ -12367,10 +13046,28 @@ class MainWindow(QMainWindow):
                     f"worst {entry.worst_spacing:.2f} yd, fastest {entry.fastest_yards_per_count:.2f} yd/count"
                 )
             for warning in all_warnings:
-                self.warning_list.addItem(
-                    f"{warning.severity.upper()} | {warning.set_name} | "
+                repairability = (
+                    "UNAVOIDABLE WITH FIXED PICTURES"
+                    if warning.avoidable is False
+                    else "REPAIRABLE"
+                    if warning.avoidable is True
+                    else "CHECK"
+                )
+                item = QListWidgetItem(
+                    f"{warning.severity.upper()} | {repairability} | {warning.set_name} | "
                     f"Count {warning.count:.2f} | {warning.message}"
                 )
+                item.setToolTip(
+                    "\n".join(
+                        value
+                        for value in (
+                            warning.explanation,
+                            f"Suggested repair: {warning.suggestion}" if warning.suggestion else "",
+                        )
+                        if value
+                    )
+                )
+                self.warning_list.addItem(item)
             self.statusBar().showMessage(
                 f"{len(all_warnings)} path warnings, {len(timeline_entries)} conflict timeline entries",
                 3000,
@@ -12833,6 +13530,13 @@ class MainWindow(QMainWindow):
             y = float(self.dot_y.text())
         except ValueError:
             return
+        if self.editing_set_one_opening():
+            self.apply_opening_positions(
+                {ids[0]: (x, y)},
+                sync_unchanged_set_one_endpoints=True,
+                label="Edit Marcher Coordinate",
+            )
+            return
         after = self.current_positions()
         after[ids[0]] = (x, y)
         self.apply_positions(after)
@@ -12865,9 +13569,28 @@ class MainWindow(QMainWindow):
         }
         self.apply_prop_states(after)
 
-    def save(self) -> None:
-        save_project(self.project_dir, self.project, backup_reason="manual")
+    def show_operation_failure(
+        self,
+        title: str,
+        action: str,
+        error: BaseException,
+        *,
+        location: Path | str | None = None,
+    ) -> None:
+        QMessageBox.warning(
+            self,
+            title,
+            actionable_error_message(action, error, location=location),
+        )
+
+    def save(self) -> bool:
+        try:
+            save_project(self.project_dir, self.project, backup_reason="manual")
+        except Exception as exc:
+            self.show_operation_failure("Save Failed", "save the project", exc, location=self.project_dir)
+            return False
         self.statusBar().showMessage("Project saved", 2500)
+        return True
 
     def save_as(self) -> None:
         title, accepted = QInputDialog.getText(
@@ -12879,12 +13602,19 @@ class MainWindow(QMainWindow):
         if not accepted or not title.strip():
             return
 
-        self.save()
+        if not self.save():
+            return
         target_dir = self.unique_project_dir(project_library_dir(), safe_folder_name(title))
-        shutil.copytree(self.project_dir, target_dir)
+        previous_title = self.project.metadata.show_title
+        try:
+            shutil.copytree(self.project_dir, target_dir)
+            self.project.metadata.show_title = title.strip()
+            save_project(target_dir, self.project, backup_reason="save_as")
+        except Exception as exc:
+            self.project.metadata.show_title = previous_title
+            self.show_operation_failure("Save As Failed", "create the project copy", exc, location=target_dir)
+            return
         self.project_dir = target_dir
-        self.project.metadata.show_title = title.strip()
-        save_project(self.project_dir, self.project, backup_reason="save_as")
         self.setWindowTitle(f"Drill Pirate - {self.project.metadata.show_title}")
         self.statusBar().showMessage(f"Saved as {target_dir.name}", 3000)
 
@@ -12898,17 +13628,27 @@ class MainWindow(QMainWindow):
 
     def return_home(self) -> None:
         self.pause()
-        self.save()
-        self.return_home_requested.emit()
+        if self.save():
+            self.return_home_requested.emit()
 
-    def autosave(self) -> None:
-        save_project(
-            self.project_dir,
-            self.project,
-            backup_reason="autosave",
-            backup_min_interval_seconds=60,
-        )
+    def autosave(self) -> bool:
+        try:
+            save_project(
+                self.project_dir,
+                self.project,
+                backup_reason="autosave",
+                backup_min_interval_seconds=60,
+            )
+        except Exception as exc:
+            message = actionable_error_message("autosave the project", exc, location=self.project_dir)
+            self.statusBar().showMessage("Autosave failed — project files were preserved", 6000)
+            if message != self._last_autosave_error:
+                self._last_autosave_error = message
+                QMessageBox.warning(self, "Autosave Failed", message)
+            return False
+        self._last_autosave_error = ""
         self.statusBar().showMessage("Autosaved", 1500)
+        return True
 
     def restore_previous_save(self) -> None:
         backups = list_project_backups(self.project_dir)
@@ -12954,7 +13694,7 @@ class MainWindow(QMainWindow):
             restore_project_backup(self.project_dir, path)
             self.reload_project_from_disk()
         except Exception as exc:
-            QMessageBox.warning(self, "Restore Failed", str(exc))
+            self.show_operation_failure("Restore Failed", "restore the selected backup", exc, location=path)
             return
         self.statusBar().showMessage("Previous save restored", 3500)
 
@@ -12963,6 +13703,7 @@ class MainWindow(QMainWindow):
         self.set_index = 0
         self.current_count = self.project.sets[0].start_count if self.project.sets else 1
         self.field.set_project(self.project, self.project_dir)
+        self.sync_drill_grid_controls()
         self.populate_sets()
         self.refresh_marcher_table()
         self.refresh_prop_table()
@@ -12978,7 +13719,11 @@ class MainWindow(QMainWindow):
 
     def export_bug_report_bundle(self) -> None:
         self.pause()
-        save_project(self.project_dir, self.project, backup_reason="bug_report")
+        try:
+            save_project(self.project_dir, self.project, backup_reason="bug_report")
+        except Exception as exc:
+            self.show_operation_failure("Bug Report Failed", "prepare the project for a bug report", exc, location=self.project_dir)
+            return
         path, _ = QFileDialog.getSaveFileName(
             self,
             "Export Bug Report Bundle",
@@ -12990,7 +13735,7 @@ class MainWindow(QMainWindow):
         try:
             export_bug_report_bundle(Path(path), project_dir=self.project_dir)
         except Exception as exc:
-            QMessageBox.warning(self, "Bug Report Failed", str(exc))
+            self.show_operation_failure("Bug Report Failed", "export the bug report bundle", exc, location=path)
             return
         self.statusBar().showMessage("Bug report bundle exported", 3500)
 
@@ -13023,6 +13768,8 @@ class MainWindow(QMainWindow):
         zip_button.setToolTip("Package the project folder for backup or sharing.")
         batch_button = QPushButton("Batch: Staff + Dot Books + CSV + ZIP")
         batch_button.setToolTip("Run the standard export package in one folder.")
+        layout_designer_button = QPushButton("PDF Layout Designer…")
+        layout_designer_button.setToolTip("Visually design reusable PDF pages with movable text, images, fields, and tables.")
         ffmpeg_button = QPushButton("Set ffmpeg.exe")
         ffmpeg_button.setToolTip("Choose a local ffmpeg executable for MP4 export.")
 
@@ -13037,6 +13784,7 @@ class MainWindow(QMainWindow):
             coordinate_button,
             zip_button,
             batch_button,
+            layout_designer_button,
         ]
         for index, button in enumerate(buttons):
             button.setMinimumHeight(42)
@@ -13062,6 +13810,7 @@ class MainWindow(QMainWindow):
         coordinate_button.clicked.connect(lambda: self.accept_export_choice(dialog, self.export_coordinate_csv))
         zip_button.clicked.connect(lambda: self.accept_export_choice(dialog, self.export_zip))
         batch_button.clicked.connect(lambda: self.accept_export_choice(dialog, self.export_batch_profile))
+        layout_designer_button.clicked.connect(lambda: self.open_pdf_layout_designer_from_export(dialog))
         ffmpeg_button.clicked.connect(self.choose_ffmpeg_exe)
         dialog.exec()
 
@@ -13073,7 +13822,11 @@ class MainWindow(QMainWindow):
         path, _ = QFileDialog.getSaveFileName(self, "Export Project", str(self.project_dir) + ".zip", "Zip (*.zip)")
         if not path:
             return
-        export_project_zip(self.project_dir, Path(path), self.project)
+        try:
+            export_project_zip(self.project_dir, Path(path), self.project)
+        except Exception as exc:
+            self.show_operation_failure("Project ZIP Failed", "export the project ZIP", exc, location=path)
+            return
         self.statusBar().showMessage("Project zip exported", 3000)
 
     def export_coordinate_csv(self) -> None:
@@ -13085,12 +13838,55 @@ class MainWindow(QMainWindow):
         )
         if not path:
             return
-        export_coordinate_csv(Path(path), self.project)
+        try:
+            export_coordinate_csv(Path(path), self.project)
+        except Exception as exc:
+            self.show_operation_failure("Coordinate Export Failed", "export the coordinate CSV", exc, location=path)
+            return
         self.statusBar().showMessage("Coordinate CSV exported", 3000)
+
+    @staticmethod
+    def pdf_layout_profiles() -> list[tuple[str, str]]:
+        return [
+            ("Drill Sheet", "drill_sheet"),
+            ("Dot Book", "dot_book"),
+            ("Staff Packet", "staff_packet"),
+            ("Section Packet", "section_packet"),
+            ("Coordinate Summary", "coordinate_summary"),
+        ]
+
+    def stored_pdf_layout(self, profile: str) -> dict:
+        payload = self.workflow_bucket("pdf_layouts").get(profile, {})
+        return deepcopy(payload) if isinstance(payload, dict) else {}
+
+    def edit_pdf_layout(self, profile: str, initial_layout: dict | None = None) -> dict | None:
+        dialog = PdfLayoutDesignerDialog(
+            profile,
+            self.project_dir,
+            initial_layout if initial_layout is not None else self.stored_pdf_layout(profile),
+            self,
+        )
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return None
+        payload = dialog.layout_json()
+        self.workflow_bucket("pdf_layouts")[profile] = deepcopy(payload)
+        self.autosave()
+        self.statusBar().showMessage(f"Saved {profile.replace('_', ' ')} PDF layout", 2600)
+        return payload
+
+    def open_pdf_layout_designer_from_export(self, export_dialog: QDialog) -> None:
+        export_dialog.accept()
+        labels = [label for label, _profile in self.pdf_layout_profiles()]
+        label, accepted = QInputDialog.getItem(self, "PDF Layout Designer", "Layout type", labels, 0, False)
+        if not accepted or not label:
+            return
+        profile = dict(self.pdf_layout_profiles())[label]
+        self.edit_pdf_layout(profile)
 
     def print_template_options(
         self,
         title: str,
+        profile: str,
         default_title: str = "",
         allow_section: bool = False,
         force_section: str = "",
@@ -13106,6 +13902,31 @@ class MainWindow(QMainWindow):
         warnings_check = QCheckBox("Include conflict warnings")
         warnings_check.setChecked(True)
         section_combo = QComboBox()
+        layout_payload = self.stored_pdf_layout(profile)
+        layout_status = QLabel("Custom layout saved" if layout_payload else "Using Drill Pirate default layout")
+        layout_status.setObjectName("secondaryText")
+        customize_layout_button = QPushButton("Customize PDF Layout…")
+        reset_layout_button = QPushButton("Use Default")
+
+        def customize_layout() -> None:
+            nonlocal layout_payload
+            edited = self.edit_pdf_layout(profile, layout_payload)
+            if edited is not None:
+                layout_payload = edited
+                layout_status.setText("Custom layout saved")
+
+        def reset_layout() -> None:
+            nonlocal layout_payload
+            layout_payload = {}
+            layout_status.setText("Using Drill Pirate default layout")
+
+        customize_layout_button.clicked.connect(customize_layout)
+        reset_layout_button.clicked.connect(reset_layout)
+        layout_buttons_widget = QWidget()
+        layout_buttons_row = QHBoxLayout(layout_buttons_widget)
+        layout_buttons_row.setContentsMargins(0, 0, 0, 0)
+        layout_buttons_row.addWidget(customize_layout_button)
+        layout_buttons_row.addWidget(reset_layout_button)
         section_combo.addItem("All")
         for section in sorted({dot.section for dot in self.project.dots if dot.section}):
             section_combo.addItem(section)
@@ -13120,6 +13941,8 @@ class MainWindow(QMainWindow):
         form.addRow("Compact", compact_check)
         if include_warning_option:
             form.addRow("Warnings", warnings_check)
+        form.addRow("PDF Layout", layout_buttons_widget)
+        form.addRow("", layout_status)
         layout.addLayout(form)
         buttons = QHBoxLayout()
         cancel_button = QPushButton("Cancel")
@@ -13132,11 +13955,16 @@ class MainWindow(QMainWindow):
         layout.addLayout(buttons)
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return None
+        if layout_payload:
+            self.workflow_bucket("pdf_layouts")[profile] = deepcopy(layout_payload)
+        else:
+            self.workflow_bucket("pdf_layouts").pop(profile, None)
         return PrintTemplateOptions(
             title=title_input.text().strip(),
             section_filter=section_combo.currentText(),
             include_warnings=warnings_check.isChecked(),
             compact=compact_check.isChecked(),
+            layout=deepcopy(layout_payload),
         )
 
     def preview_pdf_export(
@@ -13165,7 +13993,7 @@ class MainWindow(QMainWindow):
         try:
             export_callback(preview_path, update_progress)
         except Exception as exc:
-            QMessageBox.warning(self, "Export Failed", str(exc))
+            self.show_operation_failure("Export Failed", f"prepare the {title}", exc, location=preview_path)
             temp_dir.cleanup()
             return
         finally:
@@ -13178,6 +14006,13 @@ class MainWindow(QMainWindow):
             temp_dir.cleanup()
 
     def export_drill_sheet_pdf(self) -> None:
+        options = self.print_template_options(
+            "Drill Sheet Options",
+            "drill_sheet",
+            default_title="",
+        )
+        if not options:
+            return
         self.preview_pdf_export(
             "Drill Sheet PDF",
             "drill_sheet.pdf",
@@ -13187,12 +14022,14 @@ class MainWindow(QMainWindow):
                 self.project,
                 self.project_dir,
                 progress_callback=progress_callback,
+                options=options,
             ),
         )
 
     def export_dot_book_pdf(self) -> None:
         options = self.print_template_options(
             "Dot Book Options",
+            "dot_book",
             default_title="",
             allow_section=True,
         )
@@ -13208,12 +14045,14 @@ class MainWindow(QMainWindow):
                 self.project,
                 progress_callback=progress_callback,
                 options=options,
+                project_dir=self.project_dir,
             ),
         )
 
     def export_staff_packet_pdf(self) -> None:
         options = self.print_template_options(
             "Staff Packet Options",
+            "staff_packet",
             default_title="",
             include_warning_option=True,
         )
@@ -13242,6 +14081,7 @@ class MainWindow(QMainWindow):
             return
         options = self.print_template_options(
             "Section Packet Options",
+            "section_packet",
             default_title=f"{section} Section Packet",
             force_section=section,
             include_warning_option=True,
@@ -13265,6 +14105,7 @@ class MainWindow(QMainWindow):
     def export_coordinate_summary_pdf(self) -> None:
         options = self.print_template_options(
             "Coordinate Summary Options",
+            "coordinate_summary",
             default_title=f"{self.project.metadata.show_title} - Coordinate Summary",
             allow_section=True,
         )
@@ -13279,6 +14120,7 @@ class MainWindow(QMainWindow):
                 self.project,
                 progress_callback=progress_callback,
                 options=options,
+                project_dir=self.project_dir,
             ),
         )
 
@@ -13302,18 +14144,33 @@ class MainWindow(QMainWindow):
 
         try:
             set_step("Exporting staff packet...", 0)
-            export_staff_packet_pdf(output_dir / "staff_packet.pdf", self.project, self.project_dir)
+            export_staff_packet_pdf(
+                output_dir / "staff_packet.pdf",
+                self.project,
+                self.project_dir,
+                options=PrintTemplateOptions(layout=self.stored_pdf_layout("staff_packet")),
+            )
             set_step("Exporting dot books...", 1)
-            export_dot_book_pdf(output_dir / "dot_book.pdf", self.project, options=PrintTemplateOptions(compact=True))
+            export_dot_book_pdf(
+                output_dir / "dot_book.pdf",
+                self.project,
+                options=PrintTemplateOptions(compact=True, layout=self.stored_pdf_layout("dot_book")),
+                project_dir=self.project_dir,
+            )
             set_step("Exporting coordinate summary...", 2)
-            export_coordinate_summary_pdf(output_dir / "coordinate_summary.pdf", self.project, options=PrintTemplateOptions(compact=True))
+            export_coordinate_summary_pdf(
+                output_dir / "coordinate_summary.pdf",
+                self.project,
+                options=PrintTemplateOptions(compact=True, layout=self.stored_pdf_layout("coordinate_summary")),
+                project_dir=self.project_dir,
+            )
             set_step("Exporting coordinate CSV...", 3)
             export_coordinate_csv(output_dir / "coordinates.csv", self.project)
             set_step("Exporting project zip...", 4)
             export_project_zip(self.project_dir, output_dir / f"{self.project_dir.name}.zip", self.project)
             set_step("Batch export complete", 5)
         except Exception as exc:
-            QMessageBox.warning(self, "Batch Export Failed", str(exc))
+            self.show_operation_failure("Batch Export Failed", "complete the batch export", exc, location=output_dir)
             return
         finally:
             progress.close()
@@ -13422,7 +14279,7 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             progress.close()
             temp_dir.cleanup()
-            QMessageBox.warning(self, "Export Failed", str(exc))
+            self.show_operation_failure("Export Failed", "render MP4 frames", exc, location=path)
             return
         finally:
             self.set_index = min(previous_set_index, len(self.project.sets) - 1)
@@ -13463,7 +14320,7 @@ class MainWindow(QMainWindow):
 
         def fail_mp4_export(message: str) -> None:
             cleanup_mp4_export()
-            QMessageBox.warning(self, "Export Failed", message)
+            self.show_operation_failure("Export Failed", "encode the MP4", RuntimeError(message), location=path)
 
         thread.export_completed.connect(complete_mp4_export)
         thread.export_cancelled.connect(cancel_mp4_export)
@@ -13479,7 +14336,11 @@ class MainWindow(QMainWindow):
     def release_media_resources(self) -> None:
         try:
             self.play_timer.stop()
+            self.audio_health_timer.stop()
+            self.audio_device_refresh_timer.stop()
             self.conflict_heatmap_timer.stop()
+            if hasattr(self, "waveform"):
+                self.waveform.cancel_loading()
             if self.player.source().isValid():
                 self.player.stop()
                 self.player.setSource(QUrl())

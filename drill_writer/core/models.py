@@ -269,6 +269,7 @@ class DrillSet:
     continuity: list[ContinuityInstruction] = field(default_factory=list)
     motion_ribbons: list[MotionRibbon] = field(default_factory=list)
     transition: Transition = Transition.LINEAR
+    director_notes: str = ""
 
     @property
     def duration_counts(self) -> int:
@@ -345,6 +346,7 @@ class DrillSet:
             "continuity": [instruction.to_json() for instruction in self.continuity],
             "motion_ribbons": [ribbon.to_json() for ribbon in self.motion_ribbons],
             "transition": self.transition.value,
+            "director_notes": self.director_notes,
         }
 
     @classmethod
@@ -434,6 +436,9 @@ class DrillSet:
                 if isinstance(item, dict)
             ],
             transition=Transition(payload.get("transition", Transition.LINEAR.value)),
+            director_notes=str(
+                payload.get("director_notes", payload.get("directors_notes", ""))
+            ),
         )
 
 
@@ -747,10 +752,10 @@ class SurfaceDefinition:
     name: str = "College Football Field"
     surface_type: str = "football"
     width_yards: float = 120.0
-    height_yards: float = 53.333
+    height_yards: float = 160 / 3
     hash_style: str = "college"
-    front_hash_yards: float = -6.6665
-    back_hash_yards: float = 6.6665
+    front_hash_yards: float = -20 / 3
+    back_hash_yards: float = 20 / 3
     endzone_depth_yards: float = 10.0
     grid_spacing_yards: float = 1.0
     route_points: list[tuple[float, float]] = field(default_factory=list)
@@ -759,6 +764,23 @@ class SurfaceDefinition:
     line_color: str = ""
     show_yard_numbers: bool = True
     show_end_zones: bool = True
+
+    def __post_init__(self) -> None:
+        if self.surface_type != "football":
+            return
+        if abs(float(self.height_yards) - 53.333) < 0.01:
+            self.height_yards = 160 / 3
+        standard_hash: float | None = None
+        if self.hash_style == "college":
+            standard_hash = 20 / 3
+        elif self.hash_style == "high_school":
+            standard_hash = 80 / 9
+        if standard_hash is None:
+            return
+        if abs(float(self.front_hash_yards) + standard_hash) < 0.01:
+            self.front_hash_yards = -standard_hash
+        if abs(float(self.back_hash_yards) - standard_hash) < 0.01:
+            self.back_hash_yards = standard_hash
 
     @property
     def half_width(self) -> float:
@@ -793,10 +815,10 @@ class SurfaceDefinition:
             name=str(payload.get("name", "College Football Field")),
             surface_type=str(payload.get("surface_type", "football")),
             width_yards=max(2.0, float(payload.get("width_yards", 120))),
-            height_yards=max(2.0, float(payload.get("height_yards", 53.333))),
+            height_yards=max(2.0, float(payload.get("height_yards", 160 / 3))),
             hash_style=str(payload.get("hash_style", "college")),
-            front_hash_yards=float(payload.get("front_hash_yards", -6.6665)),
-            back_hash_yards=float(payload.get("back_hash_yards", 6.6665)),
+            front_hash_yards=float(payload.get("front_hash_yards", -20 / 3)),
+            back_hash_yards=float(payload.get("back_hash_yards", 20 / 3)),
             endzone_depth_yards=max(0.0, float(payload.get("endzone_depth_yards", 10))),
             grid_spacing_yards=max(0.25, float(payload.get("grid_spacing_yards", 1))),
             route_points=[

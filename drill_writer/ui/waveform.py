@@ -3,20 +3,146 @@ from __future__ import annotations
 from array import array
 from math import ceil, pi, sin, sqrt
 from pathlib import Path
-import wave
 
-from PySide6.QtCore import QEventLoop, QTimer, Qt, QUrl, Signal
+from PySide6.QtCore import QEventLoop, QThread, QTimer, Qt, QUrl, Signal
 from PySide6.QtGui import QColor, QPainter, QPen
 from PySide6.QtMultimedia import QAudioBuffer, QAudioDecoder, QAudioFormat
 from PySide6.QtWidgets import QWidget
 
 from drill_writer.core.models import DrillProject
 from drill_writer.core.timing import count_to_audio_ms
+from drill_writer.core.waveform import (
+    WaveformData,
+    WaveformDecodeError,
+    decode_audio_waveform,
+    waveform_from_timed_envelopes,
+)
 from drill_writer.ui.theme import DEFAULT_THEME_TOKENS
+
+
+class WaveformDecodeThread(QThread):
+    decoded = Signal(int, object)
+    failed = Signal(int, str)
+
+    def __init__(self, generation: int, path: Path, target_count: int = 2200, parent=None) -> None:
+        super().__init__(parent)
+        self.generation = generation
+        self.path = Path(path)
+        self.target_count = max(32, int(target_count))
+
+    def run(self) -> None:  # type: ignore[override]
+        try:
+            data = decode_audio_waveform(
+                self.path,
+                self.target_count,
+                compressed_decoder=lambda path, target: decode_compressed_with_qt(
+                    path,
+                    target,
+                    self.isInterruptionRequested,
+                ),
+                cancelled=self.isInterruptionRequested,
+            )
+            if not self.isInterruptionRequested():
+                self.decoded.emit(self.generation, data)
+        except Exception as exc:
+            if not self.isInterruptionRequested():
+                self.failed.emit(self.generation, str(exc))
+
+
+def decode_compressed_with_qt(
+    path: Path,
+    target_count: int,
+    cancelled=lambda: False,
+) -> WaveformData:
+    decoder = QAudioDecoder()
+    desired_format = QAudioFormat()
+    desired_format.setChannelCount(1)
+    desired_format.setSampleRate(44100)
+    desired_format.setSampleFormat(QAudioFormat.SampleFormat.Int16)
+    decoder.setAudioFormat(desired_format)
+
+    envelope_points: list[tuple[float, float, float]] = []
+    decoded_sample_rate = 44100
+    decoded_duration_ms = 0.0
+    running_time_ms = 0.0
+    loop = QEventLoop()
+    timed_out = False
+
+    def read_buffer() -> None:
+        nonlocal decoded_sample_rate, decoded_duration_ms, running_time_ms
+        if cancelled():
+            decoder.stop()
+            loop.quit()
+            return
+        buffer = decoder.read()
+        buffer_format = buffer.format()
+        decoded_sample_rate = max(1, buffer_format.sampleRate() or decoded_sample_rate)
+        samples = audio_buffer_to_mono_samples(buffer)
+        if not samples:
+            return
+        start_time = float(buffer.startTime()) / 1000.0 if buffer.startTime() >= 0 else running_time_ms
+        duration_ms = max(0.001, len(samples) / decoded_sample_rate * 1000.0)
+        block_size = max(64, min(2048, len(samples) // 4 or len(samples)))
+        for sample_index in range(0, len(samples), block_size):
+            block = samples[sample_index : sample_index + block_size]
+            if not block:
+                continue
+            peak = max(max(block), -min(block))
+            rms = sqrt(sum(float(value) * float(value) for value in block) / len(block))
+            time_ms = start_time + sample_index / decoded_sample_rate * 1000.0
+            envelope_points.append((time_ms, float(peak), rms))
+        running_time_ms = max(running_time_ms, start_time + duration_ms)
+        decoded_duration_ms = max(decoded_duration_ms, running_time_ms)
+
+    def timeout() -> None:
+        nonlocal timed_out
+        timed_out = True
+        decoder.stop()
+        loop.quit()
+
+    timeout_timer = QTimer()
+    timeout_timer.setSingleShot(True)
+    timeout_timer.timeout.connect(timeout)
+    cancellation_timer = QTimer()
+    cancellation_timer.setInterval(60)
+    cancellation_timer.timeout.connect(
+        lambda: (decoder.stop(), loop.quit()) if cancelled() else None
+    )
+    decoder.bufferReady.connect(read_buffer)
+    decoder.finished.connect(loop.quit)
+    decoder.finished.connect(timeout_timer.stop)
+    if hasattr(decoder, "errorChanged"):
+        decoder.errorChanged.connect(loop.quit)
+    decoder.setSource(QUrl.fromLocalFile(str(path)))
+    decoder.start()
+    timeout_timer.start(120000)
+    cancellation_timer.start()
+    loop.exec()
+    timeout_timer.stop()
+    cancellation_timer.stop()
+    decoder.stop()
+
+    if cancelled():
+        raise WaveformDecodeError("Waveform decode cancelled.")
+    if envelope_points:
+        return waveform_from_timed_envelopes(
+            envelope_points,
+            max(1, int(decoded_duration_ms)),
+            target_count,
+            sample_rate=decoded_sample_rate,
+            source_format=path.suffix.lower().lstrip(".").upper() or "Compressed audio",
+        )
+    if timed_out:
+        raise WaveformDecodeError("Waveform decode timed out after two minutes.")
+    error = decoder.errorString()
+    raise WaveformDecodeError(
+        f"Waveform decode failed: {error or 'the Windows audio decoder returned no samples.'}"
+    )
 
 
 class WaveformWidget(QWidget):
     position_selected = Signal(int)
+    load_finished = Signal(bool, str)
 
     def __init__(self) -> None:
         super().__init__()
@@ -26,6 +152,11 @@ class WaveformWidget(QWidget):
         self.duration_ms = 0
         self.position_ms = 0
         self.load_error = ""
+        self.source_format = ""
+        self.sample_rate = 0
+        self.loading = False
+        self._decode_generation = 0
+        self._decode_workers: list[WaveformDecodeThread] = []
         self.project: DrillProject | None = None
         self.theme_tokens = dict(DEFAULT_THEME_TOKENS["dark"])
         self.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -39,103 +170,95 @@ class WaveformWidget(QWidget):
         self.update()
 
     def load_audio(self, path: Path | None, _ffmpeg_path: str | None = None) -> None:
+        self._decode_generation += 1
+        generation = self._decode_generation
         self.samples = []
         self.rms_samples = []
         self.duration_ms = 0
         self.load_error = ""
-        if path and path.exists():
-            if path.suffix.lower() == ".wav":
-                self.load_wav(path)
-            if not self.samples:
-                self.load_with_qt_decoder(path)
-            if not self.samples:
-                self.load_with_pydub(path)
-            if not self.samples and not self.load_error:
-                self.load_error = "Could not decode waveform"
+        self.source_format = ""
+        self.sample_rate = 0
+        self.loading = bool(path and path.exists())
+        for worker in self._decode_workers:
+            if worker.isRunning():
+                worker.requestInterruption()
+        if not path or not path.exists():
+            self.update()
+            return
+        worker = WaveformDecodeThread(generation, path, parent=self)
+        self._decode_workers.append(worker)
+
+        def decoded(completed_generation: int, data: WaveformData) -> None:
+            if completed_generation != self._decode_generation:
+                return
+            self.samples = list(data.peaks)
+            self.rms_samples = list(data.rms)
+            self.duration_ms = max(0, int(data.duration_ms))
+            self.sample_rate = int(data.sample_rate)
+            self.source_format = data.source_format
+            self.load_error = ""
+            self.loading = False
+            self.update()
+            self.load_finished.emit(True, f"Waveform loaded: {self.source_format}, {self.sample_rate:g} Hz")
+
+        def failed(failed_generation: int, message: str) -> None:
+            if failed_generation != self._decode_generation:
+                return
+            self.samples = []
+            self.rms_samples = []
+            self.load_error = message or "Could not decode waveform"
+            self.loading = False
+            self.update()
+            self.load_finished.emit(False, self.load_error)
+
+        def finished() -> None:
+            if worker in self._decode_workers:
+                self._decode_workers.remove(worker)
+            worker.deleteLater()
+
+        worker.decoded.connect(decoded)
+        worker.failed.connect(failed)
+        worker.finished.connect(finished)
+        worker.start()
         self.update()
 
     def load_wav(self, path: Path) -> None:
         try:
-            with wave.open(str(path), "rb") as audio:
-                frame_rate = max(1, audio.getframerate())
-                frame_count = audio.getnframes()
-                channels = max(1, audio.getnchannels())
-                sample_width = audio.getsampwidth()
-                self.duration_ms = int(frame_count / frame_rate * 1000)
-                raw = audio.readframes(frame_count)
-                if sample_width == 2:
-                    samples = array("h")
-                    samples.frombytes(raw)
-                    mono = samples[::channels]
-                    self.samples, self.rms_samples = analyze_waveform(mono, 2200)
-                elif sample_width == 1:
-                    mono = array("h", ((value - 128) * 256 for value in raw[::channels]))
-                    self.samples, self.rms_samples = analyze_waveform(mono, 2200)
-        except Exception:
+            data = decode_audio_waveform(path, 2200)
+            self.samples, self.rms_samples = list(data.peaks), list(data.rms)
+            self.duration_ms = data.duration_ms
+            self.sample_rate = data.sample_rate
+            self.source_format = data.source_format
+        except Exception as exc:
             self.samples = []
             self.rms_samples = []
+            self.load_error = str(exc)
 
     def load_with_qt_decoder(self, path: Path) -> None:
-        decoder = QAudioDecoder()
-        desired_format = QAudioFormat()
-        desired_format.setChannelCount(1)
-        desired_format.setSampleRate(44100)
-        desired_format.setSampleFormat(QAudioFormat.SampleFormat.Int16)
-        decoder.setAudioFormat(desired_format)
-
-        decoded_samples: array = array("h")
-        decoded_sample_rate = 44100
-        loop = QEventLoop()
-        timed_out = False
-
-        def read_buffer() -> None:
-            nonlocal decoded_sample_rate
-            buffer = decoder.read()
-            buffer_format = buffer.format()
-            decoded_sample_rate = max(1, buffer_format.sampleRate() or decoded_sample_rate)
-            decoded_samples.extend(audio_buffer_to_mono_samples(buffer))
-
-        def timeout() -> None:
-            nonlocal timed_out
-            timed_out = True
-            decoder.stop()
-            loop.quit()
-
-        timeout_timer = QTimer()
-        timeout_timer.setSingleShot(True)
-        timeout_timer.timeout.connect(timeout)
-        decoder.bufferReady.connect(read_buffer)
-        decoder.finished.connect(loop.quit)
-        decoder.finished.connect(timeout_timer.stop)
-        decoder.setSource(QUrl.fromLocalFile(str(path)))
-        decoder.start()
-        timeout_timer.start(12000)
-        loop.exec()
-        timeout_timer.stop()
-
-        if decoded_samples:
-            self.samples, self.rms_samples = analyze_waveform(decoded_samples, 2200)
-            if self.duration_ms <= 0:
-                self.duration_ms = int(len(decoded_samples) / decoded_sample_rate * 1000)
-            self.load_error = ""
-        elif timed_out:
-            self.load_error = "Waveform decode timed out"
-        elif decoder.errorString():
-            self.load_error = f"Waveform decode failed: {decoder.errorString()}"
-
-    def load_with_pydub(self, path: Path) -> None:
         try:
-            from pydub import AudioSegment
-
-            audio = AudioSegment.from_file(path).set_channels(1)
-            self.duration_ms = len(audio)
-            raw = audio.get_array_of_samples()
-            self.samples, self.rms_samples = analyze_waveform(raw, 2200)
+            data = decode_compressed_with_qt(path, 2200)
+            self.samples, self.rms_samples = list(data.peaks), list(data.rms)
+            self.duration_ms = data.duration_ms
+            self.sample_rate = data.sample_rate
+            self.source_format = data.source_format
             self.load_error = ""
-        except Exception:
+        except Exception as exc:
             self.samples = []
             self.rms_samples = []
-            self.load_error = "Waveform decode failed. Try reloading audio or converting the file to WAV."
+            self.load_error = str(exc)
+
+    def load_with_pydub(self, path: Path) -> None:
+        self.samples = []
+        self.rms_samples = []
+        self.load_error = "Waveforms use the built-in Windows/Qt decoder and do not require ffmpeg."
+
+    def cancel_loading(self, wait_ms: int = 3000) -> None:
+        self._decode_generation += 1
+        for worker in list(self._decode_workers):
+            if worker.isRunning():
+                worker.requestInterruption()
+                worker.wait(max(0, int(wait_ms)))
+        self.loading = False
 
     def set_duration_ms(self, duration_ms: int) -> None:
         self.duration_ms = max(self.duration_ms, duration_ms)
@@ -178,8 +301,8 @@ class WaveformWidget(QWidget):
             painter.drawLine(rect.left(), center_y, rect.right(), center_y)
             message = "Load audio to show waveform"
             if self.load_error:
-                message = "Waveform unavailable - reload audio or use WAV/MP3 supported by Windows"
-            elif self.duration_ms > 0:
+                message = "Waveform unavailable - reload audio or use an audio format supported by Windows"
+            elif self.loading:
                 message = "Analyzing waveform..."
             painter.drawText(rect, Qt.AlignmentFlag.AlignCenter, message)
 

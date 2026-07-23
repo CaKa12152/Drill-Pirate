@@ -5,6 +5,7 @@ from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen
 
 from drill_writer.core.models import SurfaceDefinition
 from drill_writer.core.specialized_design import normalized_surface
+from drill_writer.ui.field_logo import draw_field_logo
 
 
 def field_to_rect(rect: QRectF, surface: SurfaceDefinition, x: float, y: float) -> QPointF:
@@ -49,6 +50,8 @@ def draw_surface_preview(
     rect: QRectF,
     surface: SurfaceDefinition,
     palette: dict[str, str],
+    field_mode: str = "white",
+    show_logo: bool | None = None,
 ) -> None:
     surface = normalized_surface(surface)
     fill = surface.background_color or palette.get("fill", palette.get("field_fill", "#f9fbf7"))
@@ -59,6 +62,7 @@ def draw_surface_preview(
     painter.setPen(QPen(QColor(line), 0.8))
     painter.setBrush(QColor(fill))
     painter.drawRoundedRect(rect, 3, 3)
+    draw_field_logo(painter, rect, surface, field_mode, visible=show_logo)
     if surface.surface_type == "football":
         playing_half = max(5.0, surface.half_width - surface.endzone_depth_yards)
         if surface.show_end_zones and surface.endzone_depth_yards > 0:

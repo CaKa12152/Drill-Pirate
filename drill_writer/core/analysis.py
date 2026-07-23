@@ -6,7 +6,8 @@ from typing import Callable
 from drill_writer.core.animation import distance, interpolate_project, motion_window_for_dot, sample_transition_path
 from drill_writer.core.design_tools import guide_contains_point
 from drill_writer.core.models import DrillProject
-from drill_writer.core.specialized_design import physical_limits_for_dot, performer_is_attached_to_prop
+from drill_writer.core.path_validation import validate_authored_paths
+from drill_writer.core.specialized_design import analyze_specialized_safety, physical_limits_for_dot, performer_is_attached_to_prop
 
 
 @dataclass(slots=True)
@@ -18,6 +19,10 @@ class PathWarning:
     dot_a: str = ""
     dot_b: str = ""
     count: float = 0.0
+    code: str = ""
+    avoidable: bool | None = None
+    explanation: str = ""
+    suggestion: str = ""
 
 
 @dataclass(slots=True)
@@ -72,6 +77,8 @@ def detect_path_warnings(
         for sample_index in range(samples)
     ]
     sampled_positions = [interpolate_project(project, set_index, count) for count in sampled_counts]
+    previous_positions = transition_start_positions(project, set_index)
+    current_positions = transition_end_positions(project, set_index)
 
     no_go_guides = [
         guide
@@ -92,6 +99,8 @@ def detect_path_warnings(
             )
             if conflict is None:
                 continue
+            starts_inside = guide_contains_point(guide, previous_positions.get(dot_id, (9999.0, 9999.0)))
+            ends_inside = guide_contains_point(guide, current_positions.get(dot_id, (9999.0, 9999.0)))
             warnings.append(
                 PathWarning(
                     "no_go",
@@ -101,6 +110,14 @@ def detect_path_warnings(
                     dot_id,
                     "",
                     conflict,
+                    "no_go_region",
+                    not (starts_inside or ends_inside),
+                    (
+                        "The fixed start or destination picture is inside the no-go region, so a path-only repair cannot remove this conflict."
+                        if starts_inside or ends_inside
+                        else "The route enters the no-go region between two otherwise valid pictures."
+                    ),
+                    "Move the fixed spot outside the region, or edit the path so it stays outside the boundary.",
                 )
             )
             if len(warnings) >= warning_limit:
@@ -120,6 +137,29 @@ def detect_path_warnings(
                     closest_distance = current_distance
                     closest_count = count
             if closest_distance < min_spacing:
+                start_distance = distance(sampled_positions[0][dot_a], sampled_positions[0][dot_b])
+                end_distance = distance(sampled_positions[-1][dot_a], sampled_positions[-1][dot_b])
+                if end_distance < min_spacing:
+                    avoidable = False
+                    explanation = (
+                        f"The destination picture places these performers {end_distance:.2f} yd apart. "
+                        "Changing path shape or destination ownership cannot repair spacing between two fixed form spots."
+                    )
+                    suggestion = "Spread the destination form, change the required spacing, or intentionally accept and document the contact."
+                    code = "fixed_destination_spacing"
+                elif start_distance < min_spacing:
+                    avoidable = False
+                    explanation = (
+                        f"The starting picture already places these performers {start_distance:.2f} yd apart. "
+                        "The conflict exists before this transition begins."
+                    )
+                    suggestion = "Repair the previous set or start the performers at different movement counts after restoring safe spacing."
+                    code = "fixed_start_spacing"
+                else:
+                    avoidable = True
+                    explanation = "Both fixed pictures have safe spacing; the conflict is created by assignment, timing, or path geometry between them."
+                    suggestion = "Preview Guided Destination Repair first, then stagger timing or edit paths only if reassignment is insufficient."
+                    code = "transition_spacing"
                 warnings.append(
                     PathWarning(
                         "spacing",
@@ -129,13 +169,15 @@ def detect_path_warnings(
                         dot_a,
                         dot_b,
                         closest_count,
+                        code,
+                        avoidable,
+                        explanation,
+                        suggestion,
                     )
                 )
                 if len(warnings) >= warning_limit:
                     return warnings
 
-    previous_positions = transition_start_positions(project, set_index)
-    current_positions = transition_end_positions(project, set_index)
     path_by_dot = {}
     for dot_id in all_dot_ids:
         if drill_set.count_positions.get(dot_id):
@@ -169,6 +211,10 @@ def detect_path_warnings(
                             dot_a,
                             dot_b,
                             drill_set.start_count,
+                            "path_crossing",
+                            True,
+                            "The authored routes geometrically cross; synchronized timing determines whether this also becomes a spacing collision.",
+                            "Preview a destination swap, stagger the movement windows, or separate the Bezier routes.",
                         )
                     )
                     if len(warnings) >= warning_limit:
@@ -189,6 +235,10 @@ def detect_path_warnings(
             performer_limit *= limits.carry_speed_multiplier
         effective_limit = min(max_yards_per_count, performer_limit)
         if yards_per_count > effective_limit:
+            start = previous_positions.get(dot_id, path[0])
+            end = current_positions.get(dot_id, path[-1])
+            minimum_required_speed = distance(start, end) / max(0.0001, move_end - move_start)
+            fixed_geometry = minimum_required_speed > effective_limit
             warnings.append(
                 PathWarning(
                     "speed",
@@ -198,10 +248,62 @@ def detect_path_warnings(
                     dot_id,
                     "",
                     move_start,
+                    "fixed_timing_speed" if fixed_geometry else "path_detour_speed",
+                    not fixed_geometry,
+                    (
+                        f"Even a straight route requires {minimum_required_speed:.2f} yd/count, so the fixed destination and movement window are biomechanically infeasible."
+                        if fixed_geometry
+                        else f"The straight route is feasible at {minimum_required_speed:.2f} yd/count, but authored path geometry increases the requirement to {yards_per_count:.2f}."
+                    ),
+                    (
+                        "Add movement counts, start earlier, reassign a closer destination, or author an approved performer-specific limit."
+                        if fixed_geometry
+                        else "Shorten or smooth the path while preserving the destination picture."
+                    ),
                 )
             )
             if len(warnings) >= warning_limit:
                 return warnings
+
+    for issue in validate_authored_paths(project, set_index, list(selected_dot_ids), min_spacing=min_spacing):
+        warnings.append(
+            PathWarning(
+                issue.severity,
+                issue.set_index,
+                issue.set_name,
+                issue.message,
+                issue.owner_id if issue.owner_kind == "path" else "",
+                "",
+                issue.count,
+                issue.code,
+                True,
+                "Authored path or group-ribbon geometry failed structural validation.",
+                issue.suggestion,
+            )
+        )
+        if len(warnings) >= warning_limit:
+            return warnings
+
+    for warning in analyze_specialized_safety(project, set_index, samples=max(24, samples), dot_ids=list(selected_dot_ids)):
+        if warning.rule == "speed":
+            continue
+        warnings.append(
+            PathWarning(
+                warning.severity,
+                set_index,
+                drill_set.name,
+                warning.message,
+                warning.dot_id,
+                "",
+                warning.count,
+                f"biomechanical_{warning.rule}",
+                warning.rule not in {"halt_motion", "fixed_turn", "surface"},
+                "This warning uses performer facing, travel direction, equipment, choreography, and prop attachments—not only total yards per count.",
+                warning.suggestion,
+            )
+        )
+        if len(warnings) >= warning_limit:
+            return warnings
 
     return warnings
 

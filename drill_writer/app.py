@@ -33,6 +33,7 @@ from drill_writer.core.diagnostics import (
     write_pending_release_notes,
 )
 from drill_writer.core.project_io import ProjectLoadError, create_tutorial_project, project_library_dir
+from drill_writer.core.user_errors import actionable_error_message
 from drill_writer.core.updater import (
     CURRENT_VERSION,
     UpdateInfo,
@@ -54,6 +55,16 @@ from drill_writer.ui.audio_devices import (
 from drill_writer.ui.appearance import DOT_SYMBOL_SETTING, dot_symbol_label, preferred_dot_symbol
 from drill_writer.ui.main_window import MainWindow
 from drill_writer.ui.preferences import PreferencesDialog
+from drill_writer.ui.field_logo import (
+    FIELD_LOGO_SETTING,
+    clear_custom_field_logo,
+    custom_field_logo_path,
+    field_logo_enabled,
+    field_logo_user_opacity,
+    field_logo_user_scale,
+    install_custom_field_logo,
+    set_field_logo_appearance,
+)
 from drill_writer.ui.startup import SplashPage, StartupPage
 from drill_writer.ui.theme import CUSTOM_COLOR_KEYS, normalize_field_mode, normalize_theme, theme_stylesheet, theme_tokens
 
@@ -186,6 +197,7 @@ class DrillWriterApp(QStackedWidget):
             return
         window.field.set_canvas_theme(self.theme_mode())
         window.field.set_field_mode(self.field_mode())
+        window.field.set_field_logo_visible(self.show_field_logo())
         window.return_home_requested.connect(lambda selected_window=window: self.return_home(selected_window))
         self.project_tabs.addTab(window, window.project.metadata.show_title)
         self.project_tabs.setCurrentWidget(window)
@@ -295,7 +307,11 @@ class DrillWriterApp(QStackedWidget):
                 props=props_check.isChecked(),
             )
         except Exception as exc:
-            QMessageBox.warning(self, "Project Transfer Failed", str(exc))
+            QMessageBox.warning(
+                self,
+                "Project Transfer Failed",
+                actionable_error_message("copy content between projects", exc, location=destination.project_dir),
+            )
             return
         destination.statusBar().showMessage(
             f"Copied {counts['formation']} positions, {counts['timing']} timing events, {counts['props']} props",
@@ -309,6 +325,19 @@ class DrillWriterApp(QStackedWidget):
     def field_mode(self) -> str:
         return normalize_field_mode(str(self.settings.value("appearance/field_mode", "white")))
 
+    def show_field_logo(self) -> bool:
+        return field_logo_enabled(self.settings)
+
+    def field_logo_custom_path(self) -> str:
+        path = custom_field_logo_path(self.settings)
+        return str(path) if path is not None else ""
+
+    def field_logo_opacity(self) -> float:
+        return field_logo_user_opacity(self.settings)
+
+    def field_logo_scale(self) -> float:
+        return field_logo_user_scale(self.settings)
+
     def appearance_tokens(self) -> dict[str, str]:
         return theme_tokens(self.theme_mode(), self.settings)
 
@@ -319,6 +348,12 @@ class DrillWriterApp(QStackedWidget):
 
     def tooltips_enabled(self) -> bool:
         return self.settings.value("ui/tooltips_enabled", True, type=bool)
+
+    def adaptive_playback_enabled(self) -> bool:
+        return self.settings.value("performance/adaptive_playback", True, type=bool)
+
+    def playback_cache_enabled(self) -> bool:
+        return self.settings.value("performance/playback_cache", True, type=bool)
 
     def dot_symbol(self) -> str:
         return preferred_dot_symbol(self.settings)
@@ -336,6 +371,12 @@ class DrillWriterApp(QStackedWidget):
             self.field_mode(),
             self.appearance_tokens(),
             self,
+            current_adaptive_playback=self.adaptive_playback_enabled(),
+            current_playback_cache=self.playback_cache_enabled(),
+            current_show_field_logo=self.show_field_logo(),
+            current_field_logo_custom_path=self.field_logo_custom_path(),
+            current_field_logo_opacity=self.field_logo_opacity(),
+            current_field_logo_scale=self.field_logo_scale(),
         )
         dialog.exec()
 
@@ -392,6 +433,53 @@ class DrillWriterApp(QStackedWidget):
         if current is not None:
             current.statusBar().showMessage(f"Field mode: {normalized.title()}", 2200)
 
+    def apply_field_logo_visible(self, visible: bool) -> None:
+        enabled = bool(visible)
+        self.settings.setValue(FIELD_LOGO_SETTING, enabled)
+        self.settings.sync()
+        for widget in self.application_widgets():
+            handler = getattr(widget, "apply_field_logo_visible", None)
+            if callable(handler):
+                handler(enabled)
+        current = self.current_main_window()
+        if current is not None:
+            current.statusBar().showMessage(
+                f"Center-field logo {'shown' if enabled else 'hidden'}",
+                2200,
+            )
+
+    def apply_field_logo_appearance(
+        self,
+        source_path: str,
+        use_default: bool,
+        opacity: float,
+        scale: float,
+    ) -> None:
+        try:
+            if use_default:
+                clear_custom_field_logo(self.settings)
+            elif source_path:
+                install_custom_field_logo(source_path, self.settings)
+            set_field_logo_appearance(opacity, scale, self.settings)
+        except (OSError, ValueError) as exc:
+            QMessageBox.warning(
+                self.current_main_window() or self.startup,
+                "Field Logo Failed",
+                f"Drill Pirate could not use that field logo.\n\n{exc}",
+            )
+            return
+        for widget in self.application_widgets():
+            handler = getattr(widget, "apply_field_logo_appearance", None)
+            if callable(handler):
+                handler()
+        current = self.current_main_window()
+        if current is not None:
+            source_label = "Drill Pirate logo" if use_default else "custom logo"
+            current.statusBar().showMessage(
+                f"Field branding updated: {source_label}, {round(opacity * 100)}% opacity, {round(scale * 100)}% size",
+                3200,
+            )
+
     def apply_audio_output_device(self, device_id: str) -> None:
         normalized = normalize_audio_output_device_id(device_id)
         self.settings.setValue(AUDIO_OUTPUT_DEVICE_SETTING, normalized)
@@ -403,6 +491,15 @@ class DrillWriterApp(QStackedWidget):
         current = self.current_main_window()
         if current is not None:
             current.statusBar().showMessage(f"Audio output: {audio_output_label_for_id(normalized)}", 3000)
+
+    def apply_playback_performance_settings(self, adaptive: bool, cache_enabled: bool) -> None:
+        self.settings.setValue("performance/adaptive_playback", bool(adaptive))
+        self.settings.setValue("performance/playback_cache", bool(cache_enabled))
+        self.settings.sync()
+        for widget in self.application_widgets():
+            handler = getattr(widget, "apply_playback_performance_settings", None)
+            if callable(handler):
+                handler(bool(adaptive), bool(cache_enabled))
 
     def apply_update_channel(self, channel: str) -> None:
         normalized = normalize_update_channel(channel)
@@ -661,7 +758,11 @@ class DrillWriterApp(QStackedWidget):
         try:
             result = install_update(update, progress_callback=update_progress)
         except Exception as exc:
-            QMessageBox.warning(self, "Update Failed", str(exc))
+            QMessageBox.warning(
+                self,
+                "Update Failed",
+                actionable_error_message("install the update", exc),
+            )
             return
         finally:
             progress.close()
@@ -703,8 +804,7 @@ class DrillWriterApp(QStackedWidget):
         message.setIcon(QMessageBox.Icon.Warning)
         message.setText(f"Drill Pirate could not open '{project_dir.name}'.")
         message.setInformativeText(
-            f"{exc}\n\n"
-            "You can restore the newest automatic backup or export a bug report bundle."
+            actionable_error_message("open the project", exc, location=project_dir)
         )
         restore_button = None
         if backups:
@@ -717,7 +817,11 @@ class DrillWriterApp(QStackedWidget):
             try:
                 restore_project_backup(project_dir, backups[0].path)
             except Exception as restore_exc:
-                QMessageBox.warning(self, "Restore Failed", str(restore_exc))
+                QMessageBox.warning(
+                    self,
+                    "Restore Failed",
+                    actionable_error_message("restore the newest backup", restore_exc, location=backups[0].path),
+                )
                 return
             self.open_project(project_dir)
         elif clicked == bug_button:
@@ -728,14 +832,21 @@ class DrillWriterApp(QStackedWidget):
                 "Zip (*.zip)",
             )
             if path:
-                export_bug_report_bundle(Path(path), project_dir=project_dir, extra={"open_error": str(exc)})
+                try:
+                    export_bug_report_bundle(Path(path), project_dir=project_dir, extra={"open_error": str(exc)})
+                except Exception as export_exc:
+                    QMessageBox.warning(
+                        self,
+                        "Bug Report Failed",
+                        actionable_error_message("export the bug report bundle", export_exc, location=path),
+                    )
 
     def show_unexpected_project_error(self, project_dir: Path, exc: Exception) -> None:
         message = QMessageBox(self)
         message.setWindowTitle("Project Open Failed")
         message.setIcon(QMessageBox.Icon.Critical)
         message.setText(f"Drill Pirate hit an unexpected error while opening '{project_dir.name}'.")
-        message.setInformativeText(f"{exc}\n\nExport a bug report bundle if this keeps happening.")
+        message.setInformativeText(actionable_error_message("open the project", exc, location=project_dir))
         bug_button = message.addButton("Export Bug Report", QMessageBox.ButtonRole.AcceptRole)
         message.addButton("Close", QMessageBox.ButtonRole.RejectRole)
         message.exec()
@@ -747,7 +858,14 @@ class DrillWriterApp(QStackedWidget):
                 "Zip (*.zip)",
             )
             if path:
-                export_bug_report_bundle(Path(path), project_dir=project_dir, extra={"open_error": str(exc)})
+                try:
+                    export_bug_report_bundle(Path(path), project_dir=project_dir, extra={"open_error": str(exc)})
+                except Exception as export_exc:
+                    QMessageBox.warning(
+                        self,
+                        "Bug Report Failed",
+                        actionable_error_message("export the bug report bundle", export_exc, location=path),
+                    )
 
 
 def main() -> int:

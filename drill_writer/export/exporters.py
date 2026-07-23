@@ -20,7 +20,8 @@ from drill_writer.core.animation import interpolate_dot_facings, interpolate_pro
 from drill_writer.core.coordinates import format_surface_coordinate
 from drill_writer.core.design_tools import continuity_for_dot, continuity_summary
 from drill_writer.core.models import DrillProject
-from drill_writer.core.project_io import BACKUP_DIR_NAME, save_project
+from drill_writer.core.print_layout import PrintLayout, PrintLayoutElement, expand_layout_text
+from drill_writer.core.project_io import BACKUP_DIR_NAME, SAVE_TRANSACTION_DIR_NAME, save_project
 from drill_writer.ui.field_view import FieldView
 
 
@@ -39,6 +40,7 @@ class PrintTemplateOptions:
     include_field: bool = True
     include_warnings: bool = True
     compact: bool = False
+    layout: dict = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -69,6 +71,13 @@ TABLE_HEADER = QColor("#edf2fb")
 EXPORT_FONT_FAMILY = "Arial"
 EXPORT_FONT_INITIALIZED = False
 
+PAGE_SIZE_IDS = {
+    "Letter": QPageSize.PageSizeId.Letter,
+    "Legal": QPageSize.PageSizeId.Legal,
+    "A4": QPageSize.PageSizeId.A4,
+    "A3": QPageSize.PageSizeId.A3,
+}
+
 
 def ensure_export_font() -> str:
     global EXPORT_FONT_FAMILY, EXPORT_FONT_INITIALIZED
@@ -92,12 +101,19 @@ def ensure_export_font() -> str:
 
 def export_project_zip(project_dir: Path, output_path: Path, project: DrillProject) -> None:
     save_project(project_dir, project, backup_reason="project_zip")
-    with zipfile.ZipFile(output_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-        for path in project_dir.rglob("*"):
-            if BACKUP_DIR_NAME in path.relative_to(project_dir).parts:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    resolved_output = output_path.resolve()
+    with zipfile.ZipFile(output_path, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as archive:
+        for path in sorted(project_dir.rglob("*"), key=lambda item: item.relative_to(project_dir).as_posix().lower()):
+            relative = path.relative_to(project_dir)
+            if BACKUP_DIR_NAME in relative.parts or SAVE_TRANSACTION_DIR_NAME in relative.parts:
                 continue
-            if path.is_file():
-                archive.write(path, path.relative_to(project_dir))
+            if not path.is_file() or path.resolve() == resolved_output or path.name.endswith((".tmp", ".rollback")):
+                continue
+            entry = zipfile.ZipInfo(relative.as_posix(), date_time=(1980, 1, 1, 0, 0, 0))
+            entry.compress_type = zipfile.ZIP_DEFLATED
+            entry.external_attr = 0o600 << 16
+            archive.writestr(entry, path.read_bytes(), compress_type=zipfile.ZIP_DEFLATED, compresslevel=9)
 
 
 def clean_text(value: object) -> str:
@@ -191,6 +207,44 @@ def draw_chips(
         rect = QRectF(left + index * (chip_width + gap), top, chip_width, 48)
         draw_chip(painter, rect, label, value)
     return top + 60
+
+
+def draw_director_notes(
+    painter: QPainter,
+    left: float,
+    top: float,
+    width: float,
+    notes: str,
+) -> float:
+    cleaned_notes = clean_text(notes).strip()
+    if not cleaned_notes:
+        return top
+    set_font(painter, 9)
+    text_bounds = painter.boundingRect(
+        QRectF(0, 0, max(40.0, width - 28), 240),
+        Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop | Qt.TextFlag.TextWordWrap,
+        cleaned_notes,
+    )
+    panel_height = min(112.0, max(54.0, text_bounds.height() + 31.0))
+    panel_rect = QRectF(left, top, width, panel_height)
+    painter.setPen(QPen(QColor("#e4d39b"), 1))
+    painter.setBrush(QColor("#fffaf0"))
+    painter.drawRoundedRect(panel_rect, 8, 8)
+    painter.setPen(GOLD)
+    set_font(painter, 7, True)
+    painter.drawText(
+        panel_rect.adjusted(14, 7, -14, -panel_rect.height() + 22),
+        Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+        "DIRECTOR'S NOTES",
+    )
+    painter.setPen(INK)
+    set_font(painter, 9)
+    painter.drawText(
+        panel_rect.adjusted(14, 24, -14, -8),
+        Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop | Qt.TextFlag.TextWordWrap,
+        cleaned_notes,
+    )
+    return panel_rect.bottom() + 10
 
 
 def draw_field_panel(
@@ -369,24 +423,173 @@ def draw_raster_pdf_page(
     pdf_painter.drawImage(QRectF(0, 0, image.width(), image.height()), image)
 
 
+def custom_print_layout(options: PrintTemplateOptions | None, profile: str) -> PrintLayout | None:
+    if options is None or not isinstance(options.layout, dict) or not options.layout.get("elements"):
+        return None
+    return PrintLayout.from_json(options.layout, profile)
+
+
+def configure_pdf_writer(
+    writer: QPdfWriter,
+    layout: PrintLayout | None,
+    default_orientation: QPageLayout.Orientation,
+    default_margin: float,
+) -> None:
+    if layout is None:
+        page_size = QPageSize(QPageSize.PageSizeId.Letter)
+        orientation = default_orientation
+        margin = default_margin
+    else:
+        page_size = QPageSize(PAGE_SIZE_IDS.get(layout.page_size, QPageSize.PageSizeId.Letter))
+        orientation = (
+            QPageLayout.Orientation.Portrait
+            if layout.orientation == "portrait"
+            else QPageLayout.Orientation.Landscape
+        )
+        margin = 0.0
+    writer.setPageLayout(
+        QPageLayout(
+            page_size,
+            orientation,
+            QMarginsF(margin, margin, margin, margin),
+            QPageLayout.Unit.Inch,
+        )
+    )
+
+
+def layout_element_rect(page_rect: QRectF, element: PrintLayoutElement) -> QRectF:
+    return QRectF(
+        page_rect.left() + element.x * page_rect.width(),
+        page_rect.top() + element.y * page_rect.height(),
+        element.width * page_rect.width(),
+        element.height * page_rect.height(),
+    )
+
+
+def draw_layout_image(
+    painter: QPainter,
+    rect: QRectF,
+    element: PrintLayoutElement,
+    project_dir: Path | None,
+) -> None:
+    if not element.image_path:
+        return
+    image_path = Path(element.image_path)
+    if not image_path.is_absolute() and project_dir is not None:
+        image_path = project_dir / image_path
+    image = QImage(str(image_path))
+    if image.isNull():
+        return
+    if element.fit_mode == "stretch":
+        painter.drawImage(rect, image)
+        return
+    mode = (
+        Qt.AspectRatioMode.KeepAspectRatioByExpanding
+        if element.fit_mode == "cover"
+        else Qt.AspectRatioMode.KeepAspectRatio
+    )
+    scaled = image.scaled(rect.size().toSize(), mode, Qt.TransformationMode.SmoothTransformation)
+    target = QRectF(
+        rect.center().x() - scaled.width() / 2,
+        rect.center().y() - scaled.height() / 2,
+        scaled.width(),
+        scaled.height(),
+    )
+    painter.save()
+    painter.setClipRect(rect)
+    painter.drawImage(target, scaled)
+    painter.restore()
+
+
+def draw_custom_print_layout(
+    painter: QPainter,
+    page_rect: QRectF,
+    layout: PrintLayout,
+    context: dict[str, object],
+    *,
+    project_dir: Path | None = None,
+    field_view: FieldView | None = None,
+    scene_source: QRectF | None = None,
+) -> None:
+    painter.fillRect(page_rect, QColor(layout.background))
+    for element in sorted(layout.elements, key=lambda value: value.z_index):
+        if not element.visible:
+            continue
+        if element.element_type == "field" and (field_view is None or scene_source is None):
+            continue
+        headers = context.get("table_headers")
+        rows = context.get("table_rows")
+        if element.element_type == "table" and not isinstance(headers, list):
+            continue
+        rect = layout_element_rect(page_rect, element)
+        painter.save()
+        painter.setOpacity(element.opacity)
+        if abs(element.rotation_degrees) > 0.001:
+            center = rect.center()
+            painter.translate(center)
+            painter.rotate(element.rotation_degrees)
+            rect = QRectF(-rect.width() / 2, -rect.height() / 2, rect.width(), rect.height())
+        background = QColor(element.background)
+        border = QColor(element.border_color)
+        if background.alpha() > 0:
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(background)
+            painter.drawRoundedRect(rect, element.corner_radius, element.corner_radius)
+        if border.alpha() > 0 and element.border_width > 0:
+            painter.setPen(QPen(border, element.border_width))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawRoundedRect(rect, element.corner_radius, element.corner_radius)
+        content = rect.adjusted(element.padding, element.padding, -element.padding, -element.padding)
+        if element.element_type == "text":
+            painter.setPen(QColor(element.color))
+            painter.setFont(
+                QFont(
+                    element.font_family or ensure_export_font(),
+                    max(4, round(element.font_size)),
+                    QFont.Weight.Bold if element.bold else QFont.Weight.Normal,
+                    element.italic,
+                )
+            )
+            alignment = {
+                "left": Qt.AlignmentFlag.AlignLeft,
+                "center": Qt.AlignmentFlag.AlignHCenter,
+                "right": Qt.AlignmentFlag.AlignRight,
+            }[element.alignment]
+            painter.drawText(
+                content,
+                alignment | Qt.AlignmentFlag.AlignVCenter | Qt.TextFlag.TextWordWrap,
+                clean_text(expand_layout_text(element.text, context)),
+            )
+        elif element.element_type == "image":
+            draw_layout_image(painter, content, element, project_dir)
+        elif element.element_type == "field" and field_view is not None and scene_source is not None:
+            field_view.scene.render(painter, content, scene_source, Qt.AspectRatioMode.KeepAspectRatio)
+        elif element.element_type == "table" and isinstance(headers, list) and isinstance(rows, list):
+            safe_headers = [clean_text(value) for value in headers]
+            safe_rows = [[clean_text(value) for value in row] for row in rows if isinstance(row, list)]
+            widths = [content.width() / max(1, len(safe_headers))] * len(safe_headers)
+            row_height = max(18.0, min(34.0, content.height() / max(2, len(safe_rows) + 1)))
+            draw_clean_table(painter, content, safe_headers, safe_rows, widths, row_height=row_height)
+        elif element.element_type == "line":
+            painter.setPen(QPen(QColor(element.color), max(1.0, element.border_width or 2.0)))
+            painter.drawLine(content.left(), content.center().y(), content.right(), content.center().y())
+        painter.restore()
+
+
 def export_drill_sheet_pdf(
     output_path: Path,
     project: DrillProject,
     project_dir: Path | None = None,
     progress_callback: ProgressCallback | None = None,
+    options: PrintTemplateOptions | None = None,
 ) -> None:
     ensure_export_font()
     project.ensure_set_positions()
+    options = options or PrintTemplateOptions()
+    layout = custom_print_layout(options, "drill_sheet")
     writer = QPdfWriter(str(output_path))
     writer.setResolution(150)
-    writer.setPageLayout(
-        QPageLayout(
-            QPageSize(QPageSize.PageSizeId.Letter),
-            QPageLayout.Orientation.Landscape,
-            QMarginsF(0.35, 0.35, 0.35, 0.35),
-            QPageLayout.Unit.Inch,
-        )
-    )
+    configure_pdf_writer(writer, layout, QPageLayout.Orientation.Landscape, 0.35)
 
     sheet_field = FieldView()
     sheet_field.set_project(project, project_dir)
@@ -407,6 +610,28 @@ def export_drill_sheet_pdf(
             sheet_field.set_prop_states(set_export_prop_states(project, index))
 
             def draw_page(painter: QPainter, page_rect: QRectF) -> None:
+                if layout is not None:
+                    draw_custom_print_layout(
+                        painter,
+                        page_rect,
+                        layout,
+                        {
+                            "show_title": project.metadata.show_title,
+                            "page_title": options.title or f"{project.metadata.show_title} — {drill_set.name}",
+                            "page_subtitle": f"Counts {drill_set.start_count}-{drill_set.end_count}  •  {project.active_tempo(index):g} BPM",
+                            "set_name": drill_set.name,
+                            "counts": f"{drill_set.start_count}-{drill_set.end_count}",
+                            "tempo": f"{project.active_tempo(index):g} BPM",
+                            "director_notes": drill_set.director_notes,
+                            "page": index + 1,
+                            "pages": total,
+                            "footer": f"Set {index + 1} of {total}",
+                        },
+                        project_dir=project_dir,
+                        field_view=sheet_field,
+                        scene_source=scene_source,
+                    )
+                    return
                 content_rect = draw_header(
                     painter,
                     page_rect,
@@ -425,11 +650,18 @@ def export_drill_sheet_pdf(
                         ("Performers", str(len(project.dots))),
                     ],
                 )
-                field_panel = QRectF(
+                field_top = draw_director_notes(
+                    painter,
                     content_rect.left(),
                     chips_bottom,
                     content_rect.width(),
-                    content_rect.bottom() - chips_bottom - 4,
+                    drill_set.director_notes,
+                )
+                field_panel = QRectF(
+                    content_rect.left(),
+                    field_top,
+                    content_rect.width(),
+                    content_rect.bottom() - field_top - 4,
                 )
                 draw_field_panel(
                     painter,
@@ -449,21 +681,16 @@ def export_dot_book_pdf(
     project: DrillProject,
     progress_callback: ProgressCallback | None = None,
     options: PrintTemplateOptions | None = None,
+    project_dir: Path | None = None,
 ) -> None:
     ensure_export_font()
     project.ensure_set_positions()
     options = options or PrintTemplateOptions()
+    layout = custom_print_layout(options, "dot_book")
     dots = filtered_dots(project, options)
     writer = QPdfWriter(str(output_path))
     writer.setResolution(150)
-    writer.setPageLayout(
-        QPageLayout(
-            QPageSize(QPageSize.PageSizeId.Letter),
-            QPageLayout.Orientation.Portrait,
-            QMarginsF(0.45, 0.45, 0.45, 0.45),
-            QPageLayout.Unit.Inch,
-        )
-    )
+    configure_pdf_writer(writer, layout, QPageLayout.Orientation.Portrait, 0.45)
     pdf_painter = QPainter(writer)
     try:
         total = max(1, len(dots))
@@ -493,6 +720,28 @@ def export_dot_book_pdf(
                 )
 
             def draw_page(painter: QPainter, page_rect: QRectF) -> None:
+                if layout is not None:
+                    draw_custom_print_layout(
+                        painter,
+                        page_rect,
+                        layout,
+                        {
+                            "show_title": project.metadata.show_title,
+                            "page_title": options.title or f"{dot.name} — Dot Book",
+                            "page_subtitle": project.metadata.show_title,
+                            "performer": dot.name,
+                            "section": dot.section or "Unassigned",
+                            "instrument": dot.instrument or "-",
+                            "director_notes": "",
+                            "page": dot_index + 1,
+                            "pages": total,
+                            "footer": f"Performer {dot_index + 1} of {total}",
+                            "table_headers": ["Set", "Counts", "Yard Line", "Hash", "Move", "Tempo"],
+                            "table_rows": rows,
+                        },
+                        project_dir=project_dir,
+                    )
+                    return
                 content_rect = draw_header(
                     painter,
                     page_rect,
@@ -544,18 +793,15 @@ def export_staff_packet_pdf(
     ensure_export_font()
     project.ensure_set_positions()
     options = options or PrintTemplateOptions()
+    layout = custom_print_layout(
+        options,
+        "section_packet" if options.section_filter not in ("", "All") else "staff_packet",
+    )
     dots = filtered_dots(project, options)
     section_label = "" if options.section_filter in ("", "All") else f" - {options.section_filter}"
     writer = QPdfWriter(str(output_path))
     writer.setResolution(150)
-    writer.setPageLayout(
-        QPageLayout(
-            QPageSize(QPageSize.PageSizeId.Letter),
-            QPageLayout.Orientation.Landscape,
-            QMarginsF(0.35, 0.35, 0.35, 0.35),
-            QPageLayout.Unit.Inch,
-        )
-    )
+    configure_pdf_writer(writer, layout, QPageLayout.Orientation.Landscape, 0.35)
     pdf_painter = QPainter(writer)
     try:
         overview_rows = [
@@ -567,8 +813,32 @@ def export_staff_packet_pdf(
             ]
             for index, drill_set in enumerate(project.sets)
         ]
+        warnings = []
+        if options.include_warnings:
+            for set_index in range(len(project.sets)):
+                warnings.extend(detect_path_warnings(project, set_index, warning_limit=60))
+        packet_pages = 1 + (1 if warnings else 0) + len(project.sets)
 
         def draw_overview_page(painter: QPainter, page_rect: QRectF) -> None:
+            if layout is not None:
+                draw_custom_print_layout(
+                    painter,
+                    page_rect,
+                    layout,
+                    {
+                        "show_title": project.metadata.show_title,
+                        "page_title": options.title or project.metadata.show_title,
+                        "page_subtitle": f"Staff rehearsal packet{section_label}",
+                        "director_notes": "",
+                        "page": 1,
+                        "pages": packet_pages,
+                        "footer": f"Overview - Page 1 of {packet_pages}",
+                        "table_headers": ["Set", "Counts", "Length", "Tempo"],
+                        "table_rows": overview_rows,
+                    },
+                    project_dir=project_dir,
+                )
+                return
             content_rect = draw_header(painter, page_rect, project.metadata.show_title, f"Staff rehearsal packet{section_label}")
             draw_chips(
                 painter,
@@ -613,10 +883,6 @@ def export_staff_packet_pdf(
 
         draw_raster_pdf_page(writer, pdf_painter, draw_overview_page)
 
-        warnings = []
-        if options.include_warnings:
-            for set_index in range(len(project.sets)):
-                warnings.extend(detect_path_warnings(project, set_index, warning_limit=60))
         if warnings:
             writer.newPage()
             rows = [
@@ -629,6 +895,25 @@ def export_staff_packet_pdf(
             ]
 
             def draw_warnings_page(painter: QPainter, page_rect: QRectF) -> None:
+                if layout is not None:
+                    draw_custom_print_layout(
+                        painter,
+                        page_rect,
+                        layout,
+                        {
+                            "show_title": project.metadata.show_title,
+                            "page_title": "Conflict & Spacing Review",
+                            "page_subtitle": f"{project.metadata.show_title}{section_label}",
+                            "director_notes": "",
+                            "page": 2,
+                            "pages": packet_pages,
+                            "footer": f"Spacing review - Page 2 of {packet_pages}",
+                            "table_headers": ["Set", "Count", "Note"],
+                            "table_rows": rows,
+                        },
+                        project_dir=project_dir,
+                    )
+                    return
                 content_rect = draw_header(
                     painter,
                     page_rect,
@@ -669,17 +954,47 @@ def export_staff_packet_pdf(
             sheet_field.set_prop_states(set_export_prop_states(project, index))
 
             def draw_set_page(painter: QPainter, page_rect: QRectF) -> None:
+                page_number = index + 2 + (1 if warnings else 0)
+                if layout is not None:
+                    draw_custom_print_layout(
+                        painter,
+                        page_rect,
+                        layout,
+                        {
+                            "show_title": project.metadata.show_title,
+                            "page_title": drill_set.name,
+                            "page_subtitle": f"{project.metadata.show_title} - Counts {drill_set.start_count}-{drill_set.end_count} - {project.active_tempo(index):g} BPM",
+                            "set_name": drill_set.name,
+                            "counts": f"{drill_set.start_count}-{drill_set.end_count}",
+                            "tempo": f"{project.active_tempo(index):g} BPM",
+                            "director_notes": drill_set.director_notes,
+                            "page": page_number,
+                            "pages": packet_pages,
+                            "footer": f"Set {index + 1} of {total} - Page {page_number} of {packet_pages}",
+                        },
+                        project_dir=project_dir,
+                        field_view=sheet_field,
+                        scene_source=scene_source,
+                    )
+                    return
                 content_rect = draw_header(
                     painter,
                     page_rect,
                     f"{drill_set.name}",
                     f"{project.metadata.show_title} - counts {drill_set.start_count}-{drill_set.end_count} - {project.active_tempo(index):g} BPM",
                 )
-                field_panel = QRectF(
+                field_top = draw_director_notes(
+                    painter,
                     content_rect.left(),
                     content_rect.top(),
                     content_rect.width(),
-                    content_rect.height() - 4,
+                    drill_set.director_notes,
+                )
+                field_panel = QRectF(
+                    content_rect.left(),
+                    field_top,
+                    content_rect.width(),
+                    content_rect.bottom() - field_top - 4,
                 )
                 draw_field_panel(painter, sheet_field, field_panel, scene_source)
                 draw_footer(painter, page_rect, f"Set {index + 1} of {total}")
@@ -766,10 +1081,12 @@ def export_coordinate_summary_pdf(
     project: DrillProject,
     progress_callback: ProgressCallback | None = None,
     options: PrintTemplateOptions | None = None,
+    project_dir: Path | None = None,
 ) -> None:
     ensure_export_font()
     project.ensure_set_positions()
     options = options or PrintTemplateOptions()
+    layout = custom_print_layout(options, "coordinate_summary")
     dots = filtered_dots(project, options)
     section_label = "" if options.section_filter in ("", "All") else f" - {options.section_filter}"
     rows: list[list[str]] = []
@@ -795,14 +1112,7 @@ def export_coordinate_summary_pdf(
 
     writer = QPdfWriter(str(output_path))
     writer.setResolution(150)
-    writer.setPageLayout(
-        QPageLayout(
-            QPageSize(QPageSize.PageSizeId.Letter),
-            QPageLayout.Orientation.Landscape,
-            QMarginsF(0.35, 0.35, 0.35, 0.35),
-            QPageLayout.Unit.Inch,
-        )
-    )
+    configure_pdf_writer(writer, layout, QPageLayout.Orientation.Landscape, 0.35)
     rows_per_page = 23 if not options.compact else 29
     chunks = [rows[index : index + rows_per_page] for index in range(0, len(rows), rows_per_page)] or [[]]
     pdf_painter = QPainter(writer)
@@ -815,6 +1125,25 @@ def export_coordinate_summary_pdf(
                 progress_callback("Creating coordinate summary", page_index + 1, total)
 
             def draw_page(painter: QPainter, page_rect: QRectF, page_rows=chunk) -> None:
+                if layout is not None:
+                    draw_custom_print_layout(
+                        painter,
+                        page_rect,
+                        layout,
+                        {
+                            "show_title": project.metadata.show_title,
+                            "page_title": options.title or f"{project.metadata.show_title} - Coordinate Summary",
+                            "page_subtitle": f"All set coordinates{section_label}",
+                            "director_notes": "",
+                            "page": page_index + 1,
+                            "pages": total,
+                            "footer": f"Coordinate summary page {page_index + 1} of {total}",
+                            "table_headers": ["Set", "Counts", "Performer", "Section", "Yard Line", "Hash", "Move"],
+                            "table_rows": page_rows,
+                        },
+                        project_dir=project_dir,
+                    )
+                    return
                 content_rect = draw_header(
                     painter,
                     page_rect,

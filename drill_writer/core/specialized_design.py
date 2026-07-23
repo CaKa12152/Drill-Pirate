@@ -5,8 +5,10 @@ from math import atan2, cos, degrees, hypot, radians, sin
 
 from drill_writer.core.models import (
     ChoreographyEvent,
+    ContinuityInstruction,
     Dot,
     DrillProject,
+    MovementStyle,
     PerformerPhysicalLimits,
     PropAttachment,
     SurfaceDefinition,
@@ -41,8 +43,8 @@ def surface_presets() -> dict[str, SurfaceDefinition]:
         "high_school": SurfaceDefinition(
             name="High School Football Field",
             hash_style="high_school",
-            front_hash_yards=-8.8888,
-            back_hash_yards=8.8888,
+            front_hash_yards=-80 / 9,
+            back_hash_yards=80 / 9,
         ),
         "indoor": SurfaceDefinition(
             name="Indoor Performance Floor",
@@ -285,7 +287,7 @@ def analyze_specialized_safety(
     samples: int = 24,
     dot_ids: list[str] | None = None,
 ) -> list[SpecializedWarning]:
-    from drill_writer.core.animation import interpolate_dot_facings, interpolate_project
+    from drill_writer.core.animation import interpolate_dot_facings, interpolate_project, interpolate_props
 
     if not 0 <= set_index < len(project.sets):
         return []
@@ -297,9 +299,11 @@ def analyze_specialized_safety(
     ]
     positions = [interpolate_project(project, set_index, count) for count in counts]
     facings = [interpolate_dot_facings(project, set_index, count) for count in counts]
+    prop_states = [interpolate_props(project, set_index, count) for count in counts]
     warnings: list[SpecializedWarning] = []
     worst_by_rule: dict[tuple[str, str], tuple[float, float, float]] = {}
     spatial_by_rule: dict[tuple[str, str], tuple[float, float]] = {}
+    previous_travel_heading: dict[str, float] = {}
     for sample_index in range(1, len(counts)):
         span = max(0.0001, counts[sample_index] - counts[sample_index - 1])
         for dot_id in selected:
@@ -322,15 +326,39 @@ def analyze_specialized_safety(
             dx = (positions[sample_index][dot_id][0] - positions[sample_index - 1][dot_id][0]) / span
             dy = (positions[sample_index][dot_id][1] - positions[sample_index - 1][dot_id][1]) / span
             speed = hypot(dx, dy)
-            multiplier = limits.carry_speed_multiplier if performer_is_attached_to_prop(project, dot_id, counts[sample_index]) else 1.0
+            current_count = counts[sample_index]
+            style = drill_set.movement_styles.get(dot_id, MovementStyle.NORMAL)
+            style_speed_multiplier = {
+                MovementStyle.NORMAL: 1.0,
+                MovementStyle.HALF_TIME: 0.72,
+                MovementStyle.DOUBLE_TIME: 1.18,
+                MovementStyle.JAZZ_RUN: 1.45,
+                MovementStyle.HALT: 0.0,
+                MovementStyle.VISUAL: 0.35,
+            }.get(style, 1.0)
+            equipment = equipment_for_dot_at_count(project, dot_id, current_count)
+            equipment_speed_multiplier, equipment_turn_multiplier = equipment_mobility_multipliers(equipment)
+            attached = performer_is_attached_to_prop(project, dot_id, current_count)
+            prop_speed_multiplier = limits.carry_speed_multiplier if attached else 1.0
+            prop_turn_multiplier = 0.65 if attached else 1.0
+            speed_limit = limits.max_yards_per_count * style_speed_multiplier * equipment_speed_multiplier * prop_speed_multiplier
+            turn_limit = limits.max_rotation_degrees_per_count * equipment_turn_multiplier * prop_turn_multiplier
             facing = radians(facings[sample_index - 1].get(dot_id, 0.0))
             forward_x, forward_y = sin(facing), -cos(facing)
             forward = dx * forward_x + dy * forward_y
             lateral = abs(dx * forward_y - dy * forward_x)
             checks = (
-                ("speed", speed, limits.max_yards_per_count * multiplier),
-                ("backward", max(0.0, -forward), limits.max_backward_yards_per_count * multiplier),
-                ("lateral", lateral, limits.max_lateral_yards_per_count * multiplier),
+                ("speed", speed, speed_limit),
+                (
+                    "backward",
+                    max(0.0, -forward),
+                    limits.max_backward_yards_per_count * equipment_speed_multiplier * prop_speed_multiplier,
+                ),
+                (
+                    "lateral",
+                    lateral,
+                    limits.max_lateral_yards_per_count * equipment_speed_multiplier * prop_speed_multiplier,
+                ),
             )
             for rule, value, limit in checks:
                 if value > limit and value > worst_by_rule.get((dot_id, rule), (0.0, 0.0, 0.0))[0]:
@@ -338,19 +366,64 @@ def analyze_specialized_safety(
             start_facing = facings[sample_index - 1].get(dot_id, 0.0)
             end_facing = facings[sample_index].get(dot_id, start_facing)
             rotation = abs((end_facing - start_facing + 180.0) % 360.0 - 180.0) / span
-            if rotation > limits.max_rotation_degrees_per_count and rotation > worst_by_rule.get((dot_id, "rotation"), (0.0, 0.0, 0.0))[0]:
-                worst_by_rule[(dot_id, "rotation")] = (rotation, limits.max_rotation_degrees_per_count, counts[sample_index])
+            if rotation > turn_limit and rotation > worst_by_rule.get((dot_id, "rotation"), (0.0, 0.0, 0.0))[0]:
+                worst_by_rule[(dot_id, "rotation")] = (rotation, turn_limit, current_count)
+
+            if speed > 0.03:
+                travel_heading = degrees(atan2(dy, dx))
+                previous_heading = previous_travel_heading.get(dot_id)
+                if previous_heading is not None:
+                    direction_change = abs((travel_heading - previous_heading + 180.0) % 360.0 - 180.0) / span
+                    direction_limit = turn_limit * (0.75 if forward < -0.03 else 1.0)
+                    if direction_change > direction_limit and direction_change > worst_by_rule.get((dot_id, "direction_change"), (0.0, 0.0, 0.0))[0]:
+                        worst_by_rule[(dot_id, "direction_change")] = (direction_change, direction_limit, current_count)
+                previous_travel_heading[dot_id] = travel_heading
+
+            if style == MovementStyle.HALT and speed > 0.03:
+                if speed > worst_by_rule.get((dot_id, "halt_motion"), (0.0, 0.0, 0.0))[0]:
+                    worst_by_rule[(dot_id, "halt_motion")] = (speed, 0.0, current_count)
+
+            continuity = active_continuity_instruction(drill_set.continuity, dot_id, current_count)
+            if continuity is not None:
+                direction = continuity.direction.strip().lower().replace("-", "_").replace(" ", "_")
+                if direction in {"forward", "forwards", "forward_march"} and forward < -0.2:
+                    if abs(forward) > worst_by_rule.get((dot_id, "continuity_direction"), (0.0, 0.0, 0.0))[0]:
+                        worst_by_rule[(dot_id, "continuity_direction")] = (abs(forward), 0.2, current_count)
+                if direction in {"backward", "backwards", "backward_march"} and forward > 0.2:
+                    if forward > worst_by_rule.get((dot_id, "continuity_direction"), (0.0, 0.0, 0.0))[0]:
+                        worst_by_rule[(dot_id, "continuity_direction")] = (forward, 0.2, current_count)
+                if direction in {"crab", "slide", "lateral"} and abs(forward) > max(0.2, lateral):
+                    if abs(forward) > worst_by_rule.get((dot_id, "continuity_direction"), (0.0, 0.0, 0.0))[0]:
+                        worst_by_rule[(dot_id, "continuity_direction")] = (abs(forward), max(0.2, lateral), current_count)
+
+            active_events = [
+                event
+                for event in project.choreography
+                if dot_id in event.dot_ids and event.start_count <= current_count <= event.end_count
+            ]
+            if any(event.event_type == "toss" for event in active_events) and speed > 0.8 * equipment_speed_multiplier:
+                if speed > worst_by_rule.get((dot_id, "toss_travel"), (0.0, 0.0, 0.0))[0]:
+                    worst_by_rule[(dot_id, "toss_travel")] = (speed, 0.8 * equipment_speed_multiplier, current_count)
+            if any(event.event_type == "equipment_change" for event in active_events) and speed > 0.45:
+                if speed > worst_by_rule.get((dot_id, "equipment_change_travel"), (0.0, 0.0, 0.0))[0]:
+                    worst_by_rule[(dot_id, "equipment_change_travel")] = (speed, 0.45, current_count)
     labels = {
         "speed": ("travel speed", "Lengthen the move, use jazz run, or reassign the destination."),
         "backward": ("backward travel", "Reduce backward distance or change body/path direction."),
         "lateral": ("lateral travel", "Reduce slide/crab distance or add transition counts."),
         "rotation": ("facing rotation", "Spread the turn over more counts or lower the angle change."),
+        "direction_change": ("travel-direction change", "Round the corner with Bezier handles, reduce speed, or author a halt at the direction change."),
+        "halt_motion": ("movement while marked at halt", "Remove the halt style or hold the performer at a fixed position for this set."),
+        "continuity_direction": ("motion that disagrees with continuity", "Correct the continuity direction, facing, or authored travel path."),
+        "toss_travel": ("travel during a toss", "Reduce travel during the release/recovery window or lower the equipment demand."),
+        "equipment_change_travel": ("travel during an equipment change", "Stage the equipment change at a halt or greatly reduce movement speed."),
     }
     for (dot_id, rule), (value, limit, count) in sorted(worst_by_rule.items()):
         profile = physical_limits_for_dot(project, dot_id).profile_name
         label, suggestion = labels[rule]
-        unit = "deg/count" if rule == "rotation" else "yd/count"
-        warnings.append(SpecializedWarning("warning", rule, dot_id, count, f"{dot_id} reaches {value:.2f} {unit} {label}; {profile} limit is {limit:.2f}.", suggestion))
+        unit = "deg/count" if rule in {"rotation", "direction_change"} else "yd/count"
+        severity = "error" if limit <= 0.0001 or value > limit * 1.5 else "warning"
+        warnings.append(SpecializedWarning(severity, rule, dot_id, count, f"{dot_id} reaches {value:.2f} {unit} {label}; {profile} limit is {limit:.2f}.", suggestion))
     for (dot_id, rule), (distance_value, count) in sorted(spatial_by_rule.items()):
         if rule == "route":
             warnings.append(SpecializedWarning("warning", rule, dot_id, count, f"{dot_id} leaves the authored parade-route corridor by {distance_value:.2f} yd.", "Move the path inside the route band or widen the authored route."))
@@ -370,4 +443,81 @@ def analyze_specialized_safety(
                 recovery = min(item.start_count for item in next_events) - event.end_count
                 if recovery < limits.minimum_recovery_counts:
                     warnings.append(SpecializedWarning("warning", "recovery", dot_id, event.end_count, f"{dot_id} has {recovery:g} recovery counts after {event.name}; minimum is {limits.minimum_recovery_counts:g}.", "Move the next choreography event later or shorten the toss."))
+    for attachment in project.prop_attachments:
+        if not attachment.enabled or attachment.end_count < drill_set.start_count or attachment.start_count > drill_set.end_count:
+            continue
+        attached_ids = [dot_id for dot_id in attachment.dot_ids if dot_id in selected]
+        if not attached_ids:
+            continue
+        prop = next((item for item in project.props if item.id == attachment.prop_id), None)
+        prop_width = prop.width if prop else 4.0
+        safe_rotation_rate = max(12.0, 70.0 / max(1.0, prop_width / 4.0))
+        measured_rotation_rate = abs(attachment.rotation_rate)
+        measured_rotation_count = max(float(drill_set.start_count), attachment.start_count)
+        for sample_index in range(1, len(counts)):
+            if not attachment.start_count <= counts[sample_index] <= attachment.end_count:
+                continue
+            previous_state = prop_states[sample_index - 1].get(attachment.prop_id)
+            current_state = prop_states[sample_index].get(attachment.prop_id)
+            if previous_state is None or current_state is None:
+                continue
+            span = max(0.0001, counts[sample_index] - counts[sample_index - 1])
+            rotation_delta = abs(
+                (float(current_state.get("rotation", 0.0)) - float(previous_state.get("rotation", 0.0)) + 180.0)
+                % 360.0
+                - 180.0
+            ) / span
+            if rotation_delta > measured_rotation_rate:
+                measured_rotation_rate = rotation_delta
+                measured_rotation_count = counts[sample_index]
+        if measured_rotation_rate > safe_rotation_rate:
+            for dot_id in attached_ids:
+                warnings.append(
+                    SpecializedWarning(
+                        "error" if measured_rotation_rate > safe_rotation_rate * 1.5 else "warning",
+                        "prop_rotation",
+                        dot_id,
+                        measured_rotation_count,
+                        f"{dot_id} is assigned to rotate prop '{attachment.name}' at {measured_rotation_rate:.1f} deg/count; size-adjusted limit is {safe_rotation_rate:.1f}.",
+                        "Lower prop rotation speed, add handlers, or increase the movement duration.",
+                    )
+                )
+        required_handlers = max(1, int(max(0.0, prop_width - 6.0) // 6.0) + 1)
+        if attachment.mode in {"carry", "push", "rotate"} and len(attachment.dot_ids) < required_handlers:
+            warnings.append(
+                SpecializedWarning(
+                    "warning",
+                    "prop_handlers",
+                    attached_ids[0],
+                    max(float(drill_set.start_count), attachment.start_count),
+                    f"Prop '{attachment.name}' is {prop_width:.1f} yd wide but has {len(attachment.dot_ids)} handler(s); recommended minimum is {required_handlers}.",
+                    "Assign more handlers or document a rehearsed engineering exception.",
+                )
+            )
     return warnings
+
+
+def equipment_mobility_multipliers(equipment: str) -> tuple[float, float]:
+    descriptor = equipment.strip().lower()
+    if not descriptor:
+        return (1.0, 1.0)
+    if any(value in descriptor for value in ("large flag", "swing flag", "banner")):
+        return (0.78, 0.65)
+    if any(value in descriptor for value in ("flag", "rifle", "sabre", "saber")):
+        return (0.9, 0.82)
+    if any(value in descriptor for value in ("shield", "frame", "equipment cart", "prop")):
+        return (0.72, 0.6)
+    return (0.95, 0.9)
+
+
+def active_continuity_instruction(
+    instructions: list[ContinuityInstruction],
+    dot_id: str,
+    count: float,
+) -> ContinuityInstruction | None:
+    matches = [
+        instruction
+        for instruction in instructions
+        if dot_id in instruction.dot_ids and instruction.start_count <= count <= instruction.end_count
+    ]
+    return max(matches, key=lambda item: (item.start_count, item.end_count, item.id), default=None)

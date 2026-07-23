@@ -40,14 +40,17 @@ class AssignmentScore:
     maximum_distance: float
     crossings: int
     spacing_conflicts: int
+    speed_violations: int = 0
+    minimum_spacing: float = 999.0
 
     @property
     def weighted_score(self) -> float:
         return (
-            self.total_distance
-            + self.maximum_distance * 2.5
-            + self.crossings * 30.0
-            + self.spacing_conflicts * 18.0
+            self.spacing_conflicts * 10_000_000.0
+            + self.speed_violations * 500_000.0
+            + self.crossings * 20_000.0
+            + self.maximum_distance * self.maximum_distance * 8.0
+            + self.total_distance
         )
 
 
@@ -57,6 +60,11 @@ class TransitionCandidate:
     label: str
     positions: dict[str, Point]
     score: AssignmentScore
+    changed_marchers: int = 0
+    improvement: float = 0.0
+    reassignment_details: tuple[str, ...] = ()
+    preserves_picture: bool = True
+    recommended: bool = False
 
 
 def selection_center(positions: Iterable[Point]) -> Point:
@@ -109,7 +117,9 @@ def transition_candidates(
     starts_by_id = transition_start_positions(project, set_index)
     starts = [starts_by_id.get(dot_id, (0.0, 0.0)) for dot_id in valid_ids]
 
-    assignments: list[tuple[str, str, list[int]]] = []
+    assignments: list[tuple[str, str, list[int]]] = [
+        ("current", "Current destination ownership", list(range(len(valid_ids))))
+    ]
     shortest = (
         minimum_cost_target_assignment(starts, targets)
         if len(valid_ids) <= 220
@@ -145,6 +155,15 @@ def transition_candidates(
     )
     assignments.append(("lowest_collision", "Lowest collision risk", lowest_collision))
 
+    baseline_quality = project_assignment_quality(
+        project,
+        set_index,
+        valid_ids,
+        targets,
+        list(range(len(valid_ids))),
+        min_spacing=min_spacing,
+    )
+    baseline_score = assignment_score_from_quality(baseline_quality)
     candidates: list[TransitionCandidate] = []
     for key, label, assignment in assignments:
         assigned_targets = [targets[index] for index in assignment]
@@ -157,20 +176,39 @@ def transition_candidates(
             assignment,
             min_spacing=min_spacing,
         )
+        score = assignment_score_from_quality(quality)
+        changed_indices = [index for index, target_index in enumerate(assignment) if target_index != index]
+        details = tuple(
+            f"{valid_ids[index]} takes {valid_ids[assignment[index]]}'s destination"
+            for index in changed_indices[:12]
+        )
         candidates.append(
             TransitionCandidate(
                 key=key,
                 label=label,
                 positions=positions,
-                score=AssignmentScore(
-                    total_distance=quality.total_distance,
-                    maximum_distance=quality.maximum_distance,
-                    crossings=quality.crossings,
-                    spacing_conflicts=quality.collisions,
-                ),
+                score=score,
+                changed_marchers=len(changed_indices),
+                improvement=baseline_score.weighted_score - score.weighted_score,
+                reassignment_details=details,
+                preserves_picture=sorted(positions.values()) == sorted(targets),
             )
         )
-    return sorted(candidates, key=lambda candidate: candidate.score.weighted_score)
+    candidates.sort(key=lambda candidate: candidate.score.weighted_score)
+    if candidates:
+        candidates[0].recommended = True
+    return candidates
+
+
+def assignment_score_from_quality(quality: AssignmentQuality) -> AssignmentScore:
+    return AssignmentScore(
+        total_distance=quality.total_distance,
+        maximum_distance=quality.maximum_distance,
+        crossings=quality.crossings,
+        spacing_conflicts=quality.collisions,
+        speed_violations=quality.speed_violations,
+        minimum_spacing=quality.minimum_spacing,
+    )
 
 
 def assignment_for_mode(

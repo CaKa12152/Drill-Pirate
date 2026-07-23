@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import time
 import zipfile
@@ -34,9 +35,11 @@ from drill_writer.core.models import (
 
 PROJECTS_DIR = Path.home() / "Documents" / "Drill Pirate Projects"
 PROJECT_SCHEMA_VERSION = 6
+PROJECT_SCHEMA_HISTORY = tuple(range(1, PROJECT_SCHEMA_VERSION + 1))
 PROJECT_JSON_FILES = ("metadata.json", "dots.json", "props.json", "sets.json", "show.json")
 REQUIRED_PROJECT_FILES = ("metadata.json", "dots.json", "sets.json")
 BACKUP_DIR_NAME = ".drill_pirate_backups"
+SAVE_TRANSACTION_DIR_NAME = ".drill_pirate_save_transaction"
 MAX_PROJECT_BACKUPS = 40
 COMMON_INSTRUMENT_PREFIXES = {
     "flute": "F",
@@ -76,6 +79,13 @@ InstrumentationEntry = tuple[str, int] | tuple[str, str, int]
 
 
 class ProjectLoadError(Exception):
+    def __init__(self, project_dir: Path, message: str, cause: Exception | None = None) -> None:
+        super().__init__(message)
+        self.project_dir = project_dir
+        self.cause = cause
+
+
+class ProjectSaveError(Exception):
     def __init__(self, project_dir: Path, message: str, cause: Exception | None = None) -> None:
         super().__init__(message)
         self.project_dir = project_dir
@@ -362,23 +372,24 @@ def save_project(
     backup_reason: str = "manual",
     backup_min_interval_seconds: int = 0,
 ) -> None:
-    project_dir.mkdir(parents=True, exist_ok=True)
-    (project_dir / "audio").mkdir(exist_ok=True)
-    (project_dir / "props").mkdir(exist_ok=True)
-    project.ensure_set_positions()
-    if backup:
-        create_project_backup(
-            project_dir,
-            reason=backup_reason,
-            min_interval_seconds=backup_min_interval_seconds,
-        )
-    write_json(project_dir / "metadata.json", project.metadata.to_json())
-    write_json(project_dir / "dots.json", {"dots": [dot.to_json() for dot in project.dots]})
-    write_json(project_dir / "props.json", {"props": [prop.to_json() for prop in project.props]})
-    write_json(project_dir / "sets.json", {"sets": [drill_set.to_json() for drill_set in project.sets]})
-    write_json(
-        project_dir / "show.json",
-        {
+    try:
+        project_dir.mkdir(parents=True, exist_ok=True)
+        (project_dir / "audio").mkdir(exist_ok=True)
+        (project_dir / "props").mkdir(exist_ok=True)
+        recover_interrupted_save(project_dir)
+        project.ensure_set_positions()
+        if backup:
+            create_project_backup(
+                project_dir,
+                reason=backup_reason,
+                min_interval_seconds=backup_min_interval_seconds,
+            )
+        payloads = {
+            "metadata.json": project.metadata.to_json(),
+            "dots.json": {"dots": [dot.to_json() for dot in project.dots]},
+            "props.json": {"props": [prop.to_json() for prop in project.props]},
+            "sets.json": {"sets": [drill_set.to_json() for drill_set in project.sets]},
+            "show.json": {
             "title": project.metadata.show_title,
             "version": PROJECT_SCHEMA_VERSION,
             "schema_version": PROJECT_SCHEMA_VERSION,
@@ -395,11 +406,28 @@ def save_project(
             "choreography": [event.to_json() for event in project.choreography],
             "prop_attachments": [attachment.to_json() for attachment in project.prop_attachments],
             "physical_limits": [limits.to_json() for limits in project.physical_limits],
-        },
-    )
+            },
+        }
+        write_project_transaction(project_dir, payloads)
+    except ProjectSaveError:
+        raise
+    except OSError as exc:
+        raise ProjectSaveError(
+            project_dir,
+            "The project could not be saved. Existing project files were left intact. "
+            f"Check free disk space and write permission for '{project_dir}'. Details: {exc}",
+            exc,
+        ) from exc
+    except Exception as exc:
+        raise ProjectSaveError(
+            project_dir,
+            f"The project could not be saved safely: {exc}",
+            exc,
+        ) from exc
 
 
 def migrate_project_files(project_dir: Path) -> None:
+    recover_interrupted_save(project_dir)
     missing = [name for name in REQUIRED_PROJECT_FILES if not (project_dir / name).exists()]
     if missing:
         raise ProjectLoadError(project_dir, f"Project is missing required file(s): {', '.join(missing)}")
@@ -645,15 +673,122 @@ def read_json(path: Path) -> dict[str, Any]:
 def write_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temp_path = path.with_name(f".{path.name}.tmp")
-    temp_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-    temp_path.replace(path)
+    try:
+        _write_bytes_durable(temp_path, json.dumps(payload, indent=2).encode("utf-8"))
+        temp_path.replace(path)
+    finally:
+        if temp_path.exists():
+            temp_path.unlink(missing_ok=True)
 
 
 def write_bytes_atomic(path: Path, data: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temp_path = path.with_name(f".{path.name}.tmp")
-    temp_path.write_bytes(data)
-    temp_path.replace(path)
+    try:
+        _write_bytes_durable(temp_path, data)
+        temp_path.replace(path)
+    finally:
+        if temp_path.exists():
+            temp_path.unlink(missing_ok=True)
+
+
+def write_project_transaction(project_dir: Path, payloads: dict[str, dict[str, Any]]) -> None:
+    file_names = [name for name in PROJECT_JSON_FILES if name in payloads]
+    transaction_dir = project_dir / SAVE_TRANSACTION_DIR_NAME
+    if transaction_dir.exists():
+        recover_interrupted_save(project_dir)
+    new_dir = transaction_dir / "new"
+    old_dir = transaction_dir / "old"
+    new_dir.mkdir(parents=True, exist_ok=False)
+    old_dir.mkdir(parents=True, exist_ok=False)
+    existed = {name: (project_dir / name).exists() for name in file_names}
+    try:
+        for file_name in file_names:
+            encoded = json.dumps(payloads[file_name], indent=2).encode("utf-8")
+            _write_bytes_durable(new_dir / file_name, encoded)
+        write_json(
+            transaction_dir / "manifest.json",
+            {"files": file_names, "existed": existed, "schema_version": PROJECT_SCHEMA_VERSION},
+        )
+        for file_name in file_names:
+            destination = project_dir / file_name
+            previous = old_dir / file_name
+            staged = new_dir / file_name
+            if destination.exists():
+                destination.replace(previous)
+            staged.replace(destination)
+        (transaction_dir / "manifest.json").replace(transaction_dir / "committed.json")
+    except Exception as exc:
+        try:
+            recover_interrupted_save(project_dir)
+        except Exception as recovery_exc:
+            raise ProjectSaveError(
+                project_dir,
+                "The save was interrupted and automatic rollback also failed. "
+                f"Do not overwrite the project; restore a previous save. Details: {recovery_exc}",
+                recovery_exc,
+            ) from exc
+        raise ProjectSaveError(
+            project_dir,
+            "The save could not be completed. Drill Pirate restored the previous project files. "
+            f"Check free disk space and folder permissions. Details: {exc}",
+            exc,
+        ) from exc
+    else:
+        shutil.rmtree(transaction_dir, ignore_errors=True)
+
+
+def recover_interrupted_save(project_dir: Path) -> bool:
+    transaction_dir = project_dir / SAVE_TRANSACTION_DIR_NAME
+    if not transaction_dir.exists():
+        return False
+    if (transaction_dir / "committed.json").exists():
+        shutil.rmtree(transaction_dir, ignore_errors=True)
+        if transaction_dir.exists():
+            raise ProjectLoadError(
+                project_dir,
+                "A completed save could not finish cleanup. Close other programs using the project folder and try again.",
+            )
+        return True
+    manifest_path = transaction_dir / "manifest.json"
+    old_dir = transaction_dir / "old"
+    recovered = False
+    try:
+        manifest = read_json(manifest_path) if manifest_path.exists() else {}
+        raw_files = manifest.get("files", PROJECT_JSON_FILES)
+        file_names = [str(name) for name in raw_files if str(name) in PROJECT_JSON_FILES]
+        if not file_names:
+            file_names = list(PROJECT_JSON_FILES)
+        existed_payload = manifest.get("existed", {})
+        existed = existed_payload if isinstance(existed_payload, dict) else {}
+        for file_name in file_names:
+            destination = project_dir / file_name
+            previous = old_dir / file_name
+            if previous.exists():
+                destination.unlink(missing_ok=True)
+                previous.replace(destination)
+            elif existed.get(file_name) is False:
+                destination.unlink(missing_ok=True)
+        recovered = True
+    except OSError as exc:
+        raise ProjectLoadError(
+            project_dir,
+            "Drill Pirate found an interrupted save but could not restore the previous files. "
+            "Use Restore Previous Save before editing this project.",
+            exc,
+        ) from exc
+    finally:
+        if recovered:
+            shutil.rmtree(transaction_dir, ignore_errors=True)
+    return True
+
+
+def _write_bytes_durable(path: Path, data: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("wb") as file:
+        file.write(data)
+        file.flush()
+        os.fsync(file.fileno())
 
 
 def safe_folder_name(title: str) -> str:
