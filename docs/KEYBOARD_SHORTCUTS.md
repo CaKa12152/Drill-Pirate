@@ -115,6 +115,8 @@ Ctrl+Shift+P
 | Command | Shortcut |
 | --- | --- |
 | Toggle Snap Align | `Ctrl+Alt+N` |
+| Enable Drill Grid Snapping | `Ctrl+Alt+Shift+N` |
+| Configure Drill Grid | `Ctrl+Shift+G` |
 | Analyze Paths | `Ctrl+Alt+A` |
 | Optimize Selected Spot Assignment | `Ctrl+Alt+R` |
 | Clear Selected Paths | `Ctrl+Alt+Shift+R` |

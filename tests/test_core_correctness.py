@@ -59,13 +59,13 @@ class CoordinateAuditTests(unittest.TestCase):
     def test_yardline_and_hash_language(self) -> None:
         self.assertEqual(format_drill_coordinate(5, FRONT_HASH_YARDS), ("On 45 S2", "On FH"))
         self.assertEqual(format_drill_coordinate(-5, BACK_HASH_YARDS), ("On 45 S1", "On BH"))
-        self.assertEqual(format_drill_coordinate(0, 0), ("On 50", "On Mid"))
+        self.assertEqual(format_drill_coordinate(0, 0), ("On 50", "10.75 steps behind FH"))
         self.assertEqual(
             format_drill_coordinate(5.625, FRONT_HASH_YARDS + 0.625),
             ("1 step outside 45 S2", "1 step behind FH"),
         )
-        self.assertEqual(format_drill_coordinate(0, -25), ("On 50", "2.75 steps behind FS"))
-        self.assertEqual(format_drill_coordinate(0, 3), ("On 50", "4.75 steps behind Mid"))
+        self.assertEqual(format_drill_coordinate(0, -25), ("On 50", "29.25 steps in front of FH"))
+        self.assertEqual(format_drill_coordinate(0, 3), ("On 50", "5.75 steps in front of BH"))
 
 
 class CollisionAwareAssignmentTests(unittest.TestCase):

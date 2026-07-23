@@ -39,6 +39,7 @@ This page is a full reference of the major Drill Pirate features currently repre
 | Shortcut editor | Search commands and assign custom keyboard shortcuts. |
 | Dark/light/custom themes | Switch themes and customize app background, panels, inputs, buttons, text, borders, accent, selection, and font size. |
 | Field modes | Choose White Field, Inverted Field, or Grass Field rendering. |
+| Center-field logo | Use the Drill Pirate emblem or upload custom branding, then control visibility, opacity, and size across the editor, previews, and exports. |
 | Marcher symbols | Switch performer rendering between filled circles, hollow circles, X marks, plus marks, squares, diamonds, and triangles. |
 | Update channel | Choose Stable Releases or Beta / Pre-Releases from Settings. |
 | Less panel crowding | Workspaces and floating docks allow large-show layouts on smaller screens. |
@@ -48,8 +49,10 @@ This page is a full reference of the major Drill Pirate features currently repre
 | Feature | Description |
 | --- | --- |
 | Field rendering modes | White, inverted black/white, and grass-style field presentations designed for drill readability. |
+| Center-field emblem | Renders default or custom branding below field markings, with full color on grass, shaded grayscale on white, inverted grayscale on black, and adjustable opacity and size. |
 | Zoom and pan | Navigate the field without changing drill coordinates. |
-| Yard/grid system | 5-yard references and smaller grid subdivisions. |
+| Yard/grid system | 5-yard references, field markings, and an optional exact marching-step lattice. |
+| Drill Grid & Snap | Project-level 6-to-5, 8-to-5, 12-to-5, 16-to-5, or custom X/Y spacing with clean point/full-line overlays, custom origin, unique-node snapping, and top-toolbar access. |
 | Drill coordinates | Converts internal coordinates to performer-readable drill sheet language. |
 | Selection overlays | Shows selected performers, ghosts, previews, paths, and handles. |
 | Prop rendering | Displays scalable imported prop images. |
@@ -61,6 +64,7 @@ This page is a full reference of the major Drill Pirate features currently repre
 | Feature | Description |
 | --- | --- |
 | Editable dots | ID, name, X/Y, color, section, instrument, rank, equipment, and layer. |
+| Step-safe performer sizing | Editor, form previews, home cards, minimap, thumbnails, PDFs, and MP4 frames use a consistent footprint that leaves a visible gap at one 8-to-5 step. |
 | Default red color | New/default marchers use red unless changed. |
 | Group color assignment | Batch color selected marchers or filtered groups. |
 | Searchable list | Search marchers by identifying metadata. |
@@ -83,7 +87,8 @@ This page is a full reference of the major Drill Pirate features currently repre
 | Feature | Description |
 | --- | --- |
 | Image import | Imports a prop image into the project `props\` folder. |
-| In-app prop designer | Draws props with rectangles, circles/ovals, lines, text, colors, stroke controls, exact field sizing, and anchor-based shape scaling. |
+| Prop Studio | Professional real-yard artboard with layers, images, text, freehand pen and shape tools, snapping, rulers, direct resize/rotation handles, alignment, opacity, undo/redo, and field-scale preview ranges. |
+| Editable prop documents | Saves high-resolution transparent PNG artwork plus a reusable `.dpprop.json` source document with embedded image layers. |
 | Scalable props | Props store width, height, rotation, and position. |
 | Set-based prop movement | Props store per-set state like marchers. |
 | Preview/export support | Props appear in home previews and printed field images. |
@@ -125,6 +130,7 @@ This page is a full reference of the major Drill Pirate features currently repre
 | Count ranges | Each set stores start and end count. |
 | Tempo override | Set-specific BPM can override project tempo. |
 | Transition mode | Linear, ease-in-out, or curved transition metadata. |
+| Director's Notes | Stores visual descriptions, production intent, and rehearsal guidance on each set for drill-sheet and staff-packet output. |
 | Dot positions | Each set stores all performer endpoints. |
 | Prop positions | Each set stores all prop states. |
 
@@ -186,6 +192,8 @@ This page is a full reference of the major Drill Pirate features currently repre
 | Feature | Description |
 | --- | --- |
 | Live previews | Formation tools show ghosts and travel lines before applying. |
+| Grid-guided form construction | Marcher movement and on-form preview draggers snap to exact grid nodes while generated form spacing remains smooth and unquantized. |
+| Functional previous-set ghost | Shows the prior set as a faint, non-editable, symbol-aware layer and updates across set changes and playback boundaries. |
 | Contextual controls | Only the active tool's settings are shown. |
 | On-field handles | Drag tool handles directly on the field when supported. |
 | Stable identity transforms | Scale, rotate, warp, and mirror keep each performer attached to the transformed version of their own spot. |
@@ -208,7 +216,7 @@ This page is a full reference of the major Drill Pirate features currently repre
 | Repeat Last Action | Press F4 to repeat the latest transform, formation, batch metadata edit, property paint, or repeatable set operation. |
 | Parameterized macros | Macros capture command context, selection, tool values, and counts, then replay with repeat loops and optional set advancement. |
 | Ripple edit scopes | Apply transforms, timing, facing, movement styles, paths, and painted properties to the current set, all following sets, a selected range, until the next keyframe, or every matching formation. |
-| Snap align | Shows purple horizontal/vertical snap guides while dragging. |
+| Smart alignment guides | Shows temporary purple yard-line, hash, center, and equal-distance guides while dragging. |
 | Interval tools | Align and normalize spacing for selected marchers. |
 
 ## Constraint System
@@ -259,9 +267,10 @@ This page is a full reference of the major Drill Pirate features currently repre
 | --- | --- |
 | MP4 Video | Renders show animation and audio through ffmpeg. |
 | Project ZIP | Packages project data, audio, props, and JSON for sharing/backup. |
-| Drill Sheet PDF | Landscape set pages with field images and set details. |
+| Drill Sheet PDF | Landscape set pages with field images, set details, and Director's Notes. |
 | Dot Book PDF | Performer coordinate packet. |
-| Staff Packet PDF | Summary, warnings, and large set pages for staff review. |
+| Staff Packet PDF | Summary, warnings, Director's Notes, and large set pages for staff review. |
+| PDF Layout Designer | Visually designs every PDF family with drag/resize elements, arbitrary text and images, field/table data, portrait or landscape pages, colors, layers, locks, dynamic tokens including `{director_notes}`, and reusable presets. |
 | Coordinate CSV | All performer coordinates for every set. |
 
 ## Data Safety

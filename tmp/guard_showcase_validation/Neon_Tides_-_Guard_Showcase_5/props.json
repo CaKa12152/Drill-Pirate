@@ -1,0 +1,48 @@
+{
+  "props": [
+    {
+      "id": "sail1",
+      "name": "Neon Sail 1",
+      "image_file": "props/neon_sail_1.png",
+      "x": -44,
+      "y": -20,
+      "width": 9.0,
+      "height": 5.2,
+      "rotation": -12.0,
+      "layer": "Scenic Sails"
+    },
+    {
+      "id": "sail2",
+      "name": "Neon Sail 2",
+      "image_file": "props/neon_sail_2.png",
+      "x": -44,
+      "y": 20,
+      "width": 9.0,
+      "height": 5.2,
+      "rotation": 12.0,
+      "layer": "Scenic Sails"
+    },
+    {
+      "id": "sail3",
+      "name": "Neon Sail 3",
+      "image_file": "props/neon_sail_3.png",
+      "x": 44,
+      "y": -20,
+      "width": 9.0,
+      "height": 5.2,
+      "rotation": -12.0,
+      "layer": "Scenic Sails"
+    },
+    {
+      "id": "sail4",
+      "name": "Neon Sail 4",
+      "image_file": "props/neon_sail_4.png",
+      "x": 44,
+      "y": 20,
+      "width": 9.0,
+      "height": 5.2,
+      "rotation": 12.0,
+      "layer": "Scenic Sails"
+    }
+  ]
+}

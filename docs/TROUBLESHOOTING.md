@@ -146,6 +146,14 @@ If it never completes:
 4. Avoid exporting to a protected folder.
 5. Try a simpler audio file path with no unusual characters.
 
+## Director's Notes Do Not Appear in a PDF
+
+- Confirm the notes were entered for the intended set in `Inspector > Sets > Set Details`.
+- Default Drill Sheet and Staff Packet set pages include notes automatically.
+- Custom PDF layouts must contain a text element using `{director_notes}` where the notes should appear.
+- Dot Books and coordinate summaries do not insert set-level Director's Notes automatically because those pages summarize multiple sets.
+- Save the project and regenerate the PDF after changing the layout.
+
 ## SVG Import Fails
 
 Try:

@@ -68,7 +68,7 @@ from geometry_helpers import make_shape_points
   "description": "What the plugin does.",
   "entry": "plugin.py",
   "api_version": "1.0",
-  "min_app_version": "v2.7.0",
+  "min_app_version": "v2.8.0",
   "permissions": ["ui", "project_read"]
 }
 ```
@@ -84,7 +84,7 @@ Manifest fields:
 | `description` | Recommended | Short explanation. |
 | `entry` | Yes | Python file to load, usually `plugin.py`. |
 | `api_version` | Recommended | Plugin API version. Current supported API is `1.0`. |
-| `min_app_version` | Recommended | Minimum Drill Pirate version, such as `v2.7.0`. |
+| `min_app_version` | Recommended | Minimum Drill Pirate version, such as `v2.8.0`. |
 | `permissions` | Recommended | Declared access needs shown in the trust prompt. |
 
 ## API Compatibility

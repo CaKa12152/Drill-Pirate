@@ -151,7 +151,8 @@ Stores every set and all set-specific positions/timing/path data.
       "movement_styles": {},
       "continuity": [],
       "motion_ribbons": [],
-      "transition": "linear"
+      "transition": "linear",
+      "director_notes": "Winds expand through the window while the guard frames the release."
     }
   ]
 }
@@ -177,6 +178,7 @@ Set fields:
 | `continuity` | Count-ranged performer instructions for step size, travel direction, body/horn facing, and written notes. |
 | `motion_ribbons` | Shared Bézier route nodes, member IDs, facing behavior, and sampling precision for group transitions. |
 | `transition` | `linear`, `ease_in_out`, or `curved`. |
+| `director_notes` | Free-form visual, production, or rehearsal notes for this set. Printed on drill-sheet and staff-packet set pages. |
 
 ## `show.json`
 
@@ -245,6 +247,7 @@ Large-show features are stored in the backward-compatible `workflow` object in `
 - `hierarchical_groups`: nested group records with parent IDs, marcher IDs, and lock state.
 - `linked_formations`: master/instance group relationships and repeated/mirrored mode.
 - `formation_variations`: named set snapshots containing positions, facings, paths, timing windows, and movement styles.
+- `drill_grid`: project-level enable state, horizontal/vertical steps per 5 yards, origin, and overlay visibility used by field and formation snapping.
 
 These records do not replace the canonical marcher or set data. Detaching a linked formation only disables future propagation; it does not move marchers or delete coordinates.
 

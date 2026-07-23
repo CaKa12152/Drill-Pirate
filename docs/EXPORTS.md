@@ -13,6 +13,9 @@ The export dialog includes:
 - Drill Sheet PDF.
 - Dot Book PDF.
 - Staff Packet PDF.
+- Section Packet PDF.
+- Coordinate Summary PDF.
+- PDF Layout Designer.
 - Coordinate CSV.
 - Project ZIP.
 - Set ffmpeg.exe.
@@ -66,9 +69,31 @@ Typical contents:
 - Count range.
 - Tempo.
 - Field image.
-- Set notes/details relevant to performers and staff.
+- Director's Notes and set details relevant to staff.
 
 The field image is designed to take most of the page.
+
+## PDF Layout Designer
+
+Every PDF type has an independent project layout. Open it from `File > Export > PDF Layout Designer`, or select **Customize PDF Layout** from that PDF's options window.
+
+Editable page properties:
+
+- Portrait or landscape orientation.
+- Letter, Legal, A4, or A3 page size.
+- Page background color.
+
+Editable elements:
+
+- Free text with font, size, bold/italic, color, alignment, opacity, and dynamic tokens.
+- PNG, JPG, BMP, WebP, or SVG images with contain, cover, or stretch fitting.
+- Live field views and export data tables.
+- Rectangles and lines for custom branding and page structure.
+- Position, size, layer order, borders, visibility, and locking.
+
+Drag an element to move it and drag its purple lower-right corner to resize it. The numeric property panel provides exact percentage-based positioning. Images are copied into the project's `print_assets` folder so layouts remain portable with project ZIP exports.
+
+Available text tokens include `{show_title}`, `{page_title}`, `{page_subtitle}`, `{set_name}`, `{counts}`, `{tempo}`, `{director_notes}`, `{performer}`, `{section}`, `{instrument}`, `{page}`, `{pages}`, and `{footer}`. `{director_notes}` resolves to the active set's visual/rehearsal notes on Drill Sheet and Staff Packet set pages and resolves blank on pages without a single active set. Layout presets can be saved and reused between projects. Batch exports use the saved project layout for each PDF type.
 
 ## Dot Book PDF
 
@@ -92,6 +117,7 @@ Typical contents:
 - Show summary.
 - Set pages.
 - Larger field images.
+- Set-specific Director's Notes.
 - Path/safety warning summaries.
 - Key metadata needed for rehearsal planning.
 

@@ -21,6 +21,7 @@ from drill_writer.core.models import (
     ProjectMetadata,
     Prop,
     PropAttachment,
+    SurfaceDefinition,
 )
 from drill_writer.core.project_io import PROJECT_SCHEMA_VERSION, create_project_folder, load_project, save_project
 from drill_writer.core.specialized_design import (
@@ -64,17 +65,34 @@ class SurfaceAndCoordinateTests(unittest.TestCase):
         indoor = surface_preset("indoor")
         parade = surface_preset("parade")
         staging = surface_preset("staging")
-        self.assertAlmostEqual(college.front_hash_yards, -6.6665)
-        self.assertAlmostEqual(high_school.front_hash_yards, -8.8888)
+        self.assertAlmostEqual(college.front_hash_yards, -20 / 3)
+        self.assertAlmostEqual(high_school.front_hash_yards, -80 / 9)
         self.assertEqual(indoor.surface_type, "indoor")
         self.assertGreaterEqual(len(parade.route_points), 2)
         self.assertEqual(staging.surface_type, "staging")
+
+    def test_legacy_rounded_hashes_normalize_to_exact_field_geometry(self) -> None:
+        surface = SurfaceDefinition.from_json(
+            {
+                "surface_type": "football",
+                "hash_style": "college",
+                "height_yards": 53.333,
+                "front_hash_yards": -6.6665,
+                "back_hash_yards": 6.6665,
+            }
+        )
+        self.assertEqual(surface.height_yards, 160 / 3)
+        self.assertEqual(surface.front_hash_yards, -20 / 3)
+        self.assertEqual(surface.back_hash_yards, 20 / 3)
 
     def test_custom_surface_bounds_and_coordinates_are_surface_aware(self) -> None:
         indoor = surface_preset("indoor")
         self.assertTrue(surface_contains_point(indoor, (14.9, 9.9)))
         self.assertFalse(surface_contains_point(indoor, (16, 0)))
-        self.assertEqual(format_surface_coordinate(indoor, 2.5, -3), ("X +2.50 yd from center", "Y -3.00 yd from center"))
+        self.assertEqual(
+            format_surface_coordinate(indoor, 2.5, -3),
+            ("2.50 yd Side 2 of Center Line", "3.00 yd in front of Center"),
+        )
         football = surface_preset("high_school")
         self.assertEqual(format_surface_coordinate(football, 0, football.front_hash_yards), ("On 50", "On FH"))
 

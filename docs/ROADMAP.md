@@ -1,6 +1,6 @@
 # Drill Pirate Roadmap
 
-Drill Pirate is currently **Alpha v2.7.0**. It already supports complete show creation, advanced formation design, synchronized playback, specialized performance tracking, printing, video export, plugins, project recovery, and in-app updates. The remaining roadmap focuses on reliability, validation, collaboration, and release operations rather than adding disconnected tools.
+Drill Pirate is currently **Alpha v2.8.0**. It supports complete show creation, advanced formation design, synchronized playback, specialized performance tracking, customizable printing, video export, plugins, project recovery, and in-app updates. The remaining roadmap focuses on real-world validation, collaboration, accessibility, distribution, and release operations rather than adding disconnected tools.
 
 ## Current Product Baseline
 
@@ -23,12 +23,13 @@ Drill Pirate is currently **Alpha v2.7.0**. It already supports complete show cr
 - Phrase-based set generation, automated set suggestions, and transition planning.
 - Storyboard planning for movements, scenes, production notes, and visual pacing.
 - Continuity instructions, movement style, facing, horn direction, choreography, and equipment events by count range.
+- Director's Notes attached to each set for visual intent, production cues, and staff drill-book pages.
 
 ### Specialized Production
 
 - Configurable football fields, high-school and college hashes, indoor floors, parade routes, and custom staging surfaces.
 - Guard equipment and choreography tracks, including tosses and equipment changes.
-- Movable props, performer attachments, carrying/pushing/rotation behavior, and an in-app prop designer.
+- Movable props, performer attachments, carrying/pushing/rotation behavior, and a layered real-yard Prop Studio with field-scale preview.
 - Front ensemble and drum-major stand placement.
 - Performer-specific physical limits and instrument-aware movement warnings.
 
@@ -39,6 +40,7 @@ Drill Pirate is currently **Alpha v2.7.0**. It already supports complete show cr
 - Searchable roster, selection sets, hierarchical groups, section locking, multi-set editing, bulk properties, and keyboard drill entry.
 - Responsive editor context bar, standard menu organization, workflow-ordered design pages, and dark/light themes.
 - Set thumbnails, minimap, preview cache, background analysis, and lazy project preview loading.
+- Configurable 6:5, 8:5, 12:5, 16:5, and custom drill grids with official-hash priority snapping and snap-aware on-field form handles.
 
 ### Data, Export, and Extensibility
 
@@ -46,6 +48,7 @@ Drill Pirate is currently **Alpha v2.7.0**. It already supports complete show cr
 - Crash logs and one-click bug-report bundles with project and environment diagnostics.
 - MP4 export with background progress, cancellation, quality options, audio, and optional title card.
 - Drill sheets, staff packets, section packets, dot books, coordinate summaries, CSV, project ZIP, print preview, and batch profiles.
+- Per-project visual PDF layouts with arbitrary text/images, field and table elements, reusable presets, branding, page-size/orientation control, and dynamic set-note tokens.
 - Versioned plugin API, compatibility gating, trust and permission prompts, plugin isolation, examples, and diagnostics.
 - Stable/beta update channels, release notes, checksum verification, ZIP validation, failed-update rollback, and skip/ignore controls.
 
@@ -53,29 +56,49 @@ Drill Pirate is currently **Alpha v2.7.0**. It already supports complete show cr
 
 ### P0 — Reliability and Data Confidence
 
-- Add long-running playback soak tests at 200, 300, 400, and 500 performers.
-- Add fixture-based regression projects for large SVG forms, Follow the Leader, props, choreography, tempo maps, and custom surfaces.
-- Expand save/load and migration tests across every previously published project schema.
-- Stress-test autosave recovery during interrupted writes, low disk space, and damaged JSON files.
-- Add deterministic export tests for every PDF, CSV, ZIP, and MP4 profile.
-- Audit all user-facing failures so they produce actionable dialogs instead of silent failures or console-only messages.
+Implemented in the v2.8 development cycle:
+
+- [x] Automated playback matrix and configurable timed soak runner for 200, 300, 400, and 500 performers.
+- [x] Fixture projects for large SVG-derived forms, Follow the Leader, moving props, choreography, tempo maps, and custom surfaces.
+- [x] Save/load and migration coverage for every published project schema from v1 through v6.
+- [x] Transactional multi-file saves with rollback tests for interrupted commits, low disk space, damaged JSON, and incomplete cleanup.
+- [x] Deterministic visual/content tests for drill sheets, dot books, section packets, staff packets, coordinate summaries, CSV, project ZIP, and MP4 profiles.
+- [x] Actionable Save, Autosave, Recovery, Project Open, Update, Bug Report, Shortcut, and Export failure dialogs.
+
+Remaining operational validation:
+
+- Run multi-hour soak sessions on the minimum and recommended Windows hardware profiles.
+- Validate real MP4 output against the supported FFmpeg version matrix in addition to deterministic mocked encoding tests.
+- Add damaged-audio, device-disconnect, GPU-reset, and forced-process-termination scenarios to release testing.
 
 ### P0 — Drill Correctness
 
-- Improve conflict explanations when fixed start and destination pictures make a collision unavoidable.
-- Add guided repair options that preview destination swaps before applying them.
-- Strengthen validation for manually edited Bezier paths and group motion ribbons.
-- Add biomechanical turn-rate, backward-march, equipment, prop, and direction-change modeling beyond simple yards-per-count limits.
-- Audit coordinate rounding and every printed coordinate against real dot-book expectations.
-- Add reference test cases for side-to-side, front/back hash, yard-line, end-zone, indoor, and parade coordinates.
+Implemented in the v2.8 development cycle:
+
+- [x] Structured repairable/unavoidable explanations for fixed start, fixed destination, no-go, path, and timing conflicts.
+- [x] Guided destination-repair previews with exact owner swaps, before/apply scoring, and destination-picture preservation.
+- [x] Structural and geometric validation for manually edited Bezier paths and generated Group Motion Ribbons.
+- [x] Facing-relative turn-rate, backward/lateral movement, continuity, equipment, choreography, and prop-handling safety models.
+- [x] Deterministic quarter-step football rounding and one shared coordinate formatter for every performer-facing export.
+- [x] Reference regression cases for Side 1/Side 2, hashes, sidelines, yard lines, goal lines, end zones, indoor floors, parade routes, and CSV output.
+
+Remaining field validation:
+
+- Compare generated coordinates with independent staff dot-book samples from multiple college, high-school, indoor, and parade programs.
+- Calibrate instrument/equipment/prop limits with qualified visual staff and performer feedback before presenting them as organization-specific policy.
 
 ### P0 — Playback and Audio
 
-- Improve frame scheduling diagnostics and expose dropped-frame counters.
-- Add automatic quality reduction or render caching when a show exceeds the real-time performance budget.
-- Expand Windows audio-device recovery testing for disconnects, default-device changes, Bluetooth latency, and device invalidation.
-- Add waveform and playback tests for long files, compressed files, variable bitrate, and unusual sample rates.
-- Verify pause, seek, loop, tempo-map changes, and set boundaries under sustained UI load.
+- [x] Rolling frame scheduling diagnostics with displayed FPS, dropped-deadline/adaptive-skip counters, render percentiles, audio-clock anomaly tracking, and cache statistics.
+- [x] Automatic visual-quality reduction, throttled auxiliary panel work, label suppression for large casts, frame caching, and stable quality recovery without changing show timing.
+- [x] Windows audio endpoint recreation and retry coverage for disconnects, default-device changes, selected-device fallback/return, Bluetooth stabilization, and device invalidation.
+- [x] Background waveform regression coverage for long files, compressed/VBR timestamp mapping, unusual sample rates, multiple PCM depths, and channel layouts without requiring FFmpeg.
+- [x] Sustained UI-load verification for pause, seek, loop, tempo-map mapping, set boundaries, cache reuse, and editing-quality restoration.
+
+Remaining release qualification:
+
+- Run the packaged-EXE Windows hardware matrix in `PLAYBACK_AUDIO_RELIABILITY.md` on wired, USB, HDMI, and at least two Bluetooth endpoints before each Beta release.
+- Record machine-specific 30-minute soak baselines for integrated graphics and discrete-GPU systems at 300 and 500 performers.
 
 ### P1 — User Validation
 
@@ -89,7 +112,7 @@ Drill Pirate is currently **Alpha v2.7.0**. It already supports complete show cr
 
 ### Collaboration and Review
 
-- Add comments and review notes attached to sets, counts, performers, paths, and storyboard scenes.
+- Expand set-level Director's Notes into threaded review comments attached to counts, performers, paths, and storyboard scenes.
 - Add project comparison and change summaries between saved versions.
 - Add safer formation, timing-map, prop, and continuity transfer between projects.
 - Explore read-only review packages for staff without the full editor.
@@ -105,10 +128,10 @@ Drill Pirate is currently **Alpha v2.7.0**. It already supports complete show cr
 
 ### Printing and Performer Materials
 
-- Expand template customization for headers, branding, field crop, coordinate wording, and continuity placement.
+- Validate the visual PDF layout system across common printers, duplex workflows, page sizes, field crops, and shared staff templates.
 - Add individual performer packet batching with section-specific instructions and equipment notes.
 - Add instructor packets combining conflicts, continuity, storyboard notes, and rehearsal priorities.
-- Add print-template presets that can be shared between projects and users.
+- Add portable print-template packs that can be shared between users without copying an entire project.
 - Continue visual audits for common printers, page sizes, and duplex workflows.
 
 ### Plugin Ecosystem

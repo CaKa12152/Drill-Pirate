@@ -7,13 +7,13 @@ This page is for maintainers distributing public alpha builds and collecting use
 Current app version:
 
 ```text
-Alpha v2.7.0
+Alpha v2.8.0
 ```
 
 Git tags should use the `v` prefix:
 
 ```text
-v2.7.0
+v2.8.0
 ```
 
 The in-app updater compares GitHub release tags against the app's current version.
@@ -43,6 +43,8 @@ Before publishing a release:
 
 The app uses the GitHub latest release description for the post-update release log.
 
+The complete prepared changelog for this release is in [`RELEASE_NOTES_2.8.0.md`](RELEASE_NOTES_2.8.0.md). Its contents can be pasted directly into the GitHub release description.
+
 ## Build Command
 
 ```powershell
@@ -52,7 +54,7 @@ The app uses the GitHub latest release description for the post-update release l
 Expected build artifact:
 
 ```text
-dist\Drill Pirate Alpha v2.7.0 Windows.zip
+dist\Drill Pirate Alpha v2.8.0 Windows.zip
 ```
 
 ## What to Upload
@@ -64,7 +66,7 @@ Do not upload only the raw `.exe` unless you have a separate installer that incl
 ## Release Description Template
 
 ```markdown
-## Drill Pirate Alpha v2.7.0
+## Drill Pirate Alpha v2.8.0
 
 ### Added
 - ...
@@ -89,7 +91,7 @@ Ask users for:
 
 ```markdown
 ## Version
-Alpha v2.7.0
+Alpha v2.8.0
 
 ## Windows Version
 Example: Windows 11 23H2
@@ -169,7 +171,7 @@ The update system supports:
 ## Known Distribution Gaps
 
 - No signed installer yet.
-- No auto rollback if an update fails midway.
+- Rollback protects validated ZIP copy/install failures, but cannot yet recover from every OS-level interruption or power loss.
 - No crash-reporting service.
 - No formal plugin marketplace or plugin signing.
 - No macOS package yet.

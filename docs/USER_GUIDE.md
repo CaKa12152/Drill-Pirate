@@ -200,7 +200,11 @@ Props store:
 
 Imported images are copied into the project `props\` folder. Props are included in project previews and export images.
 
-The in-app Prop Designer can create props from rectangles, circles/ovals, lines, text, fill/stroke colors, exact yard sizing, and anchor-based shape scaling. Saved designs become transparent PNG props in the project `props\` folder.
+The in-app **Prop Studio** is a layered, field-scaled design workspace. Set the prop's real width and height first, then use yard rulers, adjustable snapping, rectangles, ellipses, lines, freehand paths, text, and imported images. Selected layers have direct resize and rotation handles plus exact X/Y/width/height, rotation, opacity, fill, stroke, lock, alignment, duplicate, and ordering controls.
+
+The **Field Preview** tab renders the actual design—not a placeholder—at its real field dimensions and initial position. Switch among White, Inverted, and Grass fields and use full-field, 60-yard, 30-yard, or 20-yard detail ranges. A six-foot performer reference appears beside the prop for scale.
+
+Prop Studio supports undo/redo, keyboard nudging, multi-layer selection, visibility and locking, zoom-to-fit, and high-resolution transparent output. Saving creates both the PNG used by the show and an editable `.dpprop.json` document in the project `props\` folder. Use `Open` in Prop Studio to continue editing a saved source document.
 
 Use `Fit Form to Selected Prop` to scale selected marchers to fit a selected prop while preserving the selected form shape.
 
@@ -239,8 +243,11 @@ Each set contains:
 - Count-level keyframes.
 - Movement styles.
 - Transition mode.
+- Director's Notes describing visual intent or rehearsal priorities.
 
 Use the set list to add, remove, copy, rename, reorder, and edit counts/tempo. If a set does not specify its own tempo, it uses the project tempo or timing-map tempo active at that count.
+
+Enter **Director's Notes** at the bottom of `Inspector > Sets > Set Details`. Notes save with the selected set, support application-level undo/redo, appear in the set-list tooltip, and print above that set's field chart in Drill Sheet and Staff Packet PDFs. Use this area for visual descriptions, staging intent, production cues, or rehearsal focus rather than performer-specific coordinate instructions.
 
 The Ripple Edit Scope controls whether marcher edits affect only the current set, all following sets, a selected set range, sets until the next keyframe, or every set containing the same normalized formation. The same scope is honored by transforms, movement timing, facing, movement styles, path edits, and the property paintbrush.
 
@@ -370,11 +377,30 @@ Enable `Face the direction of travel throughout the move` to create per-count fa
 
 ## Snapping and Alignment
 
-Enable Snap Align when dragging marchers to show purple snap guides.
+### Drill Grid & Snap
+
+Use the always-visible `Grid Off` / `Grid 8:5` control in the top editor toolbar, the `Drill Grid & Snap` card at the top of the **Forms** tab, or `Tools > Configure Drill Grid...`.
+
+- `8-to-5` creates eight equal marching steps in each 5-yard interval: `0.625 yd` or `22.5 in` per step.
+- Standard presets include 6-to-5, 8-to-5, 12-to-5, and 16-to-5.
+- Custom grids can use different horizontal and vertical step spacing plus an offset origin.
+- When enabled, a clean purple snap-point lattice replaces the normal drafting subdivisions while official field markings remain visible. A full-line grid remains available in the grid dialog.
+- Marcher drags, multi-selection moves, transform handles, draggable formation handles, and generated form spots snap to exact nodes.
+- Formation handles remain attached to the previewed form. Curve draggers sit on the actual curve instead of floating at invisible Bezier control points.
+- Built-in forms, SVG forms, and plugin forms use unique grid nodes so enabled snapping never stacks multiple marchers on one point.
+- Official football front/back hashes remain exact priority snap rows at both 8-to-5 and 16-to-5, even though college hash offsets are not whole center-origin grid intervals.
+- Dot-card and coordinate-sheet instructions always use standard 8-to-5 steps, even when a different construction grid is displayed.
+- Grid settings are saved with the project and are undoable.
+
+Use `Ctrl+Shift+G` to configure the grid and `Ctrl+Alt+Shift+N` to toggle it.
+
+### Smart Alignment Guides
+
+Enable **Smart Alignment Guides** when dragging marchers to show temporary purple alignment guides. This is separate from the exact drill-step grid.
 
 Snap targets include:
 
-- Yard-line/grid alignment.
+- Yard-line alignment.
 - Horizontal alignment with performers.
 - Vertical alignment with performers.
 
@@ -396,6 +422,10 @@ Constraint tools include:
 - Apply Constraints.
 
 Active constraints are enforced while constrained marchers are moved.
+
+### Previous-Set Ghost
+
+Enable **Ghost Previous Set** in the **View** tab to show the previous set as a faint, non-editable formation behind the current picture. The ghost updates when changing sets or crossing playback boundaries and follows the selected marcher-symbol and field-theme settings.
 
 ## Path Safety
 
@@ -457,8 +487,12 @@ Export options:
 - Drill Sheet PDF.
 - Dot Book PDF.
 - Staff Packet PDF.
+- Section Packet PDF.
+- Coordinate Summary PDF.
 - Coordinate CSV.
 - Project ZIP.
+
+Choose **PDF Layout Designer** in the Export window, or choose **Customize PDF Layout** inside any PDF's options. Layouts support movable/resizable text, images, field views, data tables, rectangles, and lines; portrait/landscape Letter, Legal, A4, and A3 pages; colors, typography, opacity, borders, image fitting, layers, locking, dynamic project tokens, and reusable presets. Use `{director_notes}` to place the active set's notes in a custom Drill Sheet or Staff Packet layout. Project images are copied into `print_assets`, and each PDF type keeps its own project layout.
 
 See [Exports](EXPORTS.md) for details.
 
@@ -476,10 +510,12 @@ Tabs:
 | --- | --- |
 | General | Switch Dark/Light Mode, choose White/Inverted/Grass field mode, choose marcher symbol style, toggle tooltips, and choose Stable Releases or Beta / Pre-Releases update channel. |
 | Appearance | Customize UI font size plus app background, panels, surfaces, inputs, buttons, text, borders, accent, and selection colors. |
+| Field Logo | Show or hide center-field branding, upload a custom PNG/JPG/WebP image, restore the Drill Pirate logo, and adjust opacity and size. |
 | Devices | Choose Windows Default or a specific audio output device. |
 
 Use `Refresh` in the Devices tab after plugging in headphones or changing audio hardware.
 Use `Load Defaults For Selected Theme` in Appearance to return to clean Dark or Light colors.
+Uploaded field logos are copied into Drill Pirate's local app data, so the original image can be moved afterward. Transparent PNG files produce the cleanest field result. Custom logos use full color on Grass fields, shaded grayscale on White fields, and inverted grayscale on Inverted fields.
 
 ## Plugins
 
